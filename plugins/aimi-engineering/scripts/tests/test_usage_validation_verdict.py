@@ -121,9 +121,13 @@ def test_usage_validation_verdict_evidence_and_cap(root):
     a = answer(root, block(good(findings=[finding(evidence=bad)])))
     assert a["droppedEvidence"] == 7
     assert a["outcome"] == "pass"
-    f = a["reported"][0]
+    # A severe finding with no counted evidence does not block, and is not
+    # silently downgraded into `reported` either: it is listed for a person.
+    assert a["reported"] == [] and a["bugs"] == []
+    f = a["unevidenced"][0]
     assert f["capped"] is True and f["severity"] == 2 and f["ratedSeverity"] == 3
     assert f["key"] == "CH-US-001:1:H1"
+    assert "no evidence" in a["reason"]
     ok = [{"type": "command", "path": "shot.png", "exitCode": 1}]
     a = answer(root, block(good(findings=[finding(evidence=ok)])))
     assert a["outcome"] == "fails" and a["bugs"][0]["capped"] is False and a["droppedEvidence"] == 0
@@ -153,7 +157,8 @@ def test_usage_validation_verdict_classification(root):
 def test_usage_validation_verdict_outcome_ladder(root):
     a = answer(root, block(good(origins=["http://example.com", "http://localhost"])))
     assert a["outcome"] == "tooling-failed" and "example.com" in a["reason"]
-    for origin in ["http://localhost@evil.com", "ftp://localhost", "http://localhost.evil.com", "localhost"]:
+    for origin in ["http://localhost@evil.com", "ftp://localhost", "http://localhost.evil.com", "localhost",
+                   "http://127.0.0.2:3000", "http://u@localhost:3000", "ws://127.0.0.2"]:
         assert answer(root, block(good(origins=[origin])))["outcome"] == "tooling-failed"
     for origin in ["http://127.0.0.1:80", "ws://[::1]:3000/x", "https://localhost"]:
         assert answer(root, block(good(origins=[origin])))["outcome"] == "pass"
@@ -203,3 +208,23 @@ def test_usage_validation_verdict_function_and_help(root):
     assert "usage-validation-verdict --required-file" in h and "--reproduced" in h and "--accepted" in h
     src = open(CLI).read()
     assert "--brainstorm-path --required-file --evidence-dir" in src
+
+
+def test_usage_validation_verdict_unevidenced_severe_findings_are_listed_not_dropped(root):
+    # Chrome mode returns screenshots inline; a validator that saved none
+    # still has its severe findings in front of a person.
+    b = good(charters=charters("CH-US-001", "CH-US-002", "EX-1"), findings=[
+        finding(cid="CH-US-001", step=1, kind="bug", severity=4, evidence=[]),
+        finding(cid="CH-US-001", step=2, kind="decision", severity=3, evidence=[]),
+        finding(cid="EX-1", step=1, kind="bug", severity=3, evidence=[]),
+        finding(cid="CH-US-001", step=3, kind="bug", severity=2, evidence=[]),
+        finding(cid="CH-US-001", step=4, kind="unmapped", severity=4, evidence=[]),
+    ])
+    a = answer(root, block(b), "--reproduced", "EX-1:1:H1")
+    assert a["outcome"] == "pass"
+    assert [f["key"] for f in a["unevidenced"]] == ["CH-US-001:1:H1", "CH-US-001:2:H1", "EX-1:1:H1"]
+    assert all(f["capped"] and f["severity"] == 2 for f in a["unevidenced"])
+    assert [f["ratedSeverity"] for f in a["unevidenced"]] == [4, 3, 3]
+    assert [f["key"] for f in a["reported"]] == ["CH-US-001:3:H1"]
+    assert [f["key"] for f in a["unmapped"]] == ["CH-US-001:4:H1"]
+    assert a["bugs"] == [] and a["decisions"] == [] and a["unconfirmed"] == []

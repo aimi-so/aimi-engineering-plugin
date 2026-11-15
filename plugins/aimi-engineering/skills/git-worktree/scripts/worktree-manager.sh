@@ -1952,9 +1952,41 @@ _dev_server_read_all() {
 # (e.g. two `.aimi/`-sharing project_roots in a multi-repo layout) never
 # collide on the same key, even though WORKTREE_DIR is recomputed fresh in
 # every invocation from that call's own CWD (git rev-parse --show-toplevel).
+#
+# `--root` names the checkout the command runs from (GIT_ROOT) instead, keyed
+# by its own path: serve start --root, serve stop --root and serve status
+# --root all resolve it here.
 _dev_server_key() {
   local worktree_name="$1"
-  realpath -m "$WORKTREE_DIR/$worktree_name"
+  if [[ "$worktree_name" == "--root" ]]; then
+    realpath -m "$GIT_ROOT"
+  else
+    realpath -m "$WORKTREE_DIR/$worktree_name"
+  fi
+}
+
+# The one target parse of serve stop and serve status: `--root` alone, or a
+# validated worktree name. Sets _SERVE_TARGET_NAME (how messages name it) and
+# _SERVE_TARGET_KEY (its dev-server.json key); a usage error exits 1.
+_serve_target() {
+  local verb="$1"
+  shift
+  if [[ "${1:-}" == "--root" ]]; then
+    if [[ $# -gt 1 ]]; then
+      echo -e "${RED}Error: serve $verb --root takes no worktree name${NC}" >&2
+      exit 1
+    fi
+    _SERVE_TARGET_NAME="checkout root"
+  else
+    if [[ -z "${1:-}" ]]; then
+      echo -e "${RED}Error: Worktree name required${NC}" >&2
+      echo "Usage: worktree-manager.sh serve $verb <worktree-name> | serve $verb --root" >&2
+      exit 1
+    fi
+    validate_branch_name "$1"
+    _SERVE_TARGET_NAME="$1"
+  fi
+  _SERVE_TARGET_KEY=$(_dev_server_key "$1")
 }
 
 # Print the entry (compact JSON) for a dev-server.json key on stdout, or
@@ -2087,6 +2119,246 @@ _serve_deps_gate() {
   return 0
 }
 
+# The serve_start helpers below run inside its call and read and set its
+# locals by bash's dynamic scope (worktree_name, dev_server_key, serve_dir,
+# command_arg, port_given, port_arg, stop_hint, aimi_root, state_file,
+# safe_name, log_file, port, leader_pid, dev_framework). A helper that has
+# answered the call sets serve_done=true and serve_start returns at once.
+# They are never called with && or ||, so set -e still applies inside them.
+
+# Locate .aimi/ and prepare the state file and log path for dev_server_key.
+_serve_open_state() {
+  if ! aimi_root=$(find_aimi_root); then
+    echo -e "${RED}Error: Could not locate a .aimi/ directory searching upward from $(pwd)${NC}" >&2
+    serve_done=true
+    return 0
+  fi
+
+  state_file="$aimi_root/.aimi/state/dev-server.json"
+
+  # log_file's path only depends on dev_server_key, so it's resolved here —
+  # before the reuse check below — rather than after it, alongside pid_file.
+  # touch + chmod unconditionally on every call (reuse or fresh start) so the
+  # log never inherits the process umask and any permission drift on an
+  # existing file self-heals on the next serve_start.
+  mkdir -p "$aimi_root/.aimi/state"
+  safe_name="${dev_server_key//\//_}"
+  log_file="$aimi_root/.aimi/state/.dev-server-${safe_name}.log"
+  touch "$log_file" && chmod 600 "$log_file"
+  return 0
+}
+
+# Reuse, refuse or discard the entry registered for dev_server_key.
+_serve_reuse() {
+  # Reuse a registered entry only when it survives BOTH gates: identity
+  # (pid alive AND its identity token matches what was recorded at start —
+  # see dev_server_entry_is_ours) and, only once identity passes, a fresh
+  # port-ownership re-check (the registered port may have been taken over by
+  # something else in the interval since the last write). Any other case —
+  # dead pid, mismatched/missing identity, or a port no longer held by that
+  # pid's process group — is discarded exactly like an absent entry, and
+  # falls through to the fresh-start flow below.
+  local existing_entry
+  existing_entry=$(_dev_server_get_entry "$state_file" "$dev_server_key")
+  if [[ -n "$existing_entry" ]]; then
+    local existing_pid existing_port existing_identity
+    existing_pid=$(printf '%s' "$existing_entry" | jq -r '.pid // empty')
+    existing_port=$(printf '%s' "$existing_entry" | jq -r '.port // empty')
+    existing_identity=$(printf '%s' "$existing_entry" | jq -r '.identity // empty')
+
+    local existing_dir existing_command
+    existing_dir=$(printf '%s' "$existing_entry" | jq -r '.dir // "."')
+    existing_command=$(printf '%s' "$existing_entry" | jq -r '.command // empty')
+
+    local reused=false
+    if [[ -n "$existing_pid" ]] && dev_server_entry_is_ours "$existing_pid" "$existing_identity"; then
+      # Identity match alone isn't enough to reuse: re-resolve who currently
+      # holds the registered port's LISTEN socket and require its pgid to
+      # match the recorded pid, mirroring the fresh-start ownership check
+      # further below (listener pid -> pgid == leader pid).
+      local reuse_listener_pid reuse_listener_pgid
+      reuse_listener_pid=$(_port_listener_pid "$existing_port")
+      reuse_listener_pgid=""
+      [[ -n "$reuse_listener_pid" ]] && reuse_listener_pgid=$(ps -o pgid= -p "$reuse_listener_pid" 2>/dev/null | tr -d ' ')
+      if [[ -n "$reuse_listener_pgid" ]] && [[ "$reuse_listener_pgid" == "$existing_pid" ]]; then
+        reused=true
+      else
+        echo -e "${YELLOW}⚠️  Registered dev server for '$worktree_name' (pid $existing_pid) no longer holds port ${existing_port}; discarding the stale entry and starting fresh${NC}" >&2
+      fi
+    elif [[ -n "$existing_pid" ]] && _is_pid_alive "$existing_pid"; then
+      echo -e "${YELLOW}⚠️  pid $existing_pid registered for '$worktree_name' is alive but its identity is missing or does not match this tool's record (likely a recycled pid); treating the entry as dead and starting fresh${NC}" >&2
+    fi
+
+    if [[ "$reused" == true ]]; then
+      # A live entry is reused only when it was started with this same
+      # command; a default-mode entry (no recorded command) is another one.
+      # It is neither reused nor stopped, since stopping a server this call
+      # did not start is the caller's decision.
+      if [[ "$existing_command" != "$command_arg" ]]; then
+        printf '%b%s%b\n' "$YELLOW" "⚠️  Dev server for '$worktree_name' is already running ${existing_command:+with command '$existing_command'}${existing_command:-as the default dev server (no recorded command)}, not with this command; leaving it running. Run '$stop_hint' first" "$NC" >&2
+        serve_done=true
+      return 0
+      fi
+      if [[ "$port_given" == true && "$existing_port" != "$((10#$port_arg))" ]]; then
+        printf '%b%s%b\n' "$YELLOW" "⚠️  Dev server for '$worktree_name' is already running on port ${existing_port}, not ${port_arg}; leaving it running. Run '$stop_hint' first" "$NC" >&2
+        serve_done=true
+      return 0
+      fi
+      if [[ "$existing_dir" != "$serve_dir" ]]; then
+        printf '%b%s%b\n' "$YELLOW" "⚠️  Dev server for '$worktree_name' is already running for directory '$existing_dir', not '$serve_dir'; leaving it running. Run 'serve stop $worktree_name' first to serve another directory" "$NC" >&2
+        serve_done=true
+      return 0
+      fi
+      # Cap the log on reuse: a server kept alive across phase-mode waves
+      # otherwise keeps the same log file growing for the life of the
+      # container. Truncate to the final half in place (reopen the existing
+      # path with `>`, never delete-then-recreate) so a still-writing dev
+      # server's own fd offset isn't left pointing at an unlinked inode.
+      if [[ -f "$log_file" ]]; then
+        local log_size
+        log_size=$(wc -c < "$log_file" 2>/dev/null | tr -d ' ')
+        if [[ -n "$log_size" ]] && [[ "$log_size" -gt "$DEV_SERVER_LOG_MAX_BYTES" ]]; then
+          local log_tail
+          log_tail=$(tail -c "$((DEV_SERVER_LOG_MAX_BYTES / 2))" "$log_file")
+          printf '%s\n' "$log_tail" > "$log_file"
+          chmod 600 "$log_file"
+        fi
+      fi
+      echo -e "${GREEN}✓ Dev server already running for '$worktree_name' at http://127.0.0.1:${existing_port} (pid $existing_pid)${NC}" >&2
+      echo "http://127.0.0.1:${existing_port}"
+      serve_done=true
+      return 0
+    fi
+
+    _dev_server_remove_entry "$state_file" "$dev_server_key"
+  fi
+  return 0
+}
+
+# A fixed --port is taken or refused; otherwise the first free port.
+_serve_pick_port() {
+  if [[ "$port_given" == true ]]; then
+    # A fixed port is taken or refused, never swapped for another one.
+    port=$((10#$port_arg))
+    if ! _port_free "$port"; then
+      echo -e "${RED}Error: Port $port is busy on 127.0.0.1; not trying another port${NC}" >&2
+      exit 3
+    fi
+  elif ! port=$(_pick_free_port); then
+    echo -e "${RED}Error: No free 127.0.0.1 port found for dev server (scanned $DEV_SERVER_BASE_PORT-$((DEV_SERVER_BASE_PORT + DEV_SERVER_PORT_SCAN_LIMIT)))${NC}" >&2
+    serve_done=true
+    return 0
+  fi
+  return 0
+}
+
+# Ownership, identity and loopback-bind checks for the server just started,
+# then the dev-server.json entry and the URL on stdout.
+_serve_adopt() {
+  # Ownership check: the listening socket must belong to the process group we
+  # just spawned, not a stale or unrelated foreign process on that port.
+  local listener_pid
+  listener_pid=$(_port_listener_pid "$port")
+  if [[ -z "$listener_pid" ]]; then
+    echo -e "${RED}Error: Dev server for '$worktree_name' answered on port $port but its listener pid could not be resolved for the ownership check (no ss/lsof?); not adopting it${NC}" >&2
+    _kill_process_group "$leader_pid"
+    return 0
+  fi
+
+  local listener_pgid
+  listener_pgid=$(ps -o pgid= -p "$listener_pid" 2>/dev/null | tr -d ' ')
+  if [[ "$listener_pgid" != "$leader_pid" ]]; then
+    echo -e "${RED}Error: Port $port is already held by an unrelated process (pid $listener_pid, pgid $listener_pgid) — not adopting it as the dev server for '$worktree_name'${NC}" >&2
+    _kill_process_group "$leader_pid"
+    return 0
+  fi
+
+  # Capture the identity token now that ownership is confirmed, so a later
+  # stop or start has proof this leader_pid is the exact process this run
+  # spawned — not just a pid that happens to be alive (see dev_server_entry_is_ours).
+  local leader_identity
+  leader_identity=$(process_identity "$leader_pid")
+
+  # Bind-address verification: an attempted host flag is not a guarantee —
+  # some frameworks silently ignore an unrecognized flag or env var. The
+  # readiness probe and the ownership check above both query 127.0.0.1 and
+  # answer identically whether the underlying socket is loopback-only or a
+  # wildcard bind (0.0.0.0 / ::), so this is the only check that can actually
+  # see the difference. Refuse anything but exactly 127.0.0.1 or ::1.
+  local bind_addr
+  bind_addr=$(_listener_bind_addr "$listener_pid" "$port")
+  if [[ "$bind_addr" != "127.0.0.1" && "$bind_addr" != "::1" ]]; then
+    local framework_desc
+    case "${dev_framework:-recipe}" in
+      recipe) framework_desc="the recipe command" ;;
+      next-dev) framework_desc="next dev" ;;
+      astro-dev) framework_desc="astro dev" ;;
+      nuxt-dev) framework_desc="nuxt dev" ;;
+      vite) framework_desc="vite" ;;
+      react-scripts) framework_desc="react-scripts" ;;
+      *) framework_desc="unrecognized dev command" ;;
+    esac
+    echo -e "${RED}Error: Dev server for '$worktree_name' ($framework_desc) is listening on '${bind_addr:-an address that could not be determined}', not a loopback-only address — the loopback bind could not be confirmed; not adopting it${NC}" >&2
+    _kill_process_group "$leader_pid"
+    return 0
+  fi
+
+  local entry
+  entry=$(jq -n --argjson port "$port" --argjson pid "$leader_pid" --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg identity "$leader_identity" --arg dir "$serve_dir" --arg command "$command_arg" \
+    '{port: $port, pid: $pid, startedAt: $started, identity: $identity, dir: $dir} + (if $command == "" then {} else {command: $command} end)')
+  _dev_server_write_entry "$state_file" "$dev_server_key" "$entry"
+
+  echo -e "${GREEN}✓ Dev server ready for '$worktree_name': http://127.0.0.1:${port} (pid $leader_pid)${NC}" >&2
+  echo "http://127.0.0.1:${port}"
+}
+
+# serve start --command <cmd> [--port <n>] [--root]: run the recipe command,
+# called by serve_start after the shared flag, usage and target validation.
+# No package.json, scripts.dev or dependency gate is consulted, because the
+# recipe's own setup steps own installation.
+_serve_start_command() {
+  _serve_open_state
+  [[ "$serve_done" == true ]] && return 0
+
+  _serve_reuse
+  [[ "$serve_done" == true ]] && return 0
+
+  local -a recipe_argv=()
+  # The recipe command runs as argv (the install-deps plain-command rule),
+  # from the worktree root, and its first word must be on PATH.
+  read -r -a recipe_argv <<< "$command_arg" || true
+  if [[ ${#recipe_argv[@]} -eq 0 ]] || ! ( cd "$serve_path" && command -v "${recipe_argv[0]}" >/dev/null 2>&1 ); then
+    echo -e "${RED}Error: serve start --command: not found on PATH: ${recipe_argv[0]:-}; nothing was run${NC}" >&2
+    exit 1
+  fi
+
+  _serve_pick_port
+  [[ "$serve_done" == true ]] && return 0
+
+  local pid_file
+  pid_file=$(mktemp "$aimi_root/.aimi/state/.dev-server-pid-${safe_name}.XXXXXX")
+
+  local leader_pid=""
+  local ready=false
+
+  # One attempt, no flag guessing: the recipe command is the contract. A
+  # readiness answer with any HTTP status counts, and the loopback-bind
+  # verification below still refuses a command that does not bind loopback.
+  echo -e "${BLUE}Starting '$command_arg' for '$worktree_name' on port $port...${NC}" >&2
+  leader_pid=$(cd "$serve_path" && _launch_dev_server "$port" "$log_file" "$pid_file" "${recipe_argv[@]}")
+  if [[ -n "$leader_pid" ]] && _wait_ready "$port" "$DEV_SERVER_READY_TIMEOUT" any; then
+    ready=true
+  fi
+  rm -f "$pid_file"
+  if [[ "$ready" != true ]]; then
+    [[ -n "$leader_pid" ]] && _kill_process_group "$leader_pid"
+    echo -e "${RED}Error: '$command_arg' for '$worktree_name' never answered on http://127.0.0.1:${port} within ${DEV_SERVER_READY_TIMEOUT}s. See log: $log_file${NC}" >&2
+    return 0
+  fi
+
+  _serve_adopt
+}
+
 # Start (or reuse) a loopback dev server for a container worktree.
 serve_start() {
   local worktree_name=""
@@ -2195,7 +2467,7 @@ serve_start() {
     # child of .worktrees/, so no containment check applies.
     worktree_name="checkout root"
     worktree_path="$GIT_ROOT"
-    dev_server_key=$(realpath -m "$GIT_ROOT")
+    dev_server_key=$(_dev_server_key --root)
   else
   if [[ -z "$worktree_name" ]]; then
     echo -e "${RED}Error: Worktree name required${NC}" >&2
@@ -2240,215 +2512,108 @@ serve_start() {
   local serve_dir="." serve_path="$worktree_path"
   local dev_script="" dev_framework=""
   local -a host_flag_args=()
-  # A recipe command (--command) is the whole story of what runs: no
-  # package.json, scripts.dev or dependency gate is consulted, because the
-  # recipe's own setup steps own installation.
-  if [[ "$command_given" != true ]]; then
-    if [[ "$dir_given" == true ]]; then
-      local dir_problem=""
-      if [[ -z "$dir_arg" ]]; then
-        dir_problem="a first-level subfolder name is required"
-      elif [[ "$dir_arg" == */* || "$dir_arg" == *\\* ]] || _serve_skipped_dir_name "$dir_arg"; then
-        dir_problem="'$dir_arg' is not an accepted first-level subfolder name"
-      elif [[ ! -d "$worktree_path/$dir_arg" ]]; then
-        dir_problem="'$dir_arg' is not a directory inside the worktree"
-      elif [[ "$(realpath "$worktree_path/$dir_arg" 2>/dev/null)" != "$(realpath "$worktree_path")/$dir_arg" ]]; then
-        dir_problem="'$dir_arg' resolves outside its place in the worktree"
-      elif [[ -f "$worktree_path/package.json" ]]; then
-        dir_problem="the worktree root has its own package.json, so there is nothing to select"
-      fi
-      if [[ -n "$dir_problem" ]]; then
-        printf '%b%s%b\n' "$RED" "Error: serve start --dir: $dir_problem" "$NC" >&2
-        echo "Usage: worktree-manager.sh serve start <worktree-name> [--dir <subfolder>]" >&2
-        exit 1
-      fi
-      serve_dir="$dir_arg"
-      serve_path="$worktree_path/$dir_arg"
-    elif [[ ! -f "$worktree_path/package.json" ]]; then
-      local cands cand_count=0 cand_line cand_list=""
-      cands=$(_serve_dev_candidates "$worktree_path")
-      while IFS= read -r cand_line; do
-        if [[ -n "$cand_line" ]]; then
-          cand_count=$((cand_count + 1))
-          cand_list="${cand_list:+$cand_list, }$cand_line"
-        fi
-      done <<< "$cands"
-      if [[ "$cand_count" -gt 1 ]]; then
-        printf '%b%s%b\n' "$YELLOW" "ℹ️  No package.json at the worktree root and several subfolders have a dev script ($cand_list); pass --dir <subfolder> to choose one: $worktree_name" "$NC" >&2
-        return 0
-      elif [[ "$cand_count" -eq 1 ]]; then
-        serve_dir="$cands"
-        serve_path="$worktree_path/$serve_dir"
-        printf '%b%s%b\n' "$BLUE" "Serving subfolder '$serve_dir' (the only one with a dev script): $worktree_name" "$NC" >&2
-      fi
-    fi
 
-    if [[ ! -f "$serve_path/package.json" ]]; then
-      echo -e "${YELLOW}ℹ️  No package.json in worktree, no dev server applies: $worktree_name${NC}" >&2
-      return 0
-    fi
+  # State shared with the helpers below, which set it by dynamic scope.
+  local aimi_root="" state_file="" safe_name="" log_file="" port="" serve_done=false
 
-    dev_script=$(jq -r '.scripts.dev // empty' "$serve_path/package.json" 2>/dev/null || echo "")
-    if [[ -z "$dev_script" ]]; then
-      echo -e "${YELLOW}ℹ️  No 'dev' script in package.json, no dev server applies: $worktree_name${NC}" >&2
-      return 0
-    fi
-
-    # Refuse before anything is registered, reused or stopped: a failed or
-    # borrowed install means the dev server would run the wrong packages.
-    local gate_reason
-    if ! gate_reason=$(_serve_deps_gate "$worktree_path" "$serve_dir"); then
-      printf '%b%s%b\n' "$YELLOW" "⚠️  Not starting a dev server for '$worktree_name': $gate_reason" "$NC" >&2
-      return 0
-    fi
-
-    # Pick the loopback-binding flag the detected dev command actually needs.
-    # HOST=127.0.0.1 (set unconditionally in _launch_dev_server) only satisfies
-    # CRA/webpack-dev-server; every other framework here needs its own flag, or
-    # (react-scripts / unrecognized) is left to the env var alone.
-    dev_framework=$(_classify_dev_command "$dev_script")
-
-    host_flag_args=()
-    case "$dev_framework" in
-      next-dev) host_flag_args=(-H 127.0.0.1) ;;
-      vite|astro-dev|nuxt-dev) host_flag_args=(--host 127.0.0.1) ;;
-      *) host_flag_args=() ;;
-    esac
-  fi
-
-  local aimi_root
-  if ! aimi_root=$(find_aimi_root); then
-    echo -e "${RED}Error: Could not locate a .aimi/ directory searching upward from $(pwd)${NC}" >&2
+  if [[ "$command_given" == true ]]; then
+    _serve_start_command
     return 0
   fi
 
-  local state_file="$aimi_root/.aimi/state/dev-server.json"
-
-  # log_file's path only depends on dev_server_key, so it's resolved here —
-  # before the reuse check below — rather than after it, alongside pid_file.
-  # touch + chmod unconditionally on every call (reuse or fresh start) so the
-  # log never inherits the process umask and any permission drift on an
-  # existing file self-heals on the next serve_start.
-  mkdir -p "$aimi_root/.aimi/state"
-  local safe_name="${dev_server_key//\//_}"
-  local log_file="$aimi_root/.aimi/state/.dev-server-${safe_name}.log"
-  touch "$log_file" && chmod 600 "$log_file"
-
-  # Reuse a registered entry only when it survives BOTH gates: identity
-  # (pid alive AND its identity token matches what was recorded at start —
-  # see dev_server_entry_is_ours) and, only once identity passes, a fresh
-  # port-ownership re-check (the registered port may have been taken over by
-  # something else in the interval since the last write). Any other case —
-  # dead pid, mismatched/missing identity, or a port no longer held by that
-  # pid's process group — is discarded exactly like an absent entry, and
-  # falls through to the fresh-start flow below.
-  local existing_entry
-  existing_entry=$(_dev_server_get_entry "$state_file" "$dev_server_key")
-  if [[ -n "$existing_entry" ]]; then
-    local existing_pid existing_port existing_identity
-    existing_pid=$(printf '%s' "$existing_entry" | jq -r '.pid // empty')
-    existing_port=$(printf '%s' "$existing_entry" | jq -r '.port // empty')
-    existing_identity=$(printf '%s' "$existing_entry" | jq -r '.identity // empty')
-
-    local existing_dir existing_command
-    existing_dir=$(printf '%s' "$existing_entry" | jq -r '.dir // "."')
-    existing_command=$(printf '%s' "$existing_entry" | jq -r '.command // empty')
-
-    local reused=false
-    if [[ -n "$existing_pid" ]] && dev_server_entry_is_ours "$existing_pid" "$existing_identity"; then
-      # Identity match alone isn't enough to reuse: re-resolve who currently
-      # holds the registered port's LISTEN socket and require its pgid to
-      # match the recorded pid, mirroring the fresh-start ownership check
-      # further below (listener pid -> pgid == leader pid).
-      local reuse_listener_pid reuse_listener_pgid
-      reuse_listener_pid=$(_port_listener_pid "$existing_port")
-      reuse_listener_pgid=""
-      [[ -n "$reuse_listener_pid" ]] && reuse_listener_pgid=$(ps -o pgid= -p "$reuse_listener_pid" 2>/dev/null | tr -d ' ')
-      if [[ -n "$reuse_listener_pgid" ]] && [[ "$reuse_listener_pgid" == "$existing_pid" ]]; then
-        reused=true
-      else
-        echo -e "${YELLOW}⚠️  Registered dev server for '$worktree_name' (pid $existing_pid) no longer holds port ${existing_port}; discarding the stale entry and starting fresh${NC}" >&2
-      fi
-    elif [[ -n "$existing_pid" ]] && _is_pid_alive "$existing_pid"; then
-      echo -e "${YELLOW}⚠️  pid $existing_pid registered for '$worktree_name' is alive but its identity is missing or does not match this tool's record (likely a recycled pid); treating the entry as dead and starting fresh${NC}" >&2
+  # The default path: package.json's scripts.dev in the served directory, behind
+  # the dependency gate. A recipe command left above, in _serve_start_command.
+  if [[ "$dir_given" == true ]]; then
+    local dir_problem=""
+    if [[ -z "$dir_arg" ]]; then
+      dir_problem="a first-level subfolder name is required"
+    elif [[ "$dir_arg" == */* || "$dir_arg" == *\\* ]] || _serve_skipped_dir_name "$dir_arg"; then
+      dir_problem="'$dir_arg' is not an accepted first-level subfolder name"
+    elif [[ ! -d "$worktree_path/$dir_arg" ]]; then
+      dir_problem="'$dir_arg' is not a directory inside the worktree"
+    elif [[ "$(realpath "$worktree_path/$dir_arg" 2>/dev/null)" != "$(realpath "$worktree_path")/$dir_arg" ]]; then
+      dir_problem="'$dir_arg' resolves outside its place in the worktree"
+    elif [[ -f "$worktree_path/package.json" ]]; then
+      dir_problem="the worktree root has its own package.json, so there is nothing to select"
     fi
-
-    if [[ "$reused" == true ]]; then
-      # A live entry is reused only when it was started with this same
-      # command; a default-mode entry (no recorded command) is another one.
-      # It is neither reused nor stopped, since stopping a server this call
-      # did not start is the caller's decision.
-      if [[ "$existing_command" != "$command_arg" ]]; then
-        printf '%b%s%b\n' "$YELLOW" "⚠️  Dev server for '$worktree_name' is already running ${existing_command:+with command '$existing_command'}${existing_command:-as the default dev server (no recorded command)}, not with this command; leaving it running. Run '$stop_hint' first" "$NC" >&2
-        return 0
+    if [[ -n "$dir_problem" ]]; then
+      printf '%b%s%b\n' "$RED" "Error: serve start --dir: $dir_problem" "$NC" >&2
+      echo "Usage: worktree-manager.sh serve start <worktree-name> [--dir <subfolder>]" >&2
+      exit 1
+    fi
+    serve_dir="$dir_arg"
+    serve_path="$worktree_path/$dir_arg"
+  elif [[ ! -f "$worktree_path/package.json" ]]; then
+    local cands cand_count=0 cand_line cand_list=""
+    cands=$(_serve_dev_candidates "$worktree_path")
+    while IFS= read -r cand_line; do
+      if [[ -n "$cand_line" ]]; then
+        cand_count=$((cand_count + 1))
+        cand_list="${cand_list:+$cand_list, }$cand_line"
       fi
-      if [[ "$port_given" == true && "$existing_port" != "$((10#$port_arg))" ]]; then
-        printf '%b%s%b\n' "$YELLOW" "⚠️  Dev server for '$worktree_name' is already running on port ${existing_port}, not ${port_arg}; leaving it running. Run '$stop_hint' first" "$NC" >&2
-        return 0
-      fi
-      if [[ "$existing_dir" != "$serve_dir" ]]; then
-        printf '%b%s%b\n' "$YELLOW" "⚠️  Dev server for '$worktree_name' is already running for directory '$existing_dir', not '$serve_dir'; leaving it running. Run 'serve stop $worktree_name' first to serve another directory" "$NC" >&2
-        return 0
-      fi
-      # Cap the log on reuse: a server kept alive across phase-mode waves
-      # otherwise keeps the same log file growing for the life of the
-      # container. Truncate to the final half in place (reopen the existing
-      # path with `>`, never delete-then-recreate) so a still-writing dev
-      # server's own fd offset isn't left pointing at an unlinked inode.
-      if [[ -f "$log_file" ]]; then
-        local log_size
-        log_size=$(wc -c < "$log_file" 2>/dev/null | tr -d ' ')
-        if [[ -n "$log_size" ]] && [[ "$log_size" -gt "$DEV_SERVER_LOG_MAX_BYTES" ]]; then
-          local log_tail
-          log_tail=$(tail -c "$((DEV_SERVER_LOG_MAX_BYTES / 2))" "$log_file")
-          printf '%s\n' "$log_tail" > "$log_file"
-          chmod 600 "$log_file"
-        fi
-      fi
-      echo -e "${GREEN}✓ Dev server already running for '$worktree_name' at http://127.0.0.1:${existing_port} (pid $existing_pid)${NC}" >&2
-      echo "http://127.0.0.1:${existing_port}"
+    done <<< "$cands"
+    if [[ "$cand_count" -gt 1 ]]; then
+      printf '%b%s%b\n' "$YELLOW" "ℹ️  No package.json at the worktree root and several subfolders have a dev script ($cand_list); pass --dir <subfolder> to choose one: $worktree_name" "$NC" >&2
       return 0
+    elif [[ "$cand_count" -eq 1 ]]; then
+      serve_dir="$cands"
+      serve_path="$worktree_path/$serve_dir"
+      printf '%b%s%b\n' "$BLUE" "Serving subfolder '$serve_dir' (the only one with a dev script): $worktree_name" "$NC" >&2
     fi
-
-    _dev_server_remove_entry "$state_file" "$dev_server_key"
   fi
+
+  if [[ ! -f "$serve_path/package.json" ]]; then
+    echo -e "${YELLOW}ℹ️  No package.json in worktree, no dev server applies: $worktree_name${NC}" >&2
+    return 0
+  fi
+
+  dev_script=$(jq -r '.scripts.dev // empty' "$serve_path/package.json" 2>/dev/null || echo "")
+  if [[ -z "$dev_script" ]]; then
+    echo -e "${YELLOW}ℹ️  No 'dev' script in package.json, no dev server applies: $worktree_name${NC}" >&2
+    return 0
+  fi
+
+  # Refuse before anything is registered, reused or stopped: a failed or
+  # borrowed install means the dev server would run the wrong packages.
+  local gate_reason
+  if ! gate_reason=$(_serve_deps_gate "$worktree_path" "$serve_dir"); then
+    printf '%b%s%b\n' "$YELLOW" "⚠️  Not starting a dev server for '$worktree_name': $gate_reason" "$NC" >&2
+    return 0
+  fi
+
+  # Pick the loopback-binding flag the detected dev command actually needs.
+  # HOST=127.0.0.1 (set unconditionally in _launch_dev_server) only satisfies
+  # CRA/webpack-dev-server; every other framework here needs its own flag, or
+  # (react-scripts / unrecognized) is left to the env var alone.
+  dev_framework=$(_classify_dev_command "$dev_script")
+
+  host_flag_args=()
+  case "$dev_framework" in
+    next-dev) host_flag_args=(-H 127.0.0.1) ;;
+    vite|astro-dev|nuxt-dev) host_flag_args=(--host 127.0.0.1) ;;
+    *) host_flag_args=() ;;
+  esac
+
+  _serve_open_state
+  [[ "$serve_done" == true ]] && return 0
+
+  _serve_reuse
+  [[ "$serve_done" == true ]] && return 0
 
   # Package manager name comes from the shared detector (see install_deps
   # above); only the run-dev command array is specific to serve_start.
   local pm_name=""
   local -a pm_cmd=()
-  local -a recipe_argv=()
-  if [[ "$command_given" == true ]]; then
-    # The recipe command runs as argv (the install-deps plain-command rule),
-    # from the worktree root, and its first word must be on PATH.
-    read -r -a recipe_argv <<< "$command_arg" || true
-    if [[ ${#recipe_argv[@]} -eq 0 ]] || ! ( cd "$serve_path" && command -v "${recipe_argv[0]}" >/dev/null 2>&1 ); then
-      echo -e "${RED}Error: serve start --command: not found on PATH: ${recipe_argv[0]:-}; nothing was run${NC}" >&2
-      exit 1
-    fi
-    pm_name="the recipe command"
-  else
-    pm_name=$(_detect_package_manager "$serve_path")
-    case "$pm_name" in
-      bun) pm_cmd=(bun run dev) ;;
-      pnpm) pm_cmd=(pnpm run dev) ;;
-      yarn) pm_cmd=(yarn run dev) ;;
-      npm) pm_cmd=(npm run dev) ;;
-    esac
-  fi
+  pm_name=$(_detect_package_manager "$serve_path")
+  case "$pm_name" in
+    bun) pm_cmd=(bun run dev) ;;
+    pnpm) pm_cmd=(pnpm run dev) ;;
+    yarn) pm_cmd=(yarn run dev) ;;
+    npm) pm_cmd=(npm run dev) ;;
+  esac
 
-  local port
-  if [[ "$port_given" == true ]]; then
-    # A fixed port is taken or refused, never swapped for another one.
-    port=$((10#$port_arg))
-    if ! _port_free "$port"; then
-      echo -e "${RED}Error: Port $port is busy on 127.0.0.1; not trying another port${NC}" >&2
-      exit 3
-    fi
-  elif ! port=$(_pick_free_port); then
-    echo -e "${RED}Error: No free 127.0.0.1 port found for dev server (scanned $DEV_SERVER_BASE_PORT-$((DEV_SERVER_BASE_PORT + DEV_SERVER_PORT_SCAN_LIMIT)))${NC}" >&2
-    return 0
-  fi
+  _serve_pick_port
+  [[ "$serve_done" == true ]] && return 0
 
   # Real mktemp (no -u): creates the file atomically, so _launch_dev_server's
   # in-place truncation of it never has to recreate a deleted path — see the
@@ -2465,22 +2630,7 @@ serve_start() {
   local leader_pid=""
   local ready=false
   local wait_rc=1
-  if [[ "$command_given" == true ]]; then
-    # One attempt, no flag guessing: the recipe command is the contract. A
-    # readiness answer with any HTTP status counts, and the loopback-bind
-    # verification below still refuses a command that does not bind loopback.
-    echo -e "${BLUE}Starting '$command_arg' for '$worktree_name' on port $port...${NC}" >&2
-    leader_pid=$(cd "$serve_path" && _launch_dev_server "$port" "$log_file" "$pid_file" "${recipe_argv[@]}")
-    if [[ -n "$leader_pid" ]] && _wait_ready "$port" "$DEV_SERVER_READY_TIMEOUT" any; then
-      ready=true
-    fi
-    rm -f "$pid_file"
-    if [[ "$ready" != true ]]; then
-      [[ -n "$leader_pid" ]] && _kill_process_group "$leader_pid"
-      echo -e "${RED}Error: '$command_arg' for '$worktree_name' never answered on http://127.0.0.1:${port} within ${DEV_SERVER_READY_TIMEOUT}s. See log: $log_file${NC}" >&2
-      return 0
-    fi
-  else
+
   echo -e "${BLUE}Starting dev server for '$worktree_name' with $pm_name on port $port (attempt 1: PORT env var, dev command: $dev_framework)...${NC}" >&2
 
   if [[ ${#attempt1_extra[@]} -gt 0 ]]; then
@@ -2533,86 +2683,14 @@ serve_start() {
     echo -e "${RED}Error: Dev server for '$worktree_name' never answered on http://127.0.0.1:${port} after trying both the PORT env var and -- --port ${port}. See log: $log_file${NC}" >&2
     return 0
   fi
-  fi
 
-  # Ownership check: the listening socket must belong to the process group we
-  # just spawned, not a stale or unrelated foreign process on that port.
-  local listener_pid
-  listener_pid=$(_port_listener_pid "$port")
-  if [[ -z "$listener_pid" ]]; then
-    echo -e "${RED}Error: Dev server for '$worktree_name' answered on port $port but its listener pid could not be resolved for the ownership check (no ss/lsof?); not adopting it${NC}" >&2
-    _kill_process_group "$leader_pid"
-    return 0
-  fi
-
-  local listener_pgid
-  listener_pgid=$(ps -o pgid= -p "$listener_pid" 2>/dev/null | tr -d ' ')
-  if [[ "$listener_pgid" != "$leader_pid" ]]; then
-    echo -e "${RED}Error: Port $port is already held by an unrelated process (pid $listener_pid, pgid $listener_pgid) — not adopting it as the dev server for '$worktree_name'${NC}" >&2
-    _kill_process_group "$leader_pid"
-    return 0
-  fi
-
-  # Capture the identity token now that ownership is confirmed, so a later
-  # stop or start has proof this leader_pid is the exact process this run
-  # spawned — not just a pid that happens to be alive (see dev_server_entry_is_ours).
-  local leader_identity
-  leader_identity=$(process_identity "$leader_pid")
-
-  # Bind-address verification: an attempted host flag is not a guarantee —
-  # some frameworks silently ignore an unrecognized flag or env var. The
-  # readiness probe and the ownership check above both query 127.0.0.1 and
-  # answer identically whether the underlying socket is loopback-only or a
-  # wildcard bind (0.0.0.0 / ::), so this is the only check that can actually
-  # see the difference. Refuse anything but exactly 127.0.0.1 or ::1.
-  local bind_addr
-  bind_addr=$(_listener_bind_addr "$listener_pid" "$port")
-  if [[ "$bind_addr" != "127.0.0.1" && "$bind_addr" != "::1" ]]; then
-    local framework_desc
-    case "${dev_framework:-recipe}" in
-      recipe) framework_desc="the recipe command" ;;
-      next-dev) framework_desc="next dev" ;;
-      astro-dev) framework_desc="astro dev" ;;
-      nuxt-dev) framework_desc="nuxt dev" ;;
-      vite) framework_desc="vite" ;;
-      react-scripts) framework_desc="react-scripts" ;;
-      *) framework_desc="unrecognized dev command" ;;
-    esac
-    echo -e "${RED}Error: Dev server for '$worktree_name' ($framework_desc) is listening on '${bind_addr:-an address that could not be determined}', not a loopback-only address — the loopback bind could not be confirmed; not adopting it${NC}" >&2
-    _kill_process_group "$leader_pid"
-    return 0
-  fi
-
-  local entry
-  entry=$(jq -n --argjson port "$port" --argjson pid "$leader_pid" --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg identity "$leader_identity" --arg dir "$serve_dir" --arg command "$command_arg" \
-    '{port: $port, pid: $pid, startedAt: $started, identity: $identity, dir: $dir} + (if $command == "" then {} else {command: $command} end)')
-  _dev_server_write_entry "$state_file" "$dev_server_key" "$entry"
-
-  echo -e "${GREEN}✓ Dev server ready for '$worktree_name': http://127.0.0.1:${port} (pid $leader_pid)${NC}" >&2
-  echo "http://127.0.0.1:${port}"
+  _serve_adopt
 }
 
 # Stop a container worktree's dev server, killing its whole process group.
 serve_stop() {
-  local worktree_name="${1:-}" dev_server_key
-  if [[ "$worktree_name" == "--root" ]]; then
-    if [[ $# -gt 1 ]]; then
-      echo -e "${RED}Error: serve stop --root takes no worktree name${NC}" >&2
-      exit 1
-    fi
-    worktree_name="checkout root"
-    dev_server_key=$(realpath -m "$GIT_ROOT")
-  else
-    if [[ -z "$worktree_name" ]]; then
-      echo -e "${RED}Error: Worktree name required${NC}" >&2
-      echo "Usage: worktree-manager.sh serve stop <worktree-name> | serve stop --root" >&2
-      exit 1
-    fi
-
-    validate_branch_name "$worktree_name"
-
-    dev_server_key=$(_dev_server_key "$worktree_name")
-  fi
+  _serve_target stop "$@"
+  local worktree_name="$_SERVE_TARGET_NAME" dev_server_key="$_SERVE_TARGET_KEY"
 
   local aimi_root
   if ! aimi_root=$(find_aimi_root); then
@@ -2652,7 +2730,9 @@ serve_stop() {
 
 # Report a container worktree's dev server status: a true read-only verb.
 # Contract (consumed by US-007/US-013 via jq): prints EXACTLY one line of
-# JSON with keys running (boolean), port (number|null), pid (number|null);
+# JSON with keys running (boolean), port (number|null), pid (number|null),
+# command (string|null: the recipe command a `serve start --command` recorded,
+# null for a default-mode entry or a server that is not running);
 # exit 0 in EVERY state case — no .aimi/ locatable, no entry registered, a
 # dead pid, a live pid with a complete entry, and a live pid with a
 # partial/corrupt entry (e.g. missing port). No other stdout output is
@@ -2665,28 +2745,12 @@ serve_stop() {
 # verb's — so a concurrent status call can never race a start writing the
 # same key.
 serve_status() {
-  local worktree_name="${1:-}" dev_server_key
-  if [[ "$worktree_name" == "--root" ]]; then
-    if [[ $# -gt 1 ]]; then
-      echo -e "${RED}Error: serve status --root takes no worktree name${NC}" >&2
-      exit 1
-    fi
-    dev_server_key=$(realpath -m "$GIT_ROOT")
-  else
-    if [[ -z "$worktree_name" ]]; then
-      echo -e "${RED}Error: Worktree name required${NC}" >&2
-      echo "Usage: worktree-manager.sh serve status <worktree-name> | serve status --root" >&2
-      exit 1
-    fi
-
-    validate_branch_name "$worktree_name"
-
-    dev_server_key=$(_dev_server_key "$worktree_name")
-  fi
+  _serve_target status "$@"
+  local dev_server_key="$_SERVE_TARGET_KEY"
 
   local aimi_root
   if ! aimi_root=$(find_aimi_root); then
-    jq -n -c '{running: false, port: null, pid: null}'
+    jq -n -c '{running: false, port: null, pid: null, command: null}'
     return 0
   fi
 
@@ -2710,15 +2774,24 @@ serve_status() {
   IFS=',' read -r pid port <<<"$line"
 
   if [[ -n "$pid" ]] && _is_pid_alive "$pid"; then
+    # The recorded command, read on its own because it may hold a comma. jq
+    # -c prints a JSON string or null, so --argjson below always gets a
+    # literal; anything unreadable degrades to null.
+    local command_json
+    command_json=$(_dev_server_read_all "$state_file" | jq -c --arg key "$dev_server_key" \
+      'if type == "object" then (.[$key] // {}) else {} end
+       | if type == "object" then .command else null end
+       | if type == "string" and . != "" then . else null end' 2>/dev/null) || command_json=null
+    [[ -n "$command_json" ]] || command_json=null
     # --arg + tonumber?, never --argjson: --argjson requires a valid JSON
     # literal, so an empty or non-numeric port/pid string would abort jq
     # with exit 2 and no stdout at all — exactly the contract violation this
     # rewrite fixes. tonumber? // null degrades a missing/non-numeric field
     # to JSON null instead of crashing.
-    jq -n -c --arg port "$port" --arg pid "$pid" \
-      '{running: true, port: ($port | tonumber? // null), pid: ($pid | tonumber? // null)}'
+    jq -n -c --arg port "$port" --arg pid "$pid" --argjson command "$command_json" \
+      '{running: true, port: ($port | tonumber? // null), pid: ($pid | tonumber? // null), command: $command}'
   else
-    jq -n -c '{running: false, port: null, pid: null}'
+    jq -n -c '{running: false, port: null, pid: null, command: null}'
   fi
 }
 
@@ -2896,7 +2969,7 @@ Commands:
                                       whole process group)
   serve stop --root                   Stop the checkout's own --root server
   serve status <worktree-name>        Report a worktree's dev server status as
-                                      single-line JSON: {"running":bool,"port":n|null,"pid":n|null}
+                                      single-line JSON: {"running":bool,"port":n|null,"pid":n|null,"command":s|null}
   serve status --root                 The same for the checkout's own --root server
   serve url <name> <raw-url>          Rewrite <raw-url>'s origin to the worktree's
                                       running dev server (path/query preserved);
@@ -3024,7 +3097,7 @@ Serve (Dev Server):
     warning is printed and no signal is sent. The state entry is removed in
     every case: kill succeeded, kill failed, or kill was never attempted
   - serve status prints EXACTLY one line of JSON to stdout:
-    {"running":<bool>,"port":<number|null>,"pid":<number|null>}, exit 0 in
+    {"running":<bool>,"port":<number|null>,"pid":<number|null>,"command":<string|null>}, exit 0 in
     EVERY state case — no .aimi/ locatable, no entry registered, a dead pid,
     a live pid with a complete entry, or a live pid with a partial/corrupt
     entry (e.g. missing port). This exact shape is a contract consumed by

@@ -48,6 +48,8 @@ PORT_MAX = 65535
 URL_MAXLEN = 512
 EXTERNAL_MAXLEN = 500
 LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "::1")
+WEB_SCHEMES = ("http", "https")
+SOCKET_SCHEMES = ("ws", "wss")
 LOGIN_METHODS = ("none", "manual")
 BROWSERS = ("agent-browser", "chrome")
 
@@ -90,8 +92,43 @@ def _port(value, label):
     return value
 
 
+def is_loopback_origin(value, schemes=WEB_SCHEMES):
+    """The one loopback rule of the usage-validation gate.
+
+    True for a URL whose scheme is one of <schemes>, whose host is exactly
+    localhost, 127.0.0.1 or [::1] (no other 127/8 address, no lookalike name),
+    which carries no userinfo, whose port (when present) parses, and which holds
+    no whitespace, backslash or control character. A path, query or fragment
+    after the authority is allowed.
+
+    Every caller uses this predicate: the recipe's ready and login URLs (http
+    and https), `usage-env-status`'s origins (the same), and the origins a
+    validator reports in its verdict block, which may also be ws or wss,
+    because the validator lists every origin it contacted and a dev server's
+    live-reload socket is one on the same loopback host."""
+    if not isinstance(value, str) or not value:
+        return False
+    if D._has_control(value) or any(c.isspace() for c in value) or "\\" in value:
+        return False
+    try:
+        parts = urlsplit(value)
+        host = parts.hostname
+        parts.port  # noqa: B018 -- raises ValueError on a bad port
+    except ValueError:
+        return False
+    if parts.scheme not in schemes or "@" in parts.netloc:
+        return False
+    return host in LOOPBACK_HOSTS
+
+
+def origin_of(url):
+    """scheme://authority of a URL is_loopback_origin accepted."""
+    parts = urlsplit(url)
+    return parts.scheme + "://" + parts.netloc
+
+
 def _loopback_url(value, label):
-    """A /-prefixed path or an http(s) URL on a loopback host, with no userinfo."""
+    """A /-prefixed path or an http(s) URL is_loopback_origin accepts."""
     if not isinstance(value, str) or not value.strip():
         raise Refusal("%s is blank" % label)
     if len(value) > URL_MAXLEN:
@@ -102,20 +139,15 @@ def _loopback_url(value, label):
         if value.startswith("//"):
             raise Refusal("%s is a scheme-relative URL, not a path" % label)
         return value
-    try:
-        parts = urlsplit(value)
-        host = parts.hostname
-        parts.port  # noqa: B018 -- raises ValueError on a bad port
-    except ValueError:
-        raise Refusal("%s is not a valid URL" % label)
-    if parts.scheme not in ("http", "https"):
-        raise Refusal("%s must be a /-prefixed path or an http(s) URL" % label)
-    if "@" in parts.netloc:
-        raise Refusal("%s must not carry userinfo" % label)
-    if host not in LOOPBACK_HOSTS:
+    if not is_loopback_origin(value):
+        try:
+            host = urlsplit(value).hostname
+        except ValueError:
+            host = None
         raise Refusal(
-            "%s names host %s; only localhost, 127.0.0.1 and [::1] are allowed "
-            "because the run may only contact loopback origins" % (label, host or "(none)")
+            "%s (host %s) must be a /-prefixed path or an http(s) URL on localhost, 127.0.0.1 "
+            "or [::1] with no userinfo, because the run may only contact loopback origins"
+            % (label, host or "(none)")
         )
     return value
 

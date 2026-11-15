@@ -122,7 +122,9 @@ def test_usage_env_lifecycle_runs_setup_serves_and_cleans_up(lay):
 
     st = lay.wait("run-a")
     assert st["status"] == "ready"
-    assert st["repositories"] == [{"project": ".", "status": "ready", "url": "http://127.0.0.1:%d" % port}]
+    assert st["repositories"] == [{"project": ".", "status": "ready", "url": "http://127.0.0.1:%d" % port,
+                                   "loginUrl": None}]
+    assert st["origins"] == ["http://127.0.0.1:%d" % port] and st["originsRefused"] == []
     wt = os.path.join(lay.root, ".worktrees", "w1")
     assert os.path.exists(os.path.join(wt, "setup-1")) and os.path.exists(os.path.join(wt, "setup-2"))
     assert not os.path.exists(os.path.join(lay.root, "setup-1"))
@@ -186,7 +188,7 @@ def test_usage_env_refusals_exit_1_before_anything_starts(lay):
 def test_usage_env_status_flags(lay):
     out = lay.cli("usage-env-status")
     assert out.returncode == 1 and "usage-env-status: --run" in out.stderr
-    for wait in ("61", "-1", "x"):
+    for wait in ("481", "-1", "x"):
         out = lay.cli("usage-env-status", "--run", "r", "--wait", wait)
         assert out.returncode == 1, wait
     assert lay.js("usage-env-status", "--run", "never")["status"] == "absent"
@@ -374,3 +376,183 @@ def test_usage_env_ready_path_never_leaves_loopback():
     assert usage_env._ready_path("/health?x=1") == "/health?x=1"
     assert usage_env._ready_path("http://localhost:9999/ok") == "/ok"
     assert usage_env._ready_path("https://127.0.0.1") == "/"
+
+
+# --------------------------------------------------------------------------
+# The state file is never trusted for what runs
+# --------------------------------------------------------------------------
+
+def _plant(lay, run, doc):
+    state_dir = os.path.join(lay.root, ".aimi", "state", "usage-env")
+    os.makedirs(state_dir, exist_ok=True)
+    path = os.path.join(state_dir, run + ".json")
+    with open(path, "w") as fh:
+        json.dump(doc, fh)
+    return path
+
+
+def _evil(tmp_path, name):
+    """A script that leaves <tmp_path>/<name>.ran behind when anything runs it."""
+    marker = tmp_path / (name + ".ran")
+    script = tmp_path / (name + ".sh")
+    script.write_text('#!/bin/bash\ntouch "%s"\n' % marker)
+    script.chmod(0o755)
+    return str(script), marker
+
+
+def _direct(*args):
+    return subprocess.run([sys.executable, os.path.join(SCRIPTS, "usage_env.py"), *args],
+                          text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+
+
+@needs_tools
+def test_usage_env_down_never_runs_the_manager_or_cleanup_a_planted_state_names(lay, tmp_path):
+    evil_manager, manager_marker = _evil(tmp_path, "manager")
+    evil_cleanup, cleanup_marker = _evil(tmp_path, "cleanup")
+    _plant(lay, "run1", {
+        "run": "run1", "status": "ready", "manager": evil_manager,
+        "repositories": [{"project": ".", "worktree": lay.root, "toplevel": lay.root}],
+        "recipes": {".": {"cleanup": ["bash " + evil_cleanup]}},
+        "servers": [{"project": ".", "toplevel": lay.root, "target": ["--root"]}],
+        "runnerPid": os.getpid(),
+    })
+    down = lay.js("usage-env-down", "--run", "run1")
+    assert down["status"] == "down" and down["cleanupFailed"] == 0
+    assert not manager_marker.exists() and not cleanup_marker.exists()
+    assert "manager" not in lay.state("run1")
+
+    # The module itself, called the way the finding reproduced it, refuses
+    # without the wrapper's manager and still runs nothing from the file.
+    _plant(lay, "run2", {
+        "run": "run2", "status": "ready", "manager": evil_manager,
+        "repositories": [{"project": ".", "worktree": lay.root}],
+        "recipes": {".": {"cleanup": ["bash " + evil_cleanup]}},
+        "servers": [{"project": ".", "toplevel": lay.root, "target": ["--root"]}],
+    })
+    out = _direct("down", "--aimi-root", lay.root, "--run", "run2")
+    assert out.returncode == 1 and "--manager" in out.stderr
+    assert not manager_marker.exists() and not cleanup_marker.exists()
+
+
+@needs_tools
+def test_usage_env_down_runs_the_trusted_recipe_cleanup_only_inside_the_layout(lay, tmp_path):
+    lay.record(cli="true", cleanup=["touch trusted-cleanup"])
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _plant(lay, "run3", {
+        "run": "run3", "status": "ready",
+        "repositories": [{"project": ".", "worktree": str(outside)}],
+        "recipes": {".": {"cleanup": ["touch planted-cleanup"]}}, "servers": [],
+    })
+    down = lay.js("usage-env-down", "--run", "run3")
+    assert down["cleanupFailed"] == 1
+    assert not (outside / "trusted-cleanup").exists() and not (outside / "planted-cleanup").exists()
+
+    _plant(lay, "run4", {
+        "run": "run4", "status": "ready",
+        "repositories": [{"project": ".", "worktree": os.path.join(lay.root, ".worktrees", "w1")}],
+        "recipes": {".": {"cleanup": ["touch planted-cleanup"]}}, "servers": [],
+    })
+    assert lay.js("usage-env-down", "--run", "run4")["cleanupFailed"] == 0
+    wt = os.path.join(lay.root, ".worktrees", "w1")
+    assert os.path.exists(os.path.join(wt, "trusted-cleanup"))
+    assert not os.path.exists(os.path.join(wt, "planted-cleanup"))
+
+
+@needs_tools
+def test_usage_env_server_entries_from_the_file_are_confined(lay, tmp_path):
+    # A stand-in manager that records the directory it was run from.
+    manager = tmp_path / "manager.sh"
+    manager.write_text('#!/bin/bash\ntouch "$PWD/manager-ran"\n')
+    manager.chmod(0o755)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _plant(lay, "run5", {
+        "run": "run5", "status": "ready", "repositories": [],
+        "servers": [
+            {"project": "a", "toplevel": str(outside), "target": ["--root"]},
+            {"project": "b", "toplevel": lay.root, "target": ["../escape"]},
+            {"project": "c", "toplevel": lay.root, "target": ["--root", "--command", "x"]},
+        ],
+    })
+    out = _direct("down", "--aimi-root", lay.root, "--manager", str(manager), "--run", "run5")
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout)["stopped"] == 0
+    assert not (outside / "manager-ran").exists()
+    assert not os.path.exists(os.path.join(lay.root, "manager-ran"))
+
+    # The same stand-in IS run for a confined entry, so the absence above is
+    # the confinement and not a manager that never runs.
+    _plant(lay, "run6", {"run": "run6", "status": "ready", "repositories": [],
+                         "servers": [{"project": ".", "toplevel": lay.root, "target": ["--root"]}]})
+    out = _direct("down", "--aimi-root", lay.root, "--manager", str(manager), "--run", "run6")
+    assert json.loads(out.stdout)["stopped"] == 1
+    assert os.path.exists(os.path.join(lay.root, "manager-ran"))
+    os.unlink(os.path.join(lay.root, "manager-ran"))
+
+    # up's reuse check never hands an unconfined previous server to the manager.
+    _plant(lay, "run7", {"run": "run7", "status": "ready", "stage": "ready", "repositories": [],
+                         "servers": [{"project": "a", "toplevel": str(outside), "target": ["--root"]}]})
+    out = _direct("up", "--aimi-root", lay.root, "--manager", str(manager), "--run", "run7", "--repo", ".=w1")
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout)["status"] == "unable-to-evaluate"
+    assert not (outside / "manager-ran").exists()
+    assert lay.state("run7")["previousServers"] == []
+
+
+@needs_tools
+def test_usage_env_a_state_file_git_tracks_is_refused(lay, tmp_path):
+    evil_manager, manager_marker = _evil(tmp_path, "manager")
+    path = _plant(lay, "run8", {
+        "run": "run8", "status": "ready", "manager": evil_manager, "repositories": [],
+        "servers": [{"project": ".", "toplevel": lay.root, "target": ["--root"]}],
+    })
+    lay.git("add", "-f", path)
+    down = lay.cli("usage-env-down", "--run", "run8")
+    assert down.returncode == 1 and "tracked by git" in down.stderr
+    up = lay.cli("usage-env-up", "--run", "run8", "--repo", ".=w1")
+    assert up.returncode == 1 and "tracked by git" in up.stderr
+    assert not manager_marker.exists()
+    lay.git("rm", "-q", "--cached", path)
+
+
+@needs_tools
+def test_usage_env_up_confines_every_repo_value_before_python_starts(lay, tmp_path):
+    # validate_path_in_project's own message proves the wrapper refused before
+    # the module ran (the module words its refusals differently).
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    os.symlink(str(other), os.path.join(lay.root, "out-link"))
+    for spec in ["../elsewhere", str(other), "out-link", ".=../../../elsewhere"]:
+        out = lay.cli("usage-env-up", "--run", "r", "--repo", spec)
+        assert out.returncode == 1 and "Path escapes project root" in out.stderr, (spec, out.stderr)
+        assert out.stdout == ""
+    assert not os.path.exists(os.path.join(lay.root, ".aimi", "state", "usage-env"))
+
+
+@needs_tools
+def test_usage_env_status_joins_the_login_url_and_judges_every_origin(lay):
+    port = free_port()
+    lay.record(serve=lay.serve_cmd(port), port=port, ready="/", login="manual", login_url="/login")
+    lay.up("run-o", ".=w1")
+    st = lay.wait("run-o")
+    assert st["status"] == "ready", st
+    base = "http://127.0.0.1:%d" % port
+    assert st["repositories"][0]["loginUrl"] == base + "/login"
+    assert st["origins"] == [base] and st["originsRefused"] == []
+
+    # An absolute login URL on another loopback host is its own origin.
+    lay.record(serve=lay.serve_cmd(port), port=port, ready="/", login="manual",
+               login_url="http://localhost:%d/sign-in" % port)
+    st = lay.js("usage-env-status", "--run", "run-o")
+    assert st["origins"] == [base, "http://localhost:%d" % port]
+
+    # A server URL the state file names outside loopback is refused, not navigated.
+    path = os.path.join(lay.root, ".aimi", "state", "usage-env", "run-o.json")
+    doc = lay.state("run-o")
+    doc["repositories"][0]["url"] = "http://127.0.0.2:%d" % port
+    with open(path, "w") as fh:
+        json.dump(doc, fh)
+    st = lay.js("usage-env-status", "--run", "run-o")
+    assert st["originsRefused"] and "http://127.0.0.2:%d" % port in st["originsRefused"]
+    assert lay.js("usage-env-status", "--run", "never")["origins"] == []

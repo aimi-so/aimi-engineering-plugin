@@ -38,12 +38,10 @@ surface with a project whose recipe is absent, untrusted or unreadable counts as
 "no recipe recorded".
 """
 
-import ipaddress
 import json
 import os
 import re
 import sys
-from urllib.parse import urlsplit
 
 import roadmap as R
 from sanitize import rm_sanitize
@@ -67,7 +65,8 @@ EVIDENCE_TYPES = ("screenshot", "console", "network", "command")
 RATINGS = ("severity", "frequency", "impact", "persistence")
 TEXT_MAXLEN = 1000
 KEY_PATTERN = re.compile(r"^[^:/\s]+:[1-9][0-9]*:(?:H10|H[1-9]|S|F|D|P|O|T)$")
-LOOPBACK_SCHEMES = ("http", "https", "ws", "wss")
+# A validator lists every origin it contacted, a live-reload socket included.
+ORIGIN_SCHEMES = U.WEB_SCHEMES + U.SOCKET_SCHEMES
 
 
 def _advise(detail):
@@ -78,6 +77,31 @@ def _advise(detail):
 
 def _clean(value, maxlen):
     return rm_sanitize(value, maxlen) if isinstance(value, str) else ""
+
+
+# Small local equivalents of roadmap.py's private helpers of the same names,
+# kept here so this module depends only on what roadmap.py means to share.
+
+def _num(value):
+    """A JSON number as jq's tostring renders it: 2, not 2.0."""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _flag(argv, name):
+    """The value after <name> in argv, or None."""
+    if name in argv:
+        i = argv.index(name)
+        if i + 1 < len(argv):
+            return argv[i + 1]
+    return None
+
+
+def _emit(value):
+    """One JSON value on stdout, indented as the other usage verbs print it."""
+    json.dump(value, sys.stdout, indent=2, ensure_ascii=False)
+    sys.stdout.write("\n")
 
 
 def _aimi_root(anchor):
@@ -176,6 +200,8 @@ def _answer(paths, anchor, label):
     read = []  # (path, tasks)
     unreadable = 0
     for path in paths:
+        # Coupled on purpose: the completed gate reads members with this same
+        # reader, so the two agree on which files count as unreadable and why.
         tasks, reason = R._read_tasks_with_reason(path)
         if tasks is None:
             _advise(label + " could not read " + path + " -- " + reason)
@@ -208,6 +234,7 @@ def _answer(paths, anchor, label):
     fallback_used = False
 
     for position, (path, tasks, report) in enumerate(read, start=1):
+        # Coupled on purpose: "completed" must mean what the completed gate means.
         done = set(i for i in R._completed_story_ids(tasks) if isinstance(i, str))
         by_id = {s.get("id"): s for s in _stories(tasks) if isinstance(s.get("id"), str)}
         entries = declared_by_member[position - 1]
@@ -348,8 +375,10 @@ def usage_validation_requirement(roadmap_path, doc, phase):
     The call shape of roadmap._visual_gate_requirement. Members come from
     roadmap._completed_gate_resolve_members; an unreadable one draws an
     advisory and is not counted in `members`."""
+    # Coupled on purpose: a split phase's members are resolved exactly as the
+    # completed gate resolves them, or the two would judge different files.
     members = R._completed_gate_resolve_members(roadmap_path, doc, phase)
-    return _answer(members, roadmap_path, "phase " + R._num(phase.get("id")))
+    return _answer(members, roadmap_path, "phase " + _num(phase.get("id")))
 
 
 def usage_validation_requirement_for_files(paths):
@@ -526,26 +555,9 @@ def _evidence_counts(entry, evidence_dir):
     return inside and os.path.isfile(here) and not os.path.islink(here)
 
 
-def _loopback(origin):
-    try:
-        parts = urlsplit(origin)
-        host = parts.hostname
-        parts.port
-    except ValueError:
-        return False
-    if parts.scheme not in LOOPBACK_SCHEMES or not host:
-        return False
-    if host == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
 def _verdict_answer(outcome, reason, planned, executed=0, blocked_list=(), actions=0,
                     bugs=(), decisions=(), unmapped=(), unconfirmed=(), reported=(),
-                    dropped=0, summary=None):
+                    unevidenced=(), dropped=0, summary=None):
     return {
         "outcome": outcome,
         "reason": _clean(reason, REASON_MAXLEN),
@@ -556,6 +568,7 @@ def _verdict_answer(outcome, reason, planned, executed=0, blocked_list=(), actio
         "unmapped": list(unmapped),
         "unconfirmed": list(unconfirmed),
         "reported": list(reported),
+        "unevidenced": list(unevidenced),
         "blockedCharters": list(blocked_list),
         "droppedEvidence": dropped,
         "summary": _clean(summary, TEXT_MAXLEN) if isinstance(summary, str) else "",
@@ -596,8 +609,10 @@ def usage_validation_verdict(message, planned_ids, evidence_dir, reproduced=(), 
     for a relative path with no .. segment, crossing no symlink, naming an
     existing regular file under <evidence_dir>, and a command entry also needs an
     integer exitCode; the rest are dropped and tallied in droppedEvidence. A
-    finding rated 3 or 4 with no counted entry is capped to severity 2
-    (capped true, ratedSeverity kept).
+    bug or decision rated 3 or 4 with no counted entry is capped to severity 2
+    (capped true, ratedSeverity kept) and listed in `unevidenced`, never in
+    `reported`: it does not block, and it is never silently downgraded either,
+    so the loop and the report put it in front of a person.
 
     OUTCOME, first match winning: tooling-failed (unusable block, no charter
     planned or reported, or a non-loopback origin), unable-to-evaluate (no
@@ -620,14 +635,14 @@ def usage_validation_verdict(message, planned_ids, evidence_dir, reproduced=(), 
     if not planned and not status:
         return _verdict_answer("tooling-failed", "no charter is planned or reported", 0)
     for origin in block["origins"]:
-        if not _loopback(origin):
+        if not U.is_loopback_origin(origin, ORIGIN_SCHEMES):
             return _verdict_answer("tooling-failed",
                                    "origin " + repr(_clean(origin, 200)) + " is not a loopback origin",
                                    n_planned, actions=block["actions"])
 
     reproduced, accepted = set(reproduced), set(accepted)
     planned_set = set(planned)
-    bugs, decisions, unmapped, unconfirmed, reported = [], [], [], [], []
+    bugs, decisions, unmapped, unconfirmed, reported, unevidenced = [], [], [], [], [], []
     dropped = 0
     for f in block["findings"]:
         counted = [e for e in f["evidence"] if _evidence_counts(e, evidence_dir)]
@@ -649,6 +664,8 @@ def usage_validation_verdict(message, planned_ids, evidence_dir, reproduced=(), 
         }
         if f["kind"] == "unmapped":
             unmapped.append(item)
+        elif capped:
+            unevidenced.append(item)
         elif severity == 0:
             continue
         elif severity >= 3:
@@ -673,19 +690,23 @@ def usage_validation_verdict(message, planned_ids, evidence_dir, reproduced=(), 
 
     common = dict(planned=n_planned, executed=executed, blocked_list=blocked_list,
                   actions=block["actions"], bugs=bugs, decisions=decisions, unmapped=unmapped,
-                  unconfirmed=unconfirmed, reported=reported, dropped=dropped, summary=block["summary"])
+                  unconfirmed=unconfirmed, reported=reported, unevidenced=unevidenced, dropped=dropped,
+                  summary=block["summary"])
     if executed == 0:
         return _verdict_answer("unable-to-evaluate", "no planned charter was executed", **common)
     if bugs or decisions or blocked_list:
         return _verdict_answer("fails", str(len(bugs)) + " blocking bug(s), " + str(len(decisions))
                                + " blocking decision(s), " + str(len(blocked_list)) + " planned charter(s) blocked or absent",
                                **common)
-    return _verdict_answer("pass", "every planned charter executed, no blocking finding", **common)
+    reason = "every planned charter executed, no blocking finding"
+    if unevidenced:
+        reason += ", " + str(len(unevidenced)) + " severe finding(s) with no evidence file left for a person"
+    return _verdict_answer("pass", reason, **common)
 
 
 def _op_verdict(argv):
-    required = R._flag(argv, "--required-file")
-    evidence_dir = R._flag(argv, "--evidence-dir")
+    required = _flag(argv, "--required-file")
+    evidence_dir = _flag(argv, "--evidence-dir")
     if not required or not evidence_dir:
         sys.stderr.write("Usage: usage_validation.py verdict --required-file <path> --evidence-dir <dir> "
                          "[--reproduced <key>]... [--accepted <key>]...\n")
@@ -718,19 +739,19 @@ def _op_verdict(argv):
         return 1
     planned = [c.get("id") for c in charters if isinstance(c, dict) and isinstance(c.get("id"), str)]
     message = sys.stdin.buffer.read().decode("utf-8", errors="replace")
-    R._emit(usage_validation_verdict(message, planned, evidence_dir, lists["--reproduced"], lists["--accepted"]))
+    _emit(usage_validation_verdict(message, planned, evidence_dir, lists["--reproduced"], lists["--accepted"]))
     return 0
 
 
 def _op_required(argv):
-    path = R._flag(argv, "--roadmap")
-    phase_raw = R._flag(argv, "--phase")
+    path = _flag(argv, "--roadmap")
+    phase_raw = _flag(argv, "--phase")
     if not path or phase_raw is None:
         sys.stderr.write("Usage: usage_validation.py required --roadmap <path> --phase <id>\n")
         return 2
     doc = R.read_doc(path, VERB)
     try:
-        phase_id = R.jq_numbers(R.json.loads(phase_raw))
+        phase_id = R.jq_numbers(json.loads(phase_raw))
     except ValueError:
         sys.stderr.write("Error: " + VERB + ": --phase <id> must be a numeric phase id\n")
         return 1
@@ -738,7 +759,7 @@ def _op_required(argv):
     if phase is None:
         sys.stderr.write("Error: " + VERB + ": phase " + phase_raw + " not found in " + path + "\n")
         return 1
-    R._emit(usage_validation_requirement(path, doc, phase))
+    _emit(usage_validation_requirement(path, doc, phase))
     return 0
 
 
@@ -747,7 +768,7 @@ def _op_files(argv):
     if not paths:
         sys.stderr.write("Usage: usage_validation.py files --tasks-file <path>...\n")
         return 2
-    R._emit(usage_validation_requirement_for_files(paths))
+    _emit(usage_validation_requirement_for_files(paths))
     return 0
 
 

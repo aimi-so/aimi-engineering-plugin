@@ -68,13 +68,13 @@ Its JSON line carries `status`: `starting` goes to Poll, `ready` (a reused run) 
 
 #### Poll
 
-Run this block in a separate Bash call, with the Bash tool timeout set to `540000` ms (under the `600000` ms cap), and no state carried from the previous call. It performs one poll, waits up to 60 seconds inside the verb, and prints the state.
+Run this block in a separate Bash call, with the Bash tool timeout set to `540000` ms (under the `600000` ms cap), and no state carried from the previous call. It performs one poll, waits up to 480 seconds inside the verb (returning as soon as the status leaves `starting`), and prints the state.
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 USAGE_RUN="[the run key]"
-STATUS_JSON=$("$AIMI_CLI" usage-env-status --run "$USAGE_RUN" --wait 60) || { echo "usage-env-state: tooling-failed usage-env-status exited non-zero"; exit 1; }
+STATUS_JSON=$("$AIMI_CLI" usage-env-status --run "$USAGE_RUN" --wait 480) || { echo "usage-env-state: tooling-failed usage-env-status exited non-zero"; exit 1; }
 printf 'usage-env-state: %s stage=%s reason=%s\n' "$(printf '%s' "$STATUS_JSON" | jq -r '.status')" "$(printf '%s' "$STATUS_JSON" | jq -r '.stage // ""')" "$(printf '%s' "$STATUS_JSON" | jq -r '.reason // ""')"
 ```
 
@@ -85,35 +85,7 @@ printf 'usage-env-state: %s stage=%s reason=%s\n' "$(printf '%s' "$STATUS_JSON" 
 
 #### Origins
 
-Before any browser navigates, every URL the recipe and the status verb name is judged by this function. Define it at the top of the Bash call that uses it. It accepts only `http` or `https` URLs whose host is exactly `localhost`, `127.0.0.1` or `[::1]`, with or without port and path, and refuses lookalike hosts, userinfo and other schemes.
-
-```bash
-usage_origin_is_loopback() {
-  case "$1" in
-    http://*|https://*) ;;
-    *) return 1 ;;
-  esac
-  uol_rest=${1#*://}
-  uol_authority=${uol_rest%%[/?#]*}
-  case "$uol_authority" in
-    *@*|*\\*|*' '*) return 1 ;;
-  esac
-  uol_port=""
-  case "$uol_authority" in
-    localhost|127.0.0.1|"[::1]") return 0 ;;
-    localhost:*) uol_port=${uol_authority#localhost:} ;;
-    127.0.0.1:*) uol_port=${uol_authority#127.0.0.1:} ;;
-    "[::1]:"*) uol_port=${uol_authority#"[::1]:"} ;;
-    *) return 1 ;;
-  esac
-  case "$uol_port" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
-  return 0
-}
-```
-
-Run the gate in one Bash call that begins with the function above. A relative login URL is joined to the origin of `USAGE_PROJECT`'s own server. Inline flat runs are validated on the repository checkout itself under the same rule. A refusal is `tooling-failed`, and the origins it prints are the only ones ever navigated.
+Before any browser navigates, every URL the run may be sent to is judged by `usage-env-status`, which applies the gate's one loopback rule (`is_loopback_origin` in `usage_recipe.py`: `http` or `https`, host exactly `localhost`, `127.0.0.1` or `[::1]`, no userinfo). It prints the de-duplicated `origins` of every server URL and recipe login URL, each repository's `loginUrl` (a relative login URL already joined to that repository's own server), and `originsRefused`, the URLs that failed. Inline flat runs are validated on the repository checkout itself under the same rule. A refusal, or a run that is no longer `ready`, is `tooling-failed`, and the origins it prints are the only ones ever navigated.
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -121,29 +93,18 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 USAGE_RUN="[the run key]"
 USAGE_PROJECT="[the project that serves the UI]"
 STATUS_JSON=$("$AIMI_CLI" usage-env-status --run "$USAGE_RUN") || { echo "usage-env: tooling-failed"; echo "usage-env-reason: origins: usage-env-status exited non-zero"; exit 1; }
-RECIPE_JSON=$("$AIMI_CLI" usage-recipe-get --project "$USAGE_PROJECT") || { echo "usage-env: tooling-failed"; echo "usage-env-reason: origins: usage-recipe-get exited non-zero"; exit 1; }
-BASE_URL=$(printf '%s' "$STATUS_JSON" | jq -r --arg p "$USAGE_PROJECT" '[.repositories[] | select(.project == $p) | .url // empty] | first // ""')
-LOGIN_URL=$(printf '%s' "$RECIPE_JSON" | jq -r '.recipe.login.url // ""')
-case "$LOGIN_URL" in
-  /*) LOGIN_URL="${BASE_URL}${LOGIN_URL}" ;;
-esac
-URL_LIST=$(printf '%s\n' "$(printf '%s' "$STATUS_JSON" | jq -r '.repositories[].url // empty')" "$LOGIN_URL")
-USAGE_ORIGINS=""
-while IFS= read -r url; do
-  [ -n "$url" ] || continue
-  if ! usage_origin_is_loopback "$url"; then
-    echo "usage-env: tooling-failed"
-    echo "usage-env-reason: origins: a URL outside loopback was refused"
-    exit 1
-  fi
-  origin="${url%%://*}://$(printf '%s' "${url#*://}" | sed 's|[/?#].*||')"
-  case " $USAGE_ORIGINS " in
-    *" $origin "*) ;;
-    *) USAGE_ORIGINS="${USAGE_ORIGINS:+$USAGE_ORIGINS }$origin" ;;
-  esac
-done <<USAGE_URLS_EOF
-$URL_LIST
-USAGE_URLS_EOF
+if [ "$(printf '%s' "$STATUS_JSON" | jq -r '.status')" != "ready" ]; then
+  echo "usage-env: tooling-failed"
+  echo "usage-env-reason: origins: the run is no longer ready"
+  exit 1
+fi
+if [ "$(printf '%s' "$STATUS_JSON" | jq -r '.originsRefused | length')" != "0" ]; then
+  echo "usage-env: tooling-failed"
+  echo "usage-env-reason: origins: a URL outside loopback was refused"
+  exit 1
+fi
+USAGE_ORIGINS=$(printf '%s' "$STATUS_JSON" | jq -r '.origins | join(" ")')
+LOGIN_URL=$(printf '%s' "$STATUS_JSON" | jq -r --arg p "$USAGE_PROJECT" '[.repositories[] | select(.project == $p) | .loginUrl // empty] | first // ""')
 printf 'usage-origins: %s\n' "$USAGE_ORIGINS"
 printf 'usage-login-url: %s\n' "$LOGIN_URL"
 ```

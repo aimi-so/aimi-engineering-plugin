@@ -127,6 +127,7 @@ def test_port_bounds_accepted(root, port):
 @pytest.mark.parametrize("url", [
     "http://evil.com/", "https://example.org", "http://user:pw@localhost/", "http://localhost@evil.com/",
     "ftp://localhost/", "//evil.com/x", "relative", "http://localhost:abc/", "/a b", "/a\\b", "http://0.0.0.0/",
+    "http://127.0.0.2:3000/", "http://u@localhost:3000/", "ws://localhost:3000/", "http://localhost.:3000/",
 ])
 @pytest.mark.parametrize("flag", ["--ready", "--login-url"])
 def test_non_loopback_refused(root, flag, url, capsys):
@@ -286,3 +287,23 @@ def test_refuses_without_python3(root):
         assert r.returncode == 1
         assert "python3" in r.stderr
     assert not os.path.exists(cfg(root))
+
+
+@pytest.mark.parametrize("url,schemes,ok", [
+    ("http://localhost", None, True),
+    ("https://127.0.0.1:8443/x?y#z", None, True),
+    ("http://[::1]:3000", None, True),
+    ("http://127.0.0.2:3000", None, False),
+    ("http://u@localhost:3000", None, False),
+    ("http://localhost:99999", None, False),
+    ("http://local host", None, False),
+    ("ws://localhost:3000", None, False),
+    ("ws://localhost:3000", ("ws",), True),
+    ("wss://[::1]", U.WEB_SCHEMES + U.SOCKET_SCHEMES, True),
+    ("ws://127.0.0.2", U.WEB_SCHEMES + U.SOCKET_SCHEMES, False),
+    ("/relative", None, False),
+    (None, None, False),
+])
+def test_is_loopback_origin_is_the_one_rule(url, schemes, ok):
+    args = (url,) if schemes is None else (url, schemes)
+    assert U.is_loopback_origin(*args) is ok

@@ -12131,15 +12131,19 @@ cmd_usage_recipe_get() {
 }
 
 # usage-env-up --run <key> --repo <project>[=<branch>]... [--restart]
-# usage-env-status --run <key> [--wait <0-60>]
+# usage-env-status --run <key> [--wait <0-480>]
 # usage-env-down --run <key>
 #
 # Bring the product up from the recorded usage recipe, detached, and report on
 # it. Bash owns the flags, check_python3 and the lookup of the worktree manager
 # beside this CLI; scripts/usage_env.py owns every rule after that. All three
 # refuse without python3 (a degraded answer would read as "nothing to bring up")
-# and `up` refuses when no worktree-manager.sh sits beside the CLI. None of the
-# flag values is a path argument.
+# and `up` and `down` refuse when no worktree-manager.sh sits beside the CLI.
+# The manager resolved here is passed to the module on every call that runs it:
+# usage_env.py never reads it, or any command, back from its own state file.
+# --run is a key, not a path. Every --repo value IS a path argument (the
+# module serves from it), so cmd_usage_env_up confines each one with
+# validate_path_in_project before python3 starts.
 _usage_env_manager() {
   local manager
   manager=$(_worktree_manager_beside "$_AIMI_SCRIPT_DIR/aimi-cli.sh")
@@ -12177,16 +12181,32 @@ cmd_usage_env_up() {
     echo "Error: usage-env-up: at least one --repo <project>[=<branch>] is required" >&2
     exit 1
   fi
+  # Each --repo value names a directory the module serves from, so each is a
+  # path argument and is confined here, before python3 starts: the project
+  # directory, and <project>/.worktrees/<branch> when a branch is given.
+  # usage_env.py keeps its own _within check on the repository it resolves
+  # as a second layer.
+  local aimi_root="${AIMI_DIR%/.aimi}" r r_project r_dir
+  for r in "${repos[@]}"; do
+    r_project="${r%%=*}"
+    case "$r_project" in
+      /*) r_dir="$r_project" ;;
+      *) r_dir="$aimi_root/$r_project" ;;
+    esac
+    validate_path_in_project "$r_dir"
+    case "$r" in
+      *=*) validate_path_in_project "$r_dir/.worktrees/${r#*=}" ;;
+    esac
+  done
   check_python3
   local manager
   manager=$(_usage_env_manager usage-env-up) || exit 1
   local -a extra=()
   [ "$restart" -eq 1 ] && extra+=(--restart)
   local -a repo_args=()
-  local r
   for r in "${repos[@]}"; do repo_args+=(--repo "$r"); done
-  python3 "$(_aimi_script_py usage_env.py)" up --aimi-root "${AIMI_DIR%/.aimi}" \
-    --cli "$_AIMI_SCRIPT_DIR/aimi-cli.sh" --manager "$manager" --run "$run" \
+  python3 "$(_aimi_script_py usage_env.py)" up --aimi-root "$aimi_root" \
+    --manager "$manager" --run "$run" \
     "${repo_args[@]}" ${extra[@]+"${extra[@]}"}
 }
 
@@ -12203,7 +12223,7 @@ cmd_usage_env_status() {
         shift 2 ;;
       *)
         echo "Error: usage-env-status: unknown flag: $1" >&2
-        echo "Usage: aimi-cli.sh usage-env-status --run <key> [--wait <0-60>]" >&2
+        echo "Usage: aimi-cli.sh usage-env-status --run <key> [--wait <0-480>]" >&2
         exit 1 ;;
     esac
   done
@@ -12242,7 +12262,8 @@ cmd_usage_env_down() {
   check_python3
   local manager
   manager=$(_usage_env_manager usage-env-down) || exit 1
-  python3 "$(_aimi_script_py usage_env.py)" down --aimi-root "${AIMI_DIR%/.aimi}" --run "$run"
+  python3 "$(_aimi_script_py usage_env.py)" down --aimi-root "${AIMI_DIR%/.aimi}" \
+    --manager "$manager" --run "$run"
 }
 
 # Check whether the first-run model-selection prompt should be shown.
@@ -18535,17 +18556,24 @@ COMMANDS:
                               --restart serves again without repeating setup steps.
                               Env: AIMI_USAGE_ENV_STEP_TIMEOUT (900 s),
                               AIMI_USAGE_ENV_READY_TIMEOUT (300 s). Needs python3.
-    usage-env-status --run <key> [--wait <0-60>]
+    usage-env-status --run <key> [--wait <0-480>]
                               Print {run,status,stage,reason,repositories:[{project,
-                              status,url}],log}; status is starting|ready|
-                              unable-to-evaluate|failed|down|absent. Returns as soon as
-                              status leaves "starting" or the wait ends; exit 0 in every
-                              state case. Needs python3.
+                              status,url,loginUrl}],origins,originsRefused,log}; status is
+                              starting|ready|unable-to-evaluate|failed|down|absent. For a
+                              ready run, origins are the de-duplicated loopback origins of
+                              every server URL and recipe login URL (a relative login URL
+                              joined to its repository's server, as loginUrl) and
+                              originsRefused names every URL that is not http(s) on
+                              localhost, 127.0.0.1 or [::1] without userinfo. Returns as
+                              soon as status leaves "starting" or the wait ends; exit 0 in
+                              every state case. Needs python3.
     usage-env-down --run <key>
-                              Stop a live runner, run the stored recipe's cleanup steps,
-                              stop the servers it started. Prints {run,status:"down",
-                              cleanupFailed,stopped}; {run,status:"absent"} for an unknown
-                              run. Needs python3.
+                              Stop a live runner, run the recorded recipe's cleanup steps
+                              (re-read from the trusted recipe, never the state file's copy),
+                              stop the servers it started. Directories the state file names
+                              must lie inside the layout; a state file git tracks is refused.
+                              Prints {run,status:"down",cleanupFailed,stopped};
+                              {run,status:"absent"} for an unknown run. Needs python3.
     models-prompt-check       Check whether the model-selection prompt should be shown.
                               Per-host decision:
                               - prompt when the config file is missing entirely (always

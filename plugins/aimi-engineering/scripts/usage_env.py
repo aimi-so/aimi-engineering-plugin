@@ -4,18 +4,19 @@
 Real-usage validation drives the product the way a person would, so something
 has to start it. This module is that something, behind three verbs of
 `aimi-cli.sh`: `usage-env-up`, `usage-env-status` and `usage-env-down`. The
-recorded usage recipe (`usage-recipe-get`, written by usage_recipe.py) is the
-ONLY source of what runs: no package.json, Makefile or other convention is
+recorded usage recipe, read in process through `usage_recipe.get` (the reader
+behind `usage-recipe-get`, with its tracked-config check), is the ONLY source
+of what runs: no package.json, Makefile or other convention is
 consulted, and the package-manager `run dev` default is never started.
 
 Shaped like deps_recipe.py and usage_recipe.py: an `_OPS` table, `main(argv)`,
 usage at exit 2. Four ops:
 
-  up      --aimi-root P --cli P --manager P --run K --repo project[=branch]...
+  up      --aimi-root P --manager P --run K --repo project[=branch]...
           [--restart]
-  run     --state P             (the detached runner; never called by hand)
+  run     --state P --manager P  (the detached runner; never called by hand)
   status  --aimi-root P --run K [--wait N]
-  down    --aimi-root P --run K
+  down    --aimi-root P --manager P --run K
 
 The wrapper in aimi-cli.sh owns the flags, `check_python3` and the manager
 lookup; this module owns the rules.
@@ -41,6 +42,17 @@ EVERYTHING RUNS AS ARGV WITH NO SHELL. A step or serve command holding any of
 fails its stage and runs nothing. Every manager call runs with the repository
 toplevel as working directory, because serve start, stop and status derive
 their key from it.
+
+THE STATE FILE IS NEVER TRUSTED FOR WHAT RUNS. It records progress, not
+authority: nothing executable is read back from it. The manager always comes
+from the wrapper (`--manager`, resolved beside the CLI) and is never persisted;
+`down` re-reads each project's cleanup steps from the trusted recipe instead of
+the copy in the file; every directory taken from the file (a repository
+worktree, a server toplevel) must resolve inside `--aimi-root`, and a server
+target must be `--root` or a valid branch name, or it is skipped. A state file
+git tracks is refused outright by `up` and `down`, the rule
+`deps_recipe.config_is_tracked` already applies to the config, because a
+tracked file is content anyone with commit access wrote.
 """
 
 import fcntl
@@ -59,6 +71,7 @@ import urllib.request
 from urllib.parse import urlsplit
 
 import deps_recipe as D
+import usage_recipe as U
 
 Refusal = D.Refusal
 
@@ -69,11 +82,10 @@ DOWN_VERB = "usage-env-down"
 RUN_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9/_-]*$")
 BRANCH_RE = RUN_RE
 STATE_SUBDIR = os.path.join(".aimi", "state", "usage-env")
-DEV_SERVER_STATE = os.path.join(".aimi", "state", "dev-server.json")
 
 DEFAULT_STEP_TIMEOUT = 900
 DEFAULT_READY_TIMEOUT = 300
-MAX_WAIT = 60
+MAX_WAIT = 480
 STATUSES = ("starting", "ready", "unable-to-evaluate", "failed", "down", "absent")
 STOP_GRACE = 10
 
@@ -148,7 +160,7 @@ def _emit(doc):
 
 def _public_repos(state):
     return [
-        {"project": r.get("project"), "status": r.get("status"), "url": r.get("url")}
+        {"project": r.get("project"), "status": r.get("status"), "url": r.get("url"), "loginUrl": None}
         for r in state.get("repositories", [])
     ]
 
@@ -229,12 +241,21 @@ def _target_args(repo):
     return ["--root"] if repo.get("branch") is None else [repo["branch"]]
 
 
-def _server_running(manager, server):
+def _server_status(manager, server):
+    """The manager's `serve status` answer for <server>, or {} when unreadable.
+
+    The manager owns dev-server.json and its pid-ownership rules; this module
+    never opens that file."""
     try:
         out = _manager(manager, server["toplevel"], ["serve", "status"] + server["target"], 30)
-        return bool(json.loads(out.stdout.strip().splitlines()[-1]).get("running"))
+        answer = json.loads(out.stdout.strip().splitlines()[-1])
     except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
-        return False
+        return {}
+    return answer if isinstance(answer, dict) else {}
+
+
+def _server_running(manager, server):
+    return bool(_server_status(manager, server).get("running"))
 
 
 def _stop_server(manager, server):
@@ -243,29 +264,6 @@ def _stop_server(manager, server):
         return True
     except (OSError, subprocess.TimeoutExpired):
         return False
-
-
-def _registered_entry(aimi_root, key):
-    """The dev-server.json entry for <key>, or None. Read only."""
-    try:
-        with open(os.path.join(aimi_root, DEV_SERVER_STATE), "r", encoding="utf-8") as fh:
-            doc = json.load(fh)
-    except (OSError, ValueError):
-        return None
-    entry = doc.get(key) if isinstance(doc, dict) else None
-    return entry if isinstance(entry, dict) else None
-
-
-def _pid_alive(pid):
-    if not isinstance(pid, int) or pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:
-        return True
-    return True
 
 
 def _port_busy(port):
@@ -333,6 +331,44 @@ def _within(child, parent):
     return child == parent or child.startswith(parent.rstrip(os.sep) + os.sep)
 
 
+def _confined_dir(path, aimi_root):
+    """The real path of <path> when it is an existing directory inside
+    <aimi_root>, else None. For directories read back from the state file."""
+    if not isinstance(path, str) or not path or "\0" in path:
+        return None
+    real = os.path.realpath(path)
+    if not _within(real, os.path.realpath(aimi_root)) or not os.path.isdir(real):
+        return None
+    return real
+
+
+def _trusted_server(server, aimi_root):
+    """A server entry read back from the state file, confined, or None.
+
+    Its toplevel must be a directory inside <aimi_root> and its target exactly
+    ["--root"] or [<branch>] with a valid branch name, because both reach the
+    manager's argv and working directory."""
+    if not isinstance(server, dict):
+        return None
+    toplevel = _confined_dir(server.get("toplevel"), aimi_root)
+    target = server.get("target")
+    if toplevel is None or not isinstance(target, list) or len(target) != 1:
+        return None
+    if target[0] != "--root" and not (isinstance(target[0], str) and BRANCH_RE.match(target[0])):
+        return None
+    project = server.get("project")
+    return {"project": project if isinstance(project, str) else None, "toplevel": toplevel,
+            "target": list(target), "port": server.get("port") if isinstance(server.get("port"), int) else None}
+
+
+def _refuse_tracked_state(state_path):
+    if D.config_is_tracked(state_path):
+        raise Refusal(
+            "%s is tracked by git, so nothing it names is run or stopped; "
+            "untrack it or add .aimi/ to .gitignore first" % state_path
+        )
+
+
 def _parse_repos(aimi_root, specs):
     """Validate every --repo spec; return the repositories, in the order given."""
     if not specs:
@@ -383,23 +419,18 @@ def _parse_repos(aimi_root, specs):
     return repos
 
 
-def _fetch_recipe(cli, aimi_root, project):
-    """(recipe | None, reason | None) from the `usage-recipe-get` verb."""
+def _fetch_recipe(aimi_root, project):
+    """(recipe | None, reason | None) from usage_recipe.get, in process.
+
+    The same reader `usage-recipe-get` answers from, with its tracked-config
+    check: a recipe in a config git tracks is never trusted."""
+    config = os.path.join(aimi_root, ".aimi", "config.json")
     try:
-        out = subprocess.run(
-            [cli, "usage-recipe-get", "--project", project], cwd=aimi_root,
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, timeout=60,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+        answer = U.get(config, project)
+    except Refusal as exc:
+        return None, "usage recipe could not be read: %s" % exc
+    except OSError as exc:
         return None, "usage recipe could not be read (%s)" % exc.__class__.__name__
-    if out.returncode != 0:
-        detail = (out.stderr or "").strip().splitlines()
-        return None, "usage recipe could not be read: %s" % (detail[-1] if detail else "exit %d" % out.returncode)
-    try:
-        answer = json.loads(out.stdout.strip().splitlines()[-1])
-    except (ValueError, IndexError):
-        return None, "usage recipe could not be read"
     status = answer.get("status")
     if status == "recorded" and isinstance(answer.get("recipe"), dict):
         return answer["recipe"], None
@@ -413,11 +444,11 @@ def _open_log(path):
     return open(path, "ab")
 
 
-def _spawn_runner(state_path, log_path, lock_fd):
+def _spawn_runner(state_path, log_path, lock_fd, manager):
     log = _open_log(log_path)
     try:
         proc = subprocess.Popen(
-            [sys.executable, os.path.abspath(__file__), "run", "--state", state_path],
+            [sys.executable, os.path.abspath(__file__), "run", "--state", state_path, "--manager", manager],
             stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True,
             pass_fds=(lock_fd,), start_new_session=True,
         )
@@ -455,9 +486,9 @@ def _op_up(args):
     lock_fd = None
     try:
         f = _parse_flags(
-            args, ("--aimi-root", "--cli", "--manager", "--run"), ("--repo",), ("--restart",),
+            args, ("--aimi-root", "--manager", "--run"), ("--repo",), ("--restart",),
         )
-        for name in ("--aimi-root", "--cli", "--manager"):
+        for name in ("--aimi-root", "--manager"):
             if not f[name]:
                 raise Refusal("%s is required" % name)
         run = f["--run"]
@@ -474,9 +505,18 @@ def _op_up(args):
         except OSError:
             raise Refusal("run %s is still starting; wait for it with usage-env-status or stop it with usage-env-down" % run)
 
+        _refuse_tracked_state(state_path)
         previous = _read_state(state_path)
+        # Servers named by the previous file are confined before the manager
+        # ever sees them; one that fails is dropped, never run against.
+        raw_servers = (previous or {}).get("servers")
+        prev_servers = []
+        for server in raw_servers if isinstance(raw_servers, list) else []:
+            trusted = _trusted_server(server, aimi_root)
+            if trusted is not None:
+                prev_servers.append(trusted)
         if previous and previous.get("status") == "ready" and not f["--restart"]:
-            servers = previous.get("servers") or []
+            servers = prev_servers
             if servers and all(_server_running(f["--manager"], s) for s in servers):
                 doc = {"run": run, "status": "ready", "stage": previous.get("stage"), "state": state_path, "reused": True}
                 _emit(doc)
@@ -484,7 +524,7 @@ def _op_up(args):
 
         recipes, reasons = {}, {}
         for repo in repos:
-            recipe, reason = _fetch_recipe(f["--cli"], aimi_root, repo["project"])
+            recipe, reason = _fetch_recipe(aimi_root, repo["project"])
             if recipe is not None:
                 recipes[repo["project"]] = recipe
             else:
@@ -497,9 +537,9 @@ def _op_up(args):
             "run": run, "status": "starting", "stage": "queued", "reason": None,
             "startedAt": now, "updatedAt": now, "runnerPid": None,
             "mode": "restart" if f["--restart"] and previous else "fresh",
-            "aimiRoot": aimi_root, "cli": f["--cli"], "manager": f["--manager"], "log": log_path,
+            "aimiRoot": aimi_root, "log": log_path,
             "repositories": repos, "recipes": recipes, "servers": [],
-            "previousServers": list((previous or {}).get("servers") or []),
+            "previousServers": prev_servers,
         }
         if not recipes:
             reason = "no usage recipe recorded"
@@ -513,7 +553,7 @@ def _op_up(args):
             return 0
 
         _atomic_write(state_path, state)
-        pid = _spawn_runner(state_path, log_path, lock_fd)
+        pid = _spawn_runner(state_path, log_path, lock_fd, f["--manager"])
         state["runnerPid"] = pid
         _atomic_write(state_path, state)
         _emit({"run": run, "status": "starting", "stage": "queued", "state": state_path})
@@ -536,8 +576,9 @@ def _op_up(args):
 # --------------------------------------------------------------------------
 
 class _Runner:
-    def __init__(self, state_path):
+    def __init__(self, state_path, manager):
         self.path = state_path
+        self.manager = manager
         self.state = _read_state(state_path)
         if self.state is None:
             raise Refusal("cannot read the state file")
@@ -568,8 +609,12 @@ class _Runner:
 
     def clear_previous(self):
         for server in self.state.get("previousServers") or []:
-            self.note("stopping this run's earlier server for %s" % server.get("project"))
-            _stop_server(self.state["manager"], server)
+            trusted = _trusted_server(server, self.state["aimiRoot"])
+            if trusted is None:
+                self.note("skipping an earlier server whose toplevel or target is not confined")
+                continue
+            self.note("stopping this run's earlier server for %s" % trusted.get("project"))
+            _stop_server(self.manager, trusted)
         self.save(previousServers=[])
 
     def port_check(self):
@@ -600,7 +645,7 @@ class _Runner:
         return None
 
     def serve(self, repo, recipe):
-        manager, toplevel = self.state["manager"], repo["toplevel"]
+        manager, toplevel = self.manager, repo["toplevel"]
         serve = recipe["serve"]
         stage = "serve:%s" % repo["project"]
         self.save(stage=stage)
@@ -608,14 +653,16 @@ class _Runner:
         if argv is None:
             return self.fail(stage, "serve command %s: %s" % (problem, serve), repo)
 
-        # Whatever sits on this key without a recorded recipe command (the
-        # default `run dev` server) would be adopted by serve start's reuse
-        # path; it is stopped first. One with a command is left for serve start
-        # to compare.
-        entry = _registered_entry(self.state["aimiRoot"], os.path.realpath(repo["worktree"]))
-        if entry and not entry.get("command") and _pid_alive(entry.get("pid")):
+        # Whatever runs on this key without a recorded recipe command (the
+        # default `run dev` server) would block serve start's reuse path; it is
+        # stopped first. One with a command is left for serve start to compare.
+        # `serve status` reports both, and `serve stop` signals the pid only
+        # when dev_server_entry_is_ours confirms it.
+        target = {"toplevel": toplevel, "target": _target_args(repo)}
+        current = _server_status(manager, target)
+        if current.get("running") and not current.get("command"):
             self.note("stopping the default dev server registered for %s" % repo["project"])
-            _stop_server(manager, {"toplevel": toplevel, "target": _target_args(repo)})
+            _stop_server(manager, target)
 
         cmd = ["serve", "start"] + _target_args(repo) + ["--command", serve]
         if isinstance(recipe.get("port"), int):
@@ -680,8 +727,10 @@ class _Runner:
 
 def _op_run(args):
     try:
-        f = _parse_flags(args, ("--state",))
-        runner = _Runner(f["--state"])
+        f = _parse_flags(args, ("--state", "--manager"))
+        if not f["--state"] or not f["--manager"]:
+            raise Refusal("--state and --manager are required")
+        runner = _Runner(f["--state"], f["--manager"])
     except (Refusal, OSError) as exc:
         sys.stderr.write("Error: usage-env run: %s\n" % exc)
         return 1
@@ -729,7 +778,8 @@ def _op_status(args):
     while True:
         state = _read_state(state_path)
         if state is None:
-            _emit({"run": run, "status": "absent", "stage": None, "reason": None, "repositories": [], "log": None})
+            _emit({"run": run, "status": "absent", "stage": None, "reason": None, "repositories": [],
+                   "origins": [], "originsRefused": [], "log": None})
             return 0
         status, reason = state.get("status"), state.get("reason")
         if status == "starting" and not _runner_alive(lock_path):
@@ -742,20 +792,86 @@ def _op_status(args):
         if status != "starting" or time.monotonic() >= deadline:
             break
         time.sleep(0.25)
+    repositories = _public_repos(state)
+    origins, refused = _origins(f["--aimi-root"], repositories) if status == "ready" else ([], [])
     _emit({
         "run": run, "status": status, "stage": state.get("stage"), "reason": reason,
-        "repositories": _public_repos(state), "log": state.get("log"),
+        "repositories": repositories, "origins": origins, "originsRefused": refused,
+        "log": state.get("log"),
     })
     return 0
+
+
+def _origins(aimi_root, repositories):
+    """(origins, refused) of a ready run; fills each repository's loginUrl.
+
+    Every URL a browser may be sent to is judged by usage_recipe's one loopback
+    rule: each repository's server URL, and its recipe's login URL, a relative
+    one joined to that repository's own server URL. The login URL comes from the
+    trusted recipe, never from the state file. `origins` is the de-duplicated
+    scheme://authority list in repository order; `refused` names every URL that
+    failed, and a caller treats a non-empty one as a refusal."""
+    origins, refused = [], []
+
+    def judge(url):
+        if not U.is_loopback_origin(url):
+            refused.append(url)
+            return False
+        origin = U.origin_of(url)
+        if origin not in origins:
+            origins.append(origin)
+        return True
+
+    for repo in repositories:
+        repo["loginUrl"] = None
+        url = repo.get("url")
+        if url is not None:
+            judge(url)
+        project = repo.get("project")
+        try:
+            D.validate_key(project)
+        except Refusal:
+            continue
+        recipe, _reason = _fetch_recipe(aimi_root, project)
+        login = ((recipe or {}).get("login") or {}).get("url")
+        if not isinstance(login, str) or not login:
+            continue
+        if login.startswith("/"):
+            if not isinstance(url, str):
+                refused.append("%s login url %s has no server to join" % (project, login))
+                continue
+            login = url + login
+        if judge(login):
+            repo["loginUrl"] = login
+    return origins, refused
 
 
 # --------------------------------------------------------------------------
 # down
 # --------------------------------------------------------------------------
 
-def _stop_runner(state, lock_path):
+def _is_our_runner(pid, state_path):
+    """True when <pid> is this run's runner: its command line is the one
+    _spawn_runner gave it. The pid comes from the state file, so liveness
+    alone is never enough to signal it."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        out = subprocess.run(
+            ["ps", "-ww", "-o", "args=", "-p", str(pid)], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    args = out.stdout.strip()
+    return " run --state %s " % state_path in args + " " and os.path.basename(__file__) in args
+
+
+def _stop_runner(state, state_path, lock_path):
     pid = state.get("runnerPid")
     if not _runner_alive(lock_path):
+        return
+    if not _is_our_runner(pid, state_path):
         return
     if isinstance(pid, int) and pid > 0:
         try:
@@ -774,17 +890,20 @@ def _stop_runner(state, lock_path):
 
 def _op_down(args):
     try:
-        f = _parse_flags(args, ("--aimi-root", "--run"))
-        if not f["--aimi-root"]:
-            raise Refusal("--aimi-root is required")
+        f = _parse_flags(args, ("--aimi-root", "--manager", "--run"))
+        for name in ("--aimi-root", "--manager"):
+            if not f[name]:
+                raise Refusal("%s is required" % name)
         run = f["--run"]
         if not run or not RUN_RE.match(run):
             raise Refusal("--run is required and must match ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$")
+        aimi_root = f["--aimi-root"]
+        state_path, log_path, lock_path = _state_paths(aimi_root, run)
+        _refuse_tracked_state(state_path)
     except Refusal as exc:
         sys.stderr.write("Error: %s: %s\n" % (DOWN_VERB, exc))
         return 1
 
-    state_path, log_path, lock_path = _state_paths(f["--aimi-root"], run)
     state = _read_state(state_path)
     if state is None:
         _emit({"run": run, "status": "absent"})
@@ -793,37 +912,63 @@ def _op_down(args):
         _emit({"run": run, "status": "down", "cleanupFailed": 0, "stopped": 0, "alreadyDown": True})
         return 0
 
-    _stop_runner(state, lock_path)
+    _stop_runner(state, state_path, lock_path)
     timeout = _env_seconds("AIMI_USAGE_ENV_STEP_TIMEOUT", DEFAULT_STEP_TIMEOUT)
     cleanup_failed = 0
     log = _open_log(log_path)
+
+    def note(text):
+        log.write(("[usage-env] %s\n" % text).encode("utf-8", "replace"))
+        log.flush()
+
+    repositories = state.get("repositories") if isinstance(state.get("repositories"), list) else []
     try:
-        for repo in state.get("repositories", []):
-            recipe = (state.get("recipes") or {}).get(repo.get("project")) or {}
-            for n, cmd in enumerate(recipe.get("cleanup") or [], 1):
-                argv, problem = _argv_for(cmd, repo.get("worktree") or "/")
-                if argv is None or not os.path.isdir(repo.get("worktree") or ""):
+        for repo in repositories:
+            if not isinstance(repo, dict):
+                continue
+            project = repo.get("project")
+            try:
+                project = D.validate_key(project)
+            except Refusal:
+                note("cleanup skipped: a repository entry names no valid project")
+                continue
+            # The cleanup steps come from the trusted recipe, never from the
+            # copy the state file holds.
+            recipe, reason = _fetch_recipe(aimi_root, project)
+            steps = (recipe or {}).get("cleanup") or []
+            if recipe is None:
+                note("cleanup %s skipped: %s" % (project, reason))
+            worktree = _confined_dir(repo.get("worktree"), aimi_root)
+            for n, cmd in enumerate(steps, 1):
+                argv, problem = _argv_for(cmd, worktree or "/")
+                if argv is None or worktree is None:
                     cleanup_failed += 1
-                    log.write(("[usage-env] cleanup %s step %d refused: %s\n" % (repo.get("project"), n, problem or "no worktree")).encode())
+                    note("cleanup %s step %d refused: %s" % (project, n, problem or "worktree is not a directory inside the layout"))
                     continue
-                log.write(("[usage-env] cleanup %s step %d: %s\n" % (repo.get("project"), n, cmd)).encode())
-                log.flush()
+                note("cleanup %s step %d: %s" % (project, n, cmd))
                 try:
-                    how, _rc = _run_argv(argv, repo["worktree"], log, timeout)
+                    how, _rc = _run_argv(argv, worktree, log, timeout)
                 except OSError:
                     how = "exit"
                 if how != "ok":
                     cleanup_failed += 1
         stopped = 0
-        for server in state.get("servers") or []:
-            if _stop_server(state.get("manager"), server):
+        servers = state.get("servers") if isinstance(state.get("servers"), list) else []
+        for server in servers:
+            trusted = _trusted_server(server, aimi_root)
+            if trusted is None:
+                note("server entry skipped: its toplevel or target is not confined")
+                continue
+            if _stop_server(f["--manager"], trusted):
                 stopped += 1
     finally:
         log.close()
     state.update(status="down", stage="down", reason=None, runnerPid=None, servers=[], updatedAt=_now())
-    for repo in state.get("repositories", []):
-        repo["status"] = "down"
-        repo["url"] = None
+    state.pop("manager", None)
+    for repo in repositories:
+        if isinstance(repo, dict):
+            repo["status"] = "down"
+            repo["url"] = None
     _atomic_write(state_path, state)
     _emit({"run": run, "status": "down", "cleanupFailed": cleanup_failed, "stopped": stopped})
     return 0
