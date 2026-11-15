@@ -12141,6 +12141,9 @@ cmd_usage_recipe_get() {
 # and `up` and `down` refuse when no worktree-manager.sh sits beside the CLI.
 # The manager resolved here is passed to the module on every call that runs it:
 # usage_env.py never reads it, or any command, back from its own state file.
+# --run is a key, not a path. Every --repo value IS a path argument (the
+# module serves from it), so cmd_usage_env_up confines each one with
+# validate_path_in_project before python3 starts.
 _usage_env_manager() {
   local manager
   manager=$(_worktree_manager_beside "$_AIMI_SCRIPT_DIR/aimi-cli.sh")
@@ -12178,15 +12181,31 @@ cmd_usage_env_up() {
     echo "Error: usage-env-up: at least one --repo <project>[=<branch>] is required" >&2
     exit 1
   fi
+  # Each --repo value names a directory the module serves from, so each is a
+  # path argument and is confined here, before python3 starts: the project
+  # directory, and <project>/.worktrees/<branch> when a branch is given.
+  # usage_env.py keeps its own _within check on the repository it resolves
+  # as a second layer.
+  local aimi_root="${AIMI_DIR%/.aimi}" r r_project r_dir
+  for r in "${repos[@]}"; do
+    r_project="${r%%=*}"
+    case "$r_project" in
+      /*) r_dir="$r_project" ;;
+      *) r_dir="$aimi_root/$r_project" ;;
+    esac
+    validate_path_in_project "$r_dir"
+    case "$r" in
+      *=*) validate_path_in_project "$r_dir/.worktrees/${r#*=}" ;;
+    esac
+  done
   check_python3
   local manager
   manager=$(_usage_env_manager usage-env-up) || exit 1
   local -a extra=()
   [ "$restart" -eq 1 ] && extra+=(--restart)
   local -a repo_args=()
-  local r
   for r in "${repos[@]}"; do repo_args+=(--repo "$r"); done
-  python3 "$(_aimi_script_py usage_env.py)" up --aimi-root "${AIMI_DIR%/.aimi}" \
+  python3 "$(_aimi_script_py usage_env.py)" up --aimi-root "$aimi_root" \
     --manager "$manager" --run "$run" \
     "${repo_args[@]}" ${extra[@]+"${extra[@]}"}
 }

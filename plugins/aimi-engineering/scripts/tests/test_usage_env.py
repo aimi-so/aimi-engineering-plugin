@@ -512,3 +512,17 @@ def test_usage_env_a_state_file_git_tracks_is_refused(lay, tmp_path):
     assert up.returncode == 1 and "tracked by git" in up.stderr
     assert not manager_marker.exists()
     lay.git("rm", "-q", "--cached", path)
+
+
+@needs_tools
+def test_usage_env_up_confines_every_repo_value_before_python_starts(lay, tmp_path):
+    # validate_path_in_project's own message proves the wrapper refused before
+    # the module ran (the module words its refusals differently).
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    os.symlink(str(other), os.path.join(lay.root, "out-link"))
+    for spec in ["../elsewhere", str(other), "out-link", ".=../../../elsewhere"]:
+        out = lay.cli("usage-env-up", "--run", "r", "--repo", spec)
+        assert out.returncode == 1 and "Path escapes project root" in out.stderr, (spec, out.stderr)
+        assert out.stdout == ""
+    assert not os.path.exists(os.path.join(lay.root, ".aimi", "state", "usage-env"))
