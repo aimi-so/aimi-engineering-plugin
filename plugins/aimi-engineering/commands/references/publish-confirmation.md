@@ -171,6 +171,17 @@ Write the short `/aimi:open-pr` form everywhere, never the fully-qualified
 plugin-prefixed variant (see Command Conventions in
 `plugins/aimi-engineering/CLAUDE.md`).
 
+## The Exception to Always Name /aimi:open-pr
+
+A run whose usage validation is failing is the single exception to Always Name
+/aimi:open-pr. It raises no push question, pushes nothing, keeps its container
+and dev server, and names `/aimi:open-pr` only inside the warning that usage
+validation is failing, so a plan whose real usage failed is never offered for
+publishing as if it had passed. The verdict is the stored record, read by the
+gate in `commands/references/execute/step-5-completion.md`. A `skipped` record
+of any kind is no exception: only open severe findings hold, so a skipped
+validation still offers the push and names the command as usual.
+
 ## Why This File Carries No Picker Markup
 
 This contract is stated in **prose only**. There is no lettered-option block

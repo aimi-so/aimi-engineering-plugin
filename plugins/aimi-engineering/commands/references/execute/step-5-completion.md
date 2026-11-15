@@ -14,7 +14,50 @@ When execution ends (all stories complete, or deadlock detected):
 
 ### If all stories complete:
 
-**When `CONTAINER_MODE=true`:** read `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Container Mode: Stop the Dev Server, § Container Mode: Push the Branch, and § Container Mode: Remove the Container, and run all three, in that order, before continuing below — raising the push confirmation immediately below in between, after every dev-server stop has completed and before anything is pushed. When `CONTAINER_MODE=false` (inline mode), skip all three, skip the confirmation with them, and continue directly below.
+**Usage-validation gate, once, before any container step.** Read the run's own stored verdict: a `failing` record holds this step's publishing path, and every other state leaves it exactly as it is. Only `failing` holds: a `skipped` record of any kind (an `unable-to-evaluate` one included) never does, an absent record prints `usage-validation: not recorded` and an unreadable one prints `usage-validation: unknown — <stage>`, never `passed`.
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+USAGE_MODE="[phase in phase mode, otherwise flat]"
+USAGE_TASKS_FILE="[TASKS_PATH]"
+USAGE_FEATURE="[FEATURE in phase mode, otherwise empty]"
+USAGE_PHASE_ID="[PHASE_ID in phase mode, otherwise empty]"
+# usage-gate:begin
+USAGE_STAGE=""
+if [ "$USAGE_MODE" = phase ]; then
+  USAGE_JSON=$("$AIMI_CLI" roadmap-get --feature "$USAGE_FEATURE" --phase "$USAGE_PHASE_ID" 2>/dev/null) || USAGE_STAGE="roadmap-get exited non-zero"
+else
+  USAGE_JSON=$("$AIMI_CLI" metadata --tasks-file "$USAGE_TASKS_FILE" 2>/dev/null) || USAGE_STAGE="metadata exited non-zero"
+fi
+[ -n "$USAGE_STAGE" ] || [ -n "$USAGE_JSON" ] || USAGE_STAGE="empty answer"
+USAGE_STATUS=""
+[ -n "$USAGE_STAGE" ] || USAGE_STATUS=$(printf '%s' "$USAGE_JSON" | jq -r '.usageValidation.status // "none"' 2>/dev/null) || USAGE_STAGE="answer is not JSON"
+USAGE_GATE=go
+if [ -n "$USAGE_STAGE" ]; then
+  printf 'usage-validation: unknown — %s\n' "$USAGE_STAGE"
+elif [ "$USAGE_STATUS" = none ]; then
+  echo "usage-validation: not recorded"
+else
+  USAGE_KIND=$(printf '%s' "$USAGE_JSON" | jq -r '.usageValidation.kind // ""')
+  USAGE_REASON=$(printf '%s' "$USAGE_JSON" | jq -r '.usageValidation.reason // ""')
+  printf 'usage-validation-detail: rounds=%s open=%s review=%s\n' \
+    "$(printf '%s' "$USAGE_JSON" | jq -r '.usageValidation.rounds // 0')" \
+    "$(printf '%s' "$USAGE_JSON" | jq -r '[(.usageValidation.findings // {}) | to_entries[] | select(.value.status == "open")] | length')" \
+    "$(printf '%s' "$USAGE_JSON" | jq -r '.usageValidation.review // ""')"
+  USAGE_LINE="usage-validation: $USAGE_STATUS"
+  [ "$USAGE_STATUS" = skipped ] && [ -n "$USAGE_KIND" ] && USAGE_LINE="$USAGE_LINE ($USAGE_KIND)"
+  [ -z "$USAGE_REASON" ] || USAGE_LINE="$USAGE_LINE — $USAGE_REASON"
+  printf '%s\n' "$USAGE_LINE"
+  [ "$USAGE_STATUS" != failing ] || USAGE_GATE=hold
+fi
+echo "usage-validation-gate: $USAGE_GATE"
+# usage-gate:end
+```
+
+**When it prints `usage-validation-gate: hold`:** the three container steps and the push question below do not run. The dev server keeps running, nothing is pushed, no container is removed, and the story-level report below still prints, with the Usage Validation section and the held Next Steps. The verdict is read from the stored record, so a failing record kept after a re-validation that could not run still holds. **When it prints `go`:** continue unchanged.
+
+**When `usage-validation-gate: go` and `CONTAINER_MODE=true`:** read `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Container Mode: Stop the Dev Server, § Container Mode: Push the Branch, and § Container Mode: Remove the Container, and run all three, in that order, before continuing below — raising the push confirmation immediately below in between, after every dev-server stop has completed and before anything is pushed. When `CONTAINER_MODE=false` (inline mode) or the gate printed `hold`, skip all three, skip the confirmation with them, and continue directly below.
 
 **Confirm before this container's branch reaches `origin`.** The contract this question satisfies is defined once in `${CLAUDE_PLUGIN_ROOT}/commands/references/publish-confirmation.md` and is not restated here. The question itself lives in this file rather than in that reference — or in `container-execution.md`, which owns the push it gates — because install.sh translates only a command body and the REFERENCE_ALLOWLIST_FULL subtrees (plan/ and execute/) with the full command-body rewrite, while container-execution.md gets only the REFERENCE_ALLOWLIST_LITERALS host-literal rewrite and Check 14 refuses picker markup in it and every other reference. Resolve interactivity fresh — each Bash call is an isolated shell:
 
@@ -262,6 +305,16 @@ Render exactly the lines that carry a value: on `status: ran`, print `commit:` a
 
 This section takes `## Verification Evidence`'s print-whatever-it-is rule rather than `## Pending Verification`'s omit-at-zero one, for the same reason: `skipped` is the answer a reader most needs and the one a conditional section would hide. A run whose closing commit never happened looks, in a report that omits the section, exactly like a run whose closing commit landed — and the operator finds out at release time. `ran` with no commit sha is likewise impossible by construction: the Finalize Step only reaches `ran` after `merge-all` returns and `rev-parse` has answered.
 
+Append, on **every** run, immediately after `## Finalize`:
+```
+## Usage Validation
+
+[the `usage-validation-detail:` and `usage-validation:` lines, rendered as status (with the kind in parentheses for `skipped`), reason, rounds, review path when recorded, and open-finding count; for an absent or unreadable record only the `usage-validation:` line]
+[the `usage-validation-stale:` line from the loop, verbatim, when one printed this run]
+```
+
+This section prints on every run, whatever the status, in the print-whatever-it-is spirit of `## Finalize`. An `unable-to-evaluate` skip shows its warning line and still offers the push and the PR.
+
 If `DESIGN_REVIEW_BUFFERS` is non-empty, append:
 ```
 ## Design Review
@@ -390,6 +443,15 @@ Resolve gates with: $AIMI_CLI gate-pass <story-id> [--option 'value']
 - Review commits: `git log --oneline -[count]`
 - Open a PR: `/aimi:open-pr --branch [branchName]`
 - Run `/aimi:review [branchName]` for code review
+```
+
+**When `usage-validation-gate: hold`:** usage validation is failing, so use this block in place of the ones above, whichever mode ran. Nothing was pushed, no container was removed and the dev server is still running. Re-running `/aimi:execute` validates again; `/aimi:open-pr` appears only inside the warning.
+```
+### Next Steps
+
+- Re-run `/aimi:execute` to validate again
+- Review commits: `git log --oneline -[count]`
+- Warning: usage validation is failing. Opening a PR now publishes work whose real usage failed; if you do, run `/aimi:open-pr --branch [branchName]` in container mode, `/aimi:open-pr --branch [PHASE_BRANCH]` in phase mode, or bare `/aimi:open-pr` in inline mode.
 ```
 
 **Fresh session hint:** After either Next Steps block, tell the person, in one sentence in their language, that this run's state is saved under `.aimi/` and that starting the next command in a fresh session (`/clear`) loses nothing and makes each of its turns cheaper. Skip it in agent mode and when `NEXT_PHASE_HANDOFF` is set, since the run continues into `/aimi:plan`.

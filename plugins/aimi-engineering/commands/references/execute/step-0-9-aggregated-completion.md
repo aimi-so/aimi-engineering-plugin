@@ -30,6 +30,34 @@ done <<< "$SPLIT_PLAN"
 printf 'TOTAL_COMMITS\t%s\n' "$SPLIT_TOTAL_COMMITS"
 ```
 
+Read each record's own usage-validation verdict from its own tasks file before rendering. Only `failing` holds: when any record is failing, the report prints no PR line for any record, only the one warning below, and Pass 4 keeps that record's worktree.
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+SPLIT_PLAN=$(cat <<'SPLIT_PLAN_EOF'
+[paste Pass 1's printed SPLIT_PLAN here, verbatim — one JSON record per line]
+SPLIT_PLAN_EOF
+)
+# usage-rollup:begin
+USAGE_FAILING_N=0
+while IFS= read -r record; do
+  [ -n "$record" ] || continue
+  USAGE_FILE=$(printf '%s' "$record" | jq -r '.file')
+  USAGE_STATUS=$("$AIMI_CLI" metadata --tasks-file "$USAGE_FILE" 2>/dev/null | jq -r '.usageValidation.status // "none"' 2>/dev/null)
+  [ -n "$USAGE_STATUS" ] || USAGE_STATUS=unknown
+  printf 'usage-validation: %s\t%s\n' "$USAGE_FILE" "$USAGE_STATUS"
+  if [ "$USAGE_STATUS" = failing ]; then
+    USAGE_FAILING_N=$((USAGE_FAILING_N + 1))
+    printf 'usage-rollup-failing: %s\t/aimi:execute %s\n' "$USAGE_FILE" "$USAGE_FILE"
+  fi
+done <<< "$SPLIT_PLAN"
+if [ "$USAGE_FAILING_N" -gt 0 ]; then echo "usage-rollup-gate: hold"; else echo "usage-rollup-gate: go"; fi
+# usage-rollup:end
+```
+
+Show each block's `usage-validation:` status under its `Commits:` line. When the gate prints `hold`, replace the PR line of every record in Next Steps with one warning naming each `usage-rollup-failing:` file with its own re-run, `/aimi:execute <that file>`: usage validation is failing there, so no PR is offered for any record. The warning never names a re-run of the parent plan, because `split-detect` does not treat a child whose only open state is a failing usage validation as active, while the Re-validate branch of Step 3 picks up `/aimi:execute <that file>`. With `usage-rollup-gate: go` the report is unchanged.
+
 Render one block per line of that output, filling **Stories completed** from that member's own Task result:
 
 ```
@@ -68,10 +96,17 @@ SPLIT_PLAN_EOF
 )
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"; [ -x "$WORKTREE_MGR" ] || { echo "WORKTREE_MGR is stale: $WORKTREE_MGR does not exist — re-run check-version --quiet --fix" >&2; exit 1; }
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 while IFS= read -r record; do
   [ -n "$record" ] || continue
   SPLIT_ROOT=$(printf '%s' "$record" | jq -r '.root')
   SPLIT_BRANCH=$(printf '%s' "$record" | jq -r '.branch')
+  USAGE_STATUS=$("$AIMI_CLI" metadata --tasks-file "$(printf '%s' "$record" | jq -r '.file')" 2>/dev/null | jq -r '.usageValidation.status // "none"' 2>/dev/null)
+  if [ "$USAGE_STATUS" = failing ]; then
+    echo "kept: $SPLIT_BRANCH worktree — usage validation is failing there"
+    continue
+  fi
   cd "$SPLIT_ROOT"
   $WORKTREE_MGR remove "$SPLIT_BRANCH" --keep-branch
 done <<< "$SPLIT_PLAN"
