@@ -70,6 +70,7 @@ deepen.md	20480
 
 skills/story-executor/SKILL.md	32768
 skills/task-planner/SKILL.md	24576
+skills/git-worktree/SKILL.md	20480
 
 agents/research/aimi-foundation-architect.md	24576
 agents/workflow/aimi-story-expander.md	57344

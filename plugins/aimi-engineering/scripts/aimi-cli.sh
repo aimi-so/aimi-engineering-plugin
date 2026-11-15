@@ -12073,6 +12073,121 @@ cmd_usage_recipe_get() {
     ${_USAGE_RECIPE_ARGS[@]+"${_USAGE_RECIPE_ARGS[@]}"}
 }
 
+# usage-env-up --run <key> --repo <project>[=<branch>]... [--restart]
+# usage-env-status --run <key> [--wait <0-60>]
+# usage-env-down --run <key>
+#
+# Bring the product up from the recorded usage recipe, detached, and report on
+# it. Bash owns the flags, check_python3 and the lookup of the worktree manager
+# beside this CLI; scripts/usage_env.py owns every rule after that. All three
+# refuse without python3 (a degraded answer would read as "nothing to bring up")
+# and `up` refuses when no worktree-manager.sh sits beside the CLI. None of the
+# flag values is a path argument.
+_usage_env_manager() {
+  local manager
+  manager=$(_worktree_manager_beside "$_AIMI_SCRIPT_DIR/aimi-cli.sh")
+  if [ -z "$manager" ]; then
+    echo "Error: $1: no worktree-manager.sh beside this CLI ($_AIMI_SCRIPT_DIR); cannot start or stop servers" >&2
+    exit 1
+  fi
+  printf '%s\n' "$manager"
+}
+
+cmd_usage_env_up() {
+  local run="" restart=0
+  local -a repos=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --run|--repo)
+        if [ $# -lt 2 ]; then
+          echo "Error: usage-env-up: $1 requires a value" >&2
+          exit 1
+        fi
+        if [ "$1" = "--run" ]; then run="$2"; else repos+=("$2"); fi
+        shift 2 ;;
+      --restart) restart=1; shift ;;
+      *)
+        echo "Error: usage-env-up: unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh usage-env-up --run <key> --repo <project>[=<branch>]... [--restart]" >&2
+        exit 1 ;;
+    esac
+  done
+  if [ -z "$run" ]; then
+    echo "Error: usage-env-up: --run is required" >&2
+    exit 1
+  fi
+  if [ "${#repos[@]}" -eq 0 ]; then
+    echo "Error: usage-env-up: at least one --repo <project>[=<branch>] is required" >&2
+    exit 1
+  fi
+  check_python3
+  local manager
+  manager=$(_usage_env_manager usage-env-up) || exit 1
+  local -a extra=()
+  [ "$restart" -eq 1 ] && extra+=(--restart)
+  local -a repo_args=()
+  local r
+  for r in "${repos[@]}"; do repo_args+=(--repo "$r"); done
+  python3 "$(_aimi_script_py usage_env.py)" up --aimi-root "${AIMI_DIR%/.aimi}" \
+    --cli "$_AIMI_SCRIPT_DIR/aimi-cli.sh" --manager "$manager" --run "$run" \
+    "${repo_args[@]}" ${extra[@]+"${extra[@]}"}
+}
+
+cmd_usage_env_status() {
+  local run="" wait_s=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --run|--wait)
+        if [ $# -lt 2 ]; then
+          echo "Error: usage-env-status: $1 requires a value" >&2
+          exit 1
+        fi
+        if [ "$1" = "--run" ]; then run="$2"; else wait_s="$2"; fi
+        shift 2 ;;
+      *)
+        echo "Error: usage-env-status: unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh usage-env-status --run <key> [--wait <0-60>]" >&2
+        exit 1 ;;
+    esac
+  done
+  if [ -z "$run" ]; then
+    echo "Error: usage-env-status: --run is required" >&2
+    exit 1
+  fi
+  check_python3
+  local -a extra=()
+  [ -n "$wait_s" ] && extra+=(--wait "$wait_s")
+  python3 "$(_aimi_script_py usage_env.py)" status --aimi-root "${AIMI_DIR%/.aimi}" --run "$run" \
+    ${extra[@]+"${extra[@]}"}
+}
+
+cmd_usage_env_down() {
+  local run=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --run)
+        if [ $# -lt 2 ]; then
+          echo "Error: usage-env-down: --run requires a value" >&2
+          exit 1
+        fi
+        run="$2"
+        shift 2 ;;
+      *)
+        echo "Error: usage-env-down: unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh usage-env-down --run <key>" >&2
+        exit 1 ;;
+    esac
+  done
+  if [ -z "$run" ]; then
+    echo "Error: usage-env-down: --run is required" >&2
+    exit 1
+  fi
+  check_python3
+  local manager
+  manager=$(_usage_env_manager usage-env-down) || exit 1
+  python3 "$(_aimi_script_py usage_env.py)" down --aimi-root "${AIMI_DIR%/.aimi}" --run "$run"
+}
+
 # Check whether the first-run model-selection prompt should be shown.
 # Echoes exactly one token to stdout:
 #   skip   — models.json already exists OR the marker file already exists
@@ -18118,6 +18233,29 @@ COMMANDS:
                               {status:"absent", recipe:null} for none, and
                               {status:"untrusted", recipe:null} for a config tracked by git.
                               Refuses a stored entry that fails validation; needs python3.
+    usage-env-up --run <key> --repo <project>[=<branch>]... [--restart]
+                              Bring the product up from the recorded usage recipe
+                              (usage-recipe-get), detached, one repository after
+                              another in the order given. <project>=<branch> serves
+                              from <repository>/.worktrees/<branch>; <project> alone
+                              uses the checkout itself. Prints {run,status,stage,state}
+                              with status "starting" at once ("unable-to-evaluate",
+                              reason "no usage recipe recorded", when none is recorded;
+                              {..., reused:true} for a ready run whose servers still run).
+                              --restart serves again without repeating setup steps.
+                              Env: AIMI_USAGE_ENV_STEP_TIMEOUT (900 s),
+                              AIMI_USAGE_ENV_READY_TIMEOUT (300 s). Needs python3.
+    usage-env-status --run <key> [--wait <0-60>]
+                              Print {run,status,stage,reason,repositories:[{project,
+                              status,url}],log}; status is starting|ready|
+                              unable-to-evaluate|failed|down|absent. Returns as soon as
+                              status leaves "starting" or the wait ends; exit 0 in every
+                              state case. Needs python3.
+    usage-env-down --run <key>
+                              Stop a live runner, run the stored recipe's cleanup steps,
+                              stop the servers it started. Prints {run,status:"down",
+                              cleanupFailed,stopped}; {run,status:"absent"} for an unknown
+                              run. Needs python3.
     models-prompt-check       Check whether the model-selection prompt should be shown.
                               Per-host decision:
                               - prompt when the config file is missing entirely (always
@@ -19240,6 +19378,9 @@ main() {
     deps-recipe-record) shift; cmd_deps_recipe_record "$@" ;;
     usage-recipe-record) shift; cmd_usage_recipe_record "$@" ;;
     usage-recipe-get) shift; cmd_usage_recipe_get "$@" ;;
+    usage-env-up) shift; cmd_usage_env_up "$@" ;;
+    usage-env-status) shift; cmd_usage_env_status "$@" ;;
+    usage-env-down) shift; cmd_usage_env_down "$@" ;;
     outline-shift) shift; cmd_outline_shift "$@" ;;
     split-detect)      shift; cmd_split_detect "$@" ;;
     roadmap-init)          shift; cmd_roadmap_init "$@" ;;

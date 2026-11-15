@@ -1058,6 +1058,229 @@ test_serve_deps_docs() {
 }
 
 # ============================================================================
+# Serve --command / --port / --root Tests
+# ============================================================================
+#
+# A recipe command runs verbatim as argv: no package.json, no scripts.dev, no
+# dependency gate. The servers here are python3's stdlib http.server bound to
+# 127.0.0.1, on a port the OS hands out, so no real framework or fixed port is
+# involved.
+
+sc_free_port() {
+  python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
+}
+
+# Sets SC_OUT, SC_ERR and SC_RC of `serve start "$@"`.
+sc_start() {
+  local errf
+  errf=$(mktemp)
+  SC_OUT=$(bash "$WTM" serve start "$@" 2>"$errf")
+  SC_RC=$?
+  SC_ERR=$(cat "$errf")
+  rm -f "$errf"
+}
+
+test_serve_command_usage_errors() {
+  echo ""
+  echo "=== Testing serve start --command / --port / --root — usage errors ==="
+  setup_wtm_fixture
+
+  local case_name rc err
+  while IFS='|' read -r case_name flag_text; do
+    [[ -n "$case_name" ]] || continue
+    # shellcheck disable=SC2086
+    sc_start nosuch-worktree $flag_text
+    assert_exit_code "1" "$SC_RC" "serve command: $case_name — exit 1 before any worktree lookup"
+  done <<'CASES'
+port non-numeric|--command true --port abc
+port too low|--command true --port 80
+port too high|--command true --port 70000
+CASES
+
+  sc_start nosuch-worktree --command true --port 80
+  assert_contains "1024-65535" "$SC_ERR" "serve command: a low --port names the 1024-65535 range"
+  assert_contains "--port" "$SC_ERR" "serve command: a bad --port names the flag"
+  sc_start nosuch-worktree --command true --port
+  assert_exit_code "1" "$SC_RC" "serve command: a valueless --port is a usage error"
+  assert_contains "--port" "$SC_ERR" "serve command: a valueless --port names the flag"
+  sc_start nosuch-worktree --command ""
+  assert_exit_code "1" "$SC_RC" "serve command: an empty --command is a usage error"
+  assert_contains "--command" "$SC_ERR" "serve command: an empty --command names the flag"
+  sc_start nosuch-worktree --command
+  assert_exit_code "1" "$SC_RC" "serve command: a valueless --command is a usage error"
+  local meta
+  for meta in 'true; true' 'true | cat' 'true && true' 'echo $HOME' 'cat < x' 'cat > x' 'echo `id`' $'true\ntrue'; do
+    sc_start nosuch-worktree --command "$meta"
+    assert_exit_code "1" "$SC_RC" "serve command: a shell metacharacter is refused (${meta//$'\n'/<newline>})"
+  done
+  sc_start nosuch-worktree --command true --dir sub
+  assert_exit_code "1" "$SC_RC" "serve command: --command with --dir is a usage error"
+  assert_contains "--dir" "$SC_ERR" "serve command: --command with --dir names --dir"
+  sc_start --root --port 4000
+  assert_exit_code "1" "$SC_RC" "serve command: --root without --command is a usage error"
+  assert_contains "requires --command" "$SC_ERR" "serve command: --root without --command says so"
+  sc_start --root some-name --command true
+  assert_exit_code "1" "$SC_RC" "serve command: --root with a name is a usage error"
+  assert_contains "--root" "$SC_ERR" "serve command: --root with a name names --root"
+  sc_start nosuch-worktree --command true
+  assert_exit_code "1" "$SC_RC" "serve command: a valid command on a missing worktree is exit 1"
+  assert_contains "not found" "$SC_ERR" "serve command: a missing worktree says so"
+  mkdir -p "$WTM_FIXTURE_REPO/.worktrees/real-wt"
+  sc_start real-wt --command no-such-binary-xyz
+  assert_exit_code "1" "$SC_RC" "serve command: a first word not on PATH is exit 1"
+  assert_contains "not found on PATH" "$SC_ERR" "serve command: a first word not on PATH says so"
+
+  teardown_wtm_fixture
+}
+
+test_serve_command_lifecycle() {
+  echo ""
+  echo "=== Testing serve start --command — start, record, reuse, refuse, stop ==="
+  setup_wtm_fixture
+  export DEV_SERVER_READY_TIMEOUT=10
+
+  local branch="sc-life" wt="$WTM_FIXTURE_REPO/.worktrees/sc-life" port
+  mkdir -p "$wt"
+  # No package.json at all: the recipe command is the whole contract.
+  port=$(sc_free_port)
+  local cmd="python3 -m http.server $port --bind 127.0.0.1"
+  sc_start "$branch" --command "$cmd" --port "$port"
+  assert_exit_code "0" "$SC_RC" "serve command: start exit code"
+  assert_eq "http://127.0.0.1:$port" "$SC_OUT" "serve command: serves exactly the requested port"
+
+  local state="$WTM_FIXTURE_REPO/.aimi/state/dev-server.json"
+  assert_eq "$cmd" "$(jq -r '.[] | .command' "$state")" "serve command: dev-server.json records command"
+  assert_eq "$port" "$(jq -r '.[] | .port' "$state")" "serve command: dev-server.json records the port"
+
+  local pid1
+  pid1=$(jq -r '.[] | .pid' "$state")
+  sc_start "$branch" --command "$cmd" --port "$port"
+  assert_eq "http://127.0.0.1:$port" "$SC_OUT" "serve command: the same command reuses the live entry"
+  assert_eq "$pid1" "$(jq -r '.[] | .pid' "$state")" "serve command: reuse keeps the same pid"
+
+  sc_start "$branch" --command "python3 -m http.server $port --bind 127.0.0.1 --directory ."
+  assert_eq "" "$SC_OUT" "serve command: another command prints no URL"
+  assert_contains "serve stop $branch" "$SC_ERR" "serve command: another command names serve stop"
+  assert_eq "true" "$(bash "$WTM" serve status "$branch" 2>/dev/null | jq -r '.running')" \
+    "serve command: another command leaves the entry running"
+
+  # The default mode refuses to adopt a recipe-command entry as its own.
+  printf '{"name":"x","scripts":{"dev":"exec python3 -m http.server \\"$PORT\\" --bind 127.0.0.1"}}\n' > "$wt/package.json"
+  sc_start "$branch"
+  assert_eq "" "$SC_OUT" "serve command: default mode does not adopt an entry that has a command"
+  assert_contains "serve stop $branch" "$SC_ERR" "serve command: default mode names serve stop"
+
+  bash "$WTM" serve stop "$branch" >/dev/null 2>&1
+  assert_eq "false" "$(bash "$WTM" serve status "$branch" 2>/dev/null | jq -r '.running')" "serve command: stop ends the server"
+
+  # A default-mode entry is not adopted by a command start either.
+  sc_start "$branch"
+  assert_contains "http://127.0.0.1:" "$SC_OUT" "serve command: default mode still starts the package.json dev server"
+  assert_eq "null" "$(jq -r '.[] | .command // "null"' "$state")" "serve command: a default entry records no command"
+  sc_start "$branch" --command "$cmd" --port "$(sc_free_port)"
+  assert_eq "" "$SC_OUT" "serve command: a command start does not reuse a default-mode entry"
+  assert_contains "serve stop $branch" "$SC_ERR" "serve command: a command start names serve stop for a default entry"
+  assert_eq "true" "$(bash "$WTM" serve status "$branch" 2>/dev/null | jq -r '.running')" \
+    "serve command: the default-mode entry was not stopped"
+  bash "$WTM" serve stop "$branch" >/dev/null 2>&1
+
+  teardown_wtm_fixture
+}
+
+test_serve_command_busy_port() {
+  echo ""
+  echo "=== Testing serve start --command — a busy --port exits 3 ==="
+  setup_wtm_fixture
+  export DEV_SERVER_READY_TIMEOUT=10
+
+  local wt="$WTM_FIXTURE_REPO/.worktrees/sc-busy" port holder
+  mkdir -p "$wt"
+  port=$(sc_free_port)
+  python3 -m http.server "$port" --bind 127.0.0.1 >/dev/null 2>&1 &
+  holder=$!
+  local waited=0
+  while [[ "$waited" -lt 50 ]] && ! (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+
+  sc_start sc-busy --command "python3 -m http.server $port --bind 127.0.0.1" --port "$port"
+  assert_exit_code "3" "$SC_RC" "serve command: a busy --port exits 3"
+  assert_eq "" "$SC_OUT" "serve command: a busy --port prints no URL"
+  assert_contains "$port" "$SC_ERR" "serve command: a busy --port names the port"
+  assert_eq "" "$(bash "$WTM" serve status sc-busy 2>/dev/null | jq -r 'select(.running) | .pid')" \
+    "serve command: a busy --port registers nothing"
+
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  teardown_wtm_fixture
+}
+
+test_serve_command_rejects_wildcard_bind() {
+  echo ""
+  echo "=== Testing serve start --command — the loopback-bind check stays ==="
+  setup_wtm_fixture
+  export DEV_SERVER_READY_TIMEOUT=10
+
+  local wt="$WTM_FIXTURE_REPO/.worktrees/sc-wild" port
+  mkdir -p "$wt"
+  port=$(sc_free_port)
+  sc_start sc-wild --command "python3 -m http.server $port --bind 0.0.0.0" --port "$port"
+  assert_eq "" "$SC_OUT" "serve command: a wildcard bind prints no URL"
+  assert_contains "loopback" "$SC_ERR" "serve command: a wildcard bind is refused for not being loopback"
+  assert_eq "false" "$(bash "$WTM" serve status sc-wild 2>/dev/null | jq -r '.running')" \
+    "serve command: a refused wildcard bind registers nothing"
+
+  teardown_wtm_fixture
+}
+
+test_serve_root_lifecycle() {
+  echo ""
+  echo "=== Testing serve start --root --command — keyed by the checkout itself ==="
+  setup_wtm_fixture
+  export DEV_SERVER_READY_TIMEOUT=10
+
+  local port cmd
+  port=$(sc_free_port)
+  cmd="python3 -m http.server $port --bind 127.0.0.1"
+  sc_start --root --command "$cmd" --port "$port"
+  assert_exit_code "0" "$SC_RC" "serve root: start exit code"
+  assert_eq "http://127.0.0.1:$port" "$SC_OUT" "serve root: serves the requested port"
+
+  local state="$WTM_FIXTURE_REPO/.aimi/state/dev-server.json" key
+  key=$(realpath -m "$WTM_FIXTURE_REPO")
+  assert_eq "$cmd" "$(jq -r --arg k "$key" '.[$k].command' "$state")" \
+    "serve root: the entry is keyed by the checkout's own path, with its command"
+
+  local st
+  st=$(bash "$WTM" serve status --root 2>/dev/null)
+  assert_eq "true" "$(printf '%s' "$st" | jq -r '.running')" "serve root: status --root sees the server"
+  assert_eq "$port" "$(printf '%s' "$st" | jq -r '.port')" "serve root: status --root reports the port"
+
+  sc_start --root --command "$cmd" --port "$port"
+  assert_eq "http://127.0.0.1:$port" "$SC_OUT" "serve root: the same command reuses the entry"
+
+  bash "$WTM" serve stop --root >/dev/null 2>&1
+  assert_eq "false" "$(bash "$WTM" serve status --root 2>/dev/null | jq -r '.running')" "serve root: stop --root ends it"
+  assert_eq "{}" "$(jq -c '.' "$state")" "serve root: stop --root clears the entry"
+
+  teardown_wtm_fixture
+}
+
+test_serve_command_docs() {
+  echo ""
+  echo "=== Testing serve --command — usage text ==="
+  local help_text
+  help_text=$(bash "$WTM" help 2>&1)
+  assert_contains "serve start <worktree-name> --command <cmd> [--port <n>]" "$help_text" "serve command: help documents --command and --port"
+  assert_contains "1024-65535" "$help_text" "serve command: help documents the port range"
+  assert_contains "exits 3" "$help_text" "serve command: help documents exit 3 for a busy port"
+  assert_contains "serve start --root --command" "$help_text" "serve command: help documents serve start --root"
+  assert_contains "serve stop --root" "$help_text" "serve command: help documents serve stop --root"
+  assert_contains "serve status --root" "$help_text" "serve command: help documents serve status --root"
+}
+
+# ============================================================================
 # Install Deps Tests
 # ============================================================================
 
@@ -2281,6 +2504,15 @@ main() {
   test_serve_deps_subfolder_pick
   test_serve_deps_dir_option
   test_serve_deps_docs
+
+  echo ""
+  echo "--- Serve --command / --port / --root Tests ---"
+  test_serve_command_usage_errors
+  test_serve_command_lifecycle
+  test_serve_command_busy_port
+  test_serve_command_rejects_wildcard_bind
+  test_serve_root_lifecycle
+  test_serve_command_docs
 
   echo ""
   echo "--- Install Deps Tests ---"
