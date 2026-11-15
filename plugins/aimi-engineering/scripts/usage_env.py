@@ -4,14 +4,15 @@
 Real-usage validation drives the product the way a person would, so something
 has to start it. This module is that something, behind three verbs of
 `aimi-cli.sh`: `usage-env-up`, `usage-env-status` and `usage-env-down`. The
-recorded usage recipe (`usage-recipe-get`, written by usage_recipe.py) is the
-ONLY source of what runs: no package.json, Makefile or other convention is
+recorded usage recipe, read in process through `usage_recipe.get` (the reader
+behind `usage-recipe-get`, with its tracked-config check), is the ONLY source
+of what runs: no package.json, Makefile or other convention is
 consulted, and the package-manager `run dev` default is never started.
 
 Shaped like deps_recipe.py and usage_recipe.py: an `_OPS` table, `main(argv)`,
 usage at exit 2. Four ops:
 
-  up      --aimi-root P --cli P --manager P --run K --repo project[=branch]...
+  up      --aimi-root P --manager P --run K --repo project[=branch]...
           [--restart]
   run     --state P             (the detached runner; never called by hand)
   status  --aimi-root P --run K [--wait N]
@@ -59,6 +60,7 @@ import urllib.request
 from urllib.parse import urlsplit
 
 import deps_recipe as D
+import usage_recipe as U
 
 Refusal = D.Refusal
 
@@ -383,23 +385,18 @@ def _parse_repos(aimi_root, specs):
     return repos
 
 
-def _fetch_recipe(cli, aimi_root, project):
-    """(recipe | None, reason | None) from the `usage-recipe-get` verb."""
+def _fetch_recipe(aimi_root, project):
+    """(recipe | None, reason | None) from usage_recipe.get, in process.
+
+    The same reader `usage-recipe-get` answers from, with its tracked-config
+    check: a recipe in a config git tracks is never trusted."""
+    config = os.path.join(aimi_root, ".aimi", "config.json")
     try:
-        out = subprocess.run(
-            [cli, "usage-recipe-get", "--project", project], cwd=aimi_root,
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, timeout=60,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+        answer = U.get(config, project)
+    except Refusal as exc:
+        return None, "usage recipe could not be read: %s" % exc
+    except OSError as exc:
         return None, "usage recipe could not be read (%s)" % exc.__class__.__name__
-    if out.returncode != 0:
-        detail = (out.stderr or "").strip().splitlines()
-        return None, "usage recipe could not be read: %s" % (detail[-1] if detail else "exit %d" % out.returncode)
-    try:
-        answer = json.loads(out.stdout.strip().splitlines()[-1])
-    except (ValueError, IndexError):
-        return None, "usage recipe could not be read"
     status = answer.get("status")
     if status == "recorded" and isinstance(answer.get("recipe"), dict):
         return answer["recipe"], None
@@ -455,9 +452,9 @@ def _op_up(args):
     lock_fd = None
     try:
         f = _parse_flags(
-            args, ("--aimi-root", "--cli", "--manager", "--run"), ("--repo",), ("--restart",),
+            args, ("--aimi-root", "--manager", "--run"), ("--repo",), ("--restart",),
         )
-        for name in ("--aimi-root", "--cli", "--manager"):
+        for name in ("--aimi-root", "--manager"):
             if not f[name]:
                 raise Refusal("%s is required" % name)
         run = f["--run"]
@@ -484,7 +481,7 @@ def _op_up(args):
 
         recipes, reasons = {}, {}
         for repo in repos:
-            recipe, reason = _fetch_recipe(f["--cli"], aimi_root, repo["project"])
+            recipe, reason = _fetch_recipe(aimi_root, repo["project"])
             if recipe is not None:
                 recipes[repo["project"]] = recipe
             else:
@@ -497,7 +494,7 @@ def _op_up(args):
             "run": run, "status": "starting", "stage": "queued", "reason": None,
             "startedAt": now, "updatedAt": now, "runnerPid": None,
             "mode": "restart" if f["--restart"] and previous else "fresh",
-            "aimiRoot": aimi_root, "cli": f["--cli"], "manager": f["--manager"], "log": log_path,
+            "aimiRoot": aimi_root, "manager": f["--manager"], "log": log_path,
             "repositories": repos, "recipes": recipes, "servers": [],
             "previousServers": list((previous or {}).get("servers") or []),
         }

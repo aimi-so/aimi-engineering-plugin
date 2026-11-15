@@ -12186,7 +12186,7 @@ cmd_usage_env_up() {
   local r
   for r in "${repos[@]}"; do repo_args+=(--repo "$r"); done
   python3 "$(_aimi_script_py usage_env.py)" up --aimi-root "${AIMI_DIR%/.aimi}" \
-    --cli "$_AIMI_SCRIPT_DIR/aimi-cli.sh" --manager "$manager" --run "$run" \
+    --manager "$manager" --run "$run" \
     "${repo_args[@]}" ${extra[@]+"${extra[@]}"}
 }
 
