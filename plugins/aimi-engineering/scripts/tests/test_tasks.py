@@ -83,6 +83,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import tasks as T  # noqa: E402
+import usage_record  # noqa: E402
 from plan_text import plan_text  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -11931,11 +11932,11 @@ def test_usage_validation_findings_cap_and_reason_sanitizing(tmp_path, capsys):
     path = _uv_file(tmp_path)
     many = {"k%d" % i: {"status": "open"} for i in range(250)}
     assert _uv(path, "--status", "passed", "--findings-json", json.dumps(many)) == 0
-    assert len(_rs_read(path)["metadata"]["usageValidation"]["findings"]) == T.USAGE_VALIDATION_FINDINGS_MAX
+    assert len(_rs_read(path)["metadata"]["usageValidation"]["findings"]) == usage_record.FINDINGS_MAX
     one = json.dumps({"a": {"status": "accepted", "reason": "x" * 900}})
     assert _uv(path, "--status", "passed", "--findings-json", one) == 0
     reason = _rs_read(path)["metadata"]["usageValidation"]["findings"]["a"]["reason"]
-    assert len(reason) <= T.USAGE_VALIDATION_FINDING_REASON_MAXLEN
+    assert len(reason) <= usage_record.FINDING_REASON_MAXLEN
 
 
 def test_usage_validation_failing_blocks_archive_and_the_predicate_until_passed(tmp_path):

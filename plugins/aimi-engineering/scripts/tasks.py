@@ -185,6 +185,10 @@ from story_merge import compute_waves, outline_tokens_in
 # rule rather than a third copy of it.
 from sanitize import rm_sanitize, SUSPICIOUS
 
+# The usage-validation record (vocabulary, checks, build) is shared with
+# roadmap.py's phase writer and owned by neither: usage_record.py holds it.
+import usage_record
+
 # The paragraph separator the cross-story audit already writes `notes` with.
 # story_merge imports it from the same place, so this adds no new edge to the
 # import graph: audit_patches is loaded by the line above either way.
@@ -1238,16 +1242,6 @@ SMELL_ACKNOWLEDGE_REASON_MAXLEN = 500
 # name for the same reason: a different field that merely agrees today.
 EVIDENCE_ACKNOWLEDGE_REASON_MAXLEN = 500
 
-# usage-validation-record's vocabulary and caps. The run-level verdict of the
-# real-usage validation gate is stored on metadata.usageValidation; the words
-# below are the only ones the op writes, and the reason rules live beside them.
-USAGE_VALIDATION_STATUSES = ("passed", "failing", "skipped")
-USAGE_VALIDATION_KINDS = ("not-applicable", "unable-to-evaluate", "disabled-by-operator")
-USAGE_VALIDATION_FINDING_STATUSES = ("open", "fixed", "accepted")
-USAGE_VALIDATION_REASON_MAXLEN = 2000
-USAGE_VALIDATION_FINDING_REASON_MAXLEN = 500
-USAGE_VALIDATION_FINDINGS_MAX = 200
-USAGE_VALIDATION_FINDING_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 # set-verification never writes "pending" -- recording a verdict is the
 # opposite of "nobody looked yet" -- so its own allowed set is this tuple
@@ -6161,74 +6155,23 @@ def _usage_validation_failing(docs):
     return False
 
 
-def _usage_validation_findings(raw):
-    """Parse and check --findings-json: {key: {status, reason?}}. Dies naming the flag."""
-    try:
-        parsed = json.loads(raw)
-    except ValueError:
-        die("Error: usage-validation-record: --findings-json is not valid JSON")
-    if not isinstance(parsed, dict):
-        die("Error: usage-validation-record: --findings-json must be a JSON object")
-    findings = {}
-    for key, entry in parsed.items():
-        if not USAGE_VALIDATION_FINDING_KEY.match(key):
-            die("Error: usage-validation-record: --findings-json key is not allowed: " + key)
-        if not isinstance(entry, dict) or entry.get("status") not in USAGE_VALIDATION_FINDING_STATUSES:
-            die(
-                "Error: usage-validation-record: --findings-json entry '" + key
-                + "' needs a status of " + "|".join(USAGE_VALIDATION_FINDING_STATUSES)
-            )
-        reason = entry.get("reason")
-        if reason is not None and not isinstance(reason, str):
-            die("Error: usage-validation-record: --findings-json reason of '" + key + "' must be a string")
-        clean = rm_sanitize(reason, USAGE_VALIDATION_FINDING_REASON_MAXLEN) if reason else ""
-        if entry["status"] == "accepted" and not clean.strip():
-            die("Error: usage-validation-record: --findings-json entry '" + key + "' is accepted and needs a reason")
-        built = {"status": entry["status"]}
-        if clean.strip():
-            built["reason"] = clean
-        findings[key] = built
-    return findings
-
-
 def op_usage_validation_record(argv):
     """usage-validation-record: write metadata.usageValidation, the run-level
     verdict of the real-usage validation gate, replacing any earlier record.
 
-    Every vocabulary rule runs BEFORE the document is read, so a refusal never
-    opens the file. Only --review's confinement is bash's, before the lock;
-    this module takes no path of its own for it. An overwrite carries over the
-    previous record's accepted findings that the new call does not restate, so
-    an accepted decision is never asked again on a re-run.
+    The record's vocabulary, its checks and its build are usage_record.py's,
+    shared with roadmap.py's phase writer. Every vocabulary rule runs BEFORE the
+    document is read, so a refusal never opens the file. Only --review's
+    confinement is bash's, before the lock; this module takes no path of its
+    own for it. An overwrite carries over the previous record's accepted
+    findings that the new call does not restate, so an accepted decision is
+    never asked again on a re-run.
     """
     prefix = "Error: usage-validation-record: "
     path = _flag(argv, "--tasks-file")
     if not path:
         die("Usage: tasks.py usage-validation-record --tasks-file <path> --status <passed|failing|skipped> [flags]")
-    status = _flag(argv, "--status")
-    if status not in USAGE_VALIDATION_STATUSES:
-        die(prefix + "--status must be one of " + "|".join(USAGE_VALIDATION_STATUSES) + ", got: " + str(status or ""))
-    kind = _flag(argv, "--kind") if "--kind" in argv else None
-    if kind is not None and kind not in USAGE_VALIDATION_KINDS:
-        die(prefix + "--kind must be one of " + "|".join(USAGE_VALIDATION_KINDS) + ", got: " + kind)
-    if status == "skipped" and kind is None:
-        die(prefix + "--kind is required with --status skipped")
-    if status != "skipped" and kind is not None:
-        die(prefix + "--kind is only allowed with --status skipped")
-    raw_reason = _flag(argv, "--reason")
-    clean_reason = rm_sanitize(raw_reason, USAGE_VALIDATION_REASON_MAXLEN) if raw_reason else ""
-    if status in ("failing", "skipped") and not clean_reason.strip():
-        die(prefix + "--reason is required with --status " + status)
-    rounds = 0
-    if "--rounds" in argv:
-        raw_rounds = _flag(argv, "--rounds")
-        if raw_rounds is None or not re.fullmatch(r"[0-9]+", raw_rounds):
-            die(prefix + "--rounds must be a non-negative integer, got: " + str(raw_rounds or ""))
-        rounds = int(raw_rounds)
-    findings = {}
-    if "--findings-json" in argv:
-        findings = _usage_validation_findings(_flag(argv, "--findings-json") or "")
-    review = _flag(argv, "--review")
+    request = usage_record.parse_request(argv, prefix)
 
     docs = read_docs(path, "usage-validation-record")
     first = docs[0] if docs else None
@@ -6245,26 +6188,7 @@ def op_usage_validation_record(argv):
             "a phase's verdict is recorded in roadmap.json: " + path
         )
 
-    merged = dict(findings)
-    previous = target.get("usageValidation")
-    previous_findings = previous.get("findings") if isinstance(previous, dict) else None
-    if isinstance(previous_findings, dict):
-        for key, entry in previous_findings.items():
-            if key not in merged and isinstance(entry, dict) and entry.get("status") == "accepted":
-                merged[key] = entry
-    merged = dict(list(merged.items())[:USAGE_VALIDATION_FINDINGS_MAX])
-
-    record = {"status": status}
-    if kind is not None:
-        record["kind"] = kind
-    if clean_reason.strip():
-        record["reason"] = clean_reason
-    if review:
-        record["review"] = review
-    record["rounds"] = rounds
-    if merged:
-        record["findings"] = merged
-    record["recordedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    record = usage_record.build_record(request, target.get("usageValidation"))
     target["usageValidation"] = record
     write_docs_atomically(path, docs)
     _emit(record)

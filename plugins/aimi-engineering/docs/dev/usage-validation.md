@@ -30,8 +30,8 @@ Every verb whose name carries `usage`, all dispatched from `scripts/aimi-cli.sh`
 | `usage-env-down --run <key>` | Stops what `usage-env-up` started and runs the recipe's cleanup | run state under `.aimi/` | `usage_env.py` |
 | `usage-validation-required (--feature <slug> --phase <id> \| [--tasks-file <path>])` | Whether validation is owed, with surfaces, charters, specs and, when it is not, the skip kind and reason | nothing | `usage_validation.py` |
 | `usage-validation-verdict --required-file <path> --evidence-dir <dir> [--reproduced <key>]... [--accepted <key>]...` | The gate outcome of one validation, from the validator's last `usage_validation_verdict` block on stdin, the required answer and the evidence directory. Every outcome, `tooling-failed` included, is an answer at exit 0 | nothing | `usage_validation.py` |
-| `usage-validation-record --status <passed\|failing\|skipped> [--kind <kind>] [--reason <text>] [--review <path>] [--rounds <n>] [--findings-json <json>] [--tasks-file <path>]` | Writes the flat run's `metadata.usageValidation`; refused on a phase-scoped tasks file | the tasks file | `tasks.py` |
-| `roadmap-record-usage-validation --feature <slug> --phase <id> --status <passed\|failing\|skipped> [--kind <kind>] [--reason <text>] [--review <path>] [--rounds <n>] [--findings-json <json>]` | Writes a phase's `usageValidation` into `roadmap.json` | `roadmap.json` | `roadmap.py` |
+| `usage-validation-record --status <passed\|failing\|skipped> [--kind <kind>] [--reason <text>] [--review <path>] [--rounds <n>] [--findings-json <json>] [--tasks-file <path>]` | Writes the flat run's `metadata.usageValidation`; refused on a phase-scoped tasks file | the tasks file | `tasks.py`, `usage_record.py` |
+| `roadmap-record-usage-validation --feature <slug> --phase <id> --status <passed\|failing\|skipped> [--kind <kind>] [--reason <text>] [--review <path>] [--rounds <n>] [--findings-json <json>]` | Writes a phase's `usageValidation` into `roadmap.json` | `roadmap.json` | `roadmap.py`, `usage_record.py` |
 
 `usage-validation-required` refuses without `python3`: a gate that cannot evaluate must not degrade into an answer. Its decision is a fixed ladder, first match wins, taken after surfaces and charters are built from every readable member so that a skipped answer still names what stayed unvalidated:
 
@@ -43,7 +43,7 @@ Every verb whose name carries `usage`, all dispatched from `scripts/aimi-cli.sh`
 
 ## The records
 
-A record is `{status, kind?, reason?, review?, rounds, findings?, recordedAt}`. `status` is `passed`, `failing` or `skipped`; `kind` is present only with `skipped` and is one of the three skip kinds below; `reason` is required with `failing` and `skipped`. `findings` maps a key `<charterId>:<step>:<heuristic>` to `{status: open|fixed|accepted, reason?}` (an accepted entry needs a reason). Every write replaces the whole object, except that the previous record's `accepted` findings the call does not restate are carried over. Both writers apply the same vocabulary before the document is read, so a refusal never opens the file.
+A record is `{status, kind?, reason?, review?, rounds, findings?, recordedAt}`. `status` is `passed`, `failing` or `skipped`; `kind` is present only with `skipped` and is one of the three skip kinds below; `reason` is required with `failing` and `skipped`. `findings` maps a key `<charterId>:<step>:<heuristic>` to `{status: open|fixed|accepted, reason?}` (an accepted entry needs a reason). Every write replaces the whole object, except that the previous record's `accepted` findings the call does not restate are carried over. Both writers apply the same vocabulary before the document is read, so a refusal never opens the file. That vocabulary, its checks and the build of a record live once, in `scripts/usage_record.py` (`parse_request`, `build_record`), which imports only the standard library and `sanitize.py`; each writer only reads its document, finds the stored record and writes what `build_record` returns.
 
 The record lives in two places by scope: `phases[].usageValidation` in `roadmap.json` for a phase (`docs/dev/roadmap.md`), and `metadata.usageValidation` for a flat run (`docs/dev/tasks-schema.md`). `metadata.usageSurfaces`, the surfaces the plan declared, is written by `/aimi:plan` (`commands/references/plan/phase-4-usage-surfaces.md`).
 
@@ -85,6 +85,7 @@ For a flat run, `archive-task` and the archivable predicate refuse a tasks file 
 | `scripts/tests/test_usage_validation.py` | `usage-validation-required` and its skip ladder |
 | `scripts/tests/test_usage_validation_verdict.py` | `usage-validation-verdict` |
 | `scripts/tests/test_usage_validator_agent.py` | the agent file and its verdict block |
+| `scripts/tests/test_usage_record.py` | the record rule both writers share (`usage_record.py`) |
 | `scripts/tests/test_usage_validation_gate.py` | the completed gate, `archive-task` and the Step 5 hold |
 | `scripts/tests/test_usage_validation_loop.py` | the loop entry |
 | `scripts/tests/test_usage_validation_phase_step.py`, `scripts/tests/test_usage_validation_flat_step.py` | the two step files |
