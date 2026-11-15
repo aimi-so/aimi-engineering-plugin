@@ -63,6 +63,7 @@ PHASE_ID="[PHASE_ID]"
 AIMI_ROOT="[AIMI_ROOT]"
 PHASE_BRANCH="[PHASE_BRANCH]"
 USAGE_ANSWER_FILE="[the usage-validation-answer path, or empty]"
+# usage-phase-stored:begin
 PHASE_JSON=$("$AIMI_CLI" roadmap-get --feature "$FEATURE" --phase "$PHASE_ID") || PHASE_JSON="{}"
 printf 'usage-validation-stored: status=%s kind=%s\n' \
   "$(printf '%s' "$PHASE_JSON" | jq -r '.usageValidation.status // "none"')" \
@@ -78,12 +79,14 @@ if [ -n "$USAGE_ANSWER_FILE" ]; then
       .) usage_dir="$AIMI_ROOT" ;;
       *) usage_dir="$AIMI_ROOT/$usage_project" ;;
     esac
-    printf 'usage-exec: project=%s root=%s branch=%s\n' "$usage_project" "$(git -C "$usage_dir" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$usage_dir")" "$PHASE_BRANCH"
+    usage_top=$(git -C "$usage_dir" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$usage_dir")
+    printf 'usage-exec: project=%s root=%s branch=%s\n' "$usage_project" "$usage_top/.worktrees/$PHASE_BRANCH" "$PHASE_BRANCH"
   done
 fi
+# usage-phase-stored:end
 ```
 
-`usage-run:` is the run key, `usage-repo:` is one repository value per participating project with `PHASE_BRANCH` as its container, and `usage-exec:` gives each group's `EXEC_ROOT` and `EXEC_BRANCH`. `usage-validation-stored:` and the `usage-validation-accepted:` keys are what a re-run reads.
+`usage-run:` is the run key, `usage-repo:` is one repository value per participating project with `PHASE_BRANCH` as its container, and `usage-exec:` gives each group's `EXEC_ROOT` and `EXEC_BRANCH`. `EXEC_ROOT` is the phase container, the repository's toplevel plus `/.worktrees/` plus `PHASE_BRANCH` (`container-execution.md`'s Execution Context table), never the toplevel: `PHASE_BRANCH` is checked out in that container, so a fix round's `merge-all --into PHASE_BRANCH` run from the toplevel is refused by git. `usage-validation-stored:` and the `usage-validation-accepted:` keys are what a re-run reads.
 
 #### Skip ladder
 
