@@ -66,7 +66,7 @@ It ends its message with one fenced block tagged `usage_validation_verdict`: `ch
 
 `roadmap-set-status --status completed` refuses a phase whose stored record is `failing`, whatever the requirement says (a recipe that disappeared, a `.aimi/config.json` that became tracked or `AIMI_USAGE_VALIDATION=off` after the fact does not close a phase with severe findings open), and a phase that owes validation (the same predicate `usage-validation-required` answers) and carries no `passed` or `skipped` record, by `_completed_gate_usage_refusal` in `scripts/roadmap.py`. The stored `failing` record is checked first; the requirement is computed only for the owed-and-unrecorded line. The two refusals have distinct wording, and a requirement that cannot be computed draws one advisory line rather than a refusal.
 
-For a flat run, `archive-task` and the archivable predicate refuse a tasks file whose `metadata.usageValidation.status` is `failing` (`_usage_validation_failing` in `scripts/tasks.py`). Step 5 of `/aimi:execute` holds its publishing path on a stored `failing` record and `/aimi:open-pr` prints the stored verdict (Step 2g) without blocking.
+For a flat run, `archive-task` and the archivable predicate refuse a tasks file whose `metadata.usageValidation.status` is `failing` (`_usage_validation_failing` in `scripts/tasks.py`). Step 5 of `/aimi:execute` holds its publishing path on a stored `failing` record and `/aimi:open-pr` prints the stored verdict (Step 2g) without blocking; a `failing` verdict also becomes one fixed first line of the PR body (`Usage validation: FAILING — <reason>. Re-run /aimi:execute to re-validate.`, rendered by Step 4d), so the reviewer sees it on the forge.
 
 ## Answering `context-budget.md`, The Question Every New Gate Must Answer
 
@@ -86,6 +86,7 @@ For a flat run, `archive-task` and the archivable predicate refuse a tasks file 
 | `scripts/tests/test_usage_validation.py` | `usage-validation-required` and its skip ladder |
 | `scripts/tests/test_usage_validation_verdict.py` | `usage-validation-verdict` |
 | `scripts/tests/test_usage_validator_agent.py` | the agent file and its verdict block |
+| `scripts/tests/test_open_pr_usage_line.py` | the failing verdict's line in the `/aimi:open-pr` body (Steps 2g and 4d) |
 | `scripts/tests/test_usage_validation_get.py` | `usage-validation-get`, the one reader of a stored record |
 | `scripts/tests/test_usage_record.py` | the record rule both writers share (`usage_record.py`) |
 | `scripts/tests/test_usage_validation_gate.py` | the completed gate, `archive-task` and the Step 5 hold |

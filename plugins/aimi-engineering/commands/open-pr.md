@@ -541,12 +541,13 @@ if [ -n "$USAGE_REC" ]; then
   printf 'usage-validation: %s%s\n' "$USAGE_STATUS" "${USAGE_REASON:+ — $USAGE_REASON}" >&2
   if [ "$USAGE_STATUS" = failing ]; then
     printf 'Warning: usage validation is FAILING%s. Re-run /aimi:execute to validate again before publishing.\n' "${USAGE_REASON:+ ($USAGE_REASON)}" >&2
+    printf 'usage-pr-line: Usage validation: FAILING%s. Re-run /aimi:execute to re-validate.\n' "${USAGE_REASON:+ — $USAGE_REASON}"
   fi
 fi
 # usage-open-pr:end
 ```
 
-`$CURRENT_BRANCH` is retyped from the value Step 2a resolved, because each block runs in its own shell. Both calls read the session's active tasks file.
+`$CURRENT_BRANCH` is retyped from the value Step 2a resolved, because each block runs in its own shell. Both calls read the session's active tasks file. A `failing` verdict also prints one `usage-pr-line:` line on stdout; Step 4d puts its text at the top of the PR body, so a reviewer sees it without the terminal.
 
 ## Step 4: Build PR Title and Description
 
@@ -694,6 +695,7 @@ Build the description from git state with three core sections, plus one conditio
 - **Summary**: Aggregated commit bodies from `$COMMIT_LOG`. Split records by the ASCII record separator (`%x1e`), then split each record's fields by the unit separator (`%x1f`) into `hash`, `subject`, `body`. Concatenate the non-empty `body` fields into a single prose block. A commit with an empty body contributes nothing — there is deliberately no fallback to its subject, because **Changes** below already renders every subject, and a fallback Summary would restate that section verbatim on exactly the branches whose body is under the most pressure.
 - **Changes**: Each commit **subject** (the second field from every record) rendered as a bullet, one per line — apply the **story-tag strip** below to each subject before rendering.
 - **Files Changed**: The `$DIFF_STAT` output rendered inside a fenced code block.
+- **Usage validation line** (conditional): the text after Step 2g's `usage-pr-line:`, printed only when the stored verdict is `failing`. Step 4d renders it as the body's first line, held whole like Changes. Absent, it renders nothing.
 - **Closes lines** (conditional): one `Closes #<N>` line per entry of `$METADATA_ISSUES`, the issue list Step 4a already read and already gated on the deliverable branch and, for a plan split across repositories, emptied by Step 4a's split check. Rendered last, after every section above, so a merged PR retires the issues the plan named. Nothing is emitted at all — no heading, no blank section — when the list is empty, which covers all three of its causes at once: a plan that named no issue, a `metadata.issues` key that is absent (it is omitted entirely rather than written as `[]` or `null`), and a list Step 4a's deliverable-branch gate discarded as another feature's.
 
 **Story-tag strip (applies to every commit subject used in the body).** The per-story commits `/aimi:execute` produces carry an internal `US-NNN` tag in their subject (e.g. a trailing `[US-001]`, ` — US-001`, ` - Story US-012a`, or a leading `US-003 `). Strip that tag from each subject before it appears in the **Changes** bullets, so the internal id never leaks into the public PR body — the identical rule Step 4a already applies to the title. The commit **bodies** (the Summary's primary source) are used verbatim; the tag lives only in subjects, so only subjects are stripped. Per subject `$s`:
@@ -812,6 +814,10 @@ When `$INCLUDE_BACKEND_SPEC=1`, render the spec deterministically from `metadata
 ```bash
 PR_BODY_CAP=65536
 PR_BODY_FILE="$(git rev-parse --absolute-git-dir)/aimi-pr-body.md"
+USAGE_PR_LINE=$(cat <<'USAGE_PR_LINE_EOF'
+[the text after Step 2g's usage-pr-line:, or empty when it printed none]
+USAGE_PR_LINE_EOF
+)
 PR_SUMMARY_FILE="$PR_BODY_FILE.summary"
 
 # Changes: every commit subject as a bullet, story-tag-stripped — the same
@@ -874,6 +880,7 @@ OMIT_NOTICE_FMT='_%s of %s commits omitted from the Summary — the body reached
 # that is never trimmed, once for real. Two call sites cannot drift into two
 # different bodies, which a second copy of the scaffold would allow.
 render_body() {
+  [ -z "$USAGE_PR_LINE" ] || printf '%s\n\n' "$USAGE_PR_LINE"
   printf '## Summary\n\n%s\n' "$RENDER_SUMMARY"
   if [ -n "$RENDER_NOTICE" ]; then
     printf '\n%s\n' "$RENDER_NOTICE"

@@ -209,7 +209,7 @@ def test_usage_open_pr_flat_failing_warns_on_stderr(tmp_path, shell):
     meta = {"deliverableBranch": "feat/x"}
     cfg = make_stub(tmp_path, ("json", meta), ("json", uvg({"status": "failing", "reason": "broken"})))
     out, err = run(tmp_path, shell, OPEN_PR_HEADER, block(OPEN_PR, "usage-open-pr"), cfg)
-    assert out == ""
+    assert out == "usage-pr-line: Usage validation: FAILING — broken. Re-run /aimi:execute to re-validate.\n"
     assert "Warning: usage validation is FAILING (broken)" in err and "/aimi:execute" in err
 
 
