@@ -16739,6 +16739,64 @@ cmd_roadmap_record_visual_gate() {
   printf '%s\n' "$out"
 }
 
+# Writes a phase's usage-validation verdict into roadmap.json, in place.
+#
+# cmd_roadmap_record_visual_gate's shape: one crossing, inside the lock. Every
+# vocabulary rule (status, kind, reason, rounds, findings) runs in the op before
+# the document is read; only the flag loop, the phase id and --review's
+# confinement happen here, before the lock. --rounds and --findings-json are
+# passed whenever the flag was given, so an empty value reaches the op and is
+# refused there instead of defaulting.
+cmd_roadmap_record_usage_validation() {
+  local feature="" phase_id="" status="" kind="" reason="" review="" rounds="" findings=""
+  local has_kind=0 has_reason=0 has_rounds=0 has_findings=0
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) shift; feature="${1:-}" ;;
+      --phase) shift; phase_id="${1:-}" ;;
+      --status) shift; status="${1:-}" ;;
+      --kind) shift; kind="${1:-}"; has_kind=1 ;;
+      --reason) shift; reason="${1:-}"; has_reason=1 ;;
+      --review) shift; review="${1:-}" ;;
+      --rounds) shift; rounds="${1:-}"; has_rounds=1 ;;
+      --findings-json) shift; findings="${1:-}"; has_findings=1 ;;
+      *)
+        echo "Error: roadmap-record-usage-validation: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature" "roadmap-record-usage-validation"
+  _roadmap_validate_phase_id "$phase_id" "roadmap-record-usage-validation"
+
+  [ -n "$review" ] && validate_path_in_project "$review"
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_require "roadmap-record-usage-validation" "$feature")
+
+  check_python3
+  local extra_args=()
+  [ "$has_kind" -eq 1 ] && extra_args+=(--kind "$kind")
+  [ "$has_reason" -eq 1 ] && extra_args+=(--reason "$reason")
+  [ -n "$review" ] && extra_args+=(--review "$review")
+  [ "$has_rounds" -eq 1 ] && extra_args+=(--rounds "$rounds")
+  [ "$has_findings" -eq 1 ] && extra_args+=(--findings-json "$findings")
+
+  local out
+  out=$(
+    (
+      _lock "${roadmap_path}.lock"
+      python3 "$(_aimi_roadmap_py)" record-usage-validation \
+        --roadmap "$roadmap_path" --phase "$phase_id" --status "$status" \
+        ${extra_args[@]+"${extra_args[@]}"}
+    ) 200>"${roadmap_path}.lock"
+  ) || exit $?
+  printf '%s\n' "$out"
+}
+
 # Whether a phase owes a visual comparison, derived from its own tasks file(s).
 # Structurally cmd_roadmap_get: a read, so no lock, and ungated by
 # _roadmap_require_contracts (no creates/needs entry is read).
@@ -19144,6 +19202,20 @@ COMMANDS:
                               or re-verified phase carries one record, never two.
                               A phase id absent from roadmap.json is refused,
                               naming the id and the roadmap path.
+    roadmap-record-usage-validation --feature <slug> --phase <id> --status <passed|failing|skipped> [--kind <not-applicable|unable-to-evaluate|disabled-by-operator>] [--reason <text>] [--review <path>] [--rounds <n>] [--findings-json <json>]
+                              Locked read-modify-write. Replaces
+                              phases[].usageValidation whole with {status, kind?,
+                              reason?, review?, rounds, findings?, recordedAt}; a
+                              key not given is omitted, rounds defaults to 0.
+                              --kind is required with skipped and refused with any
+                              other status; --reason is required (non-blank) for
+                              failing and skipped. --findings-json is an object of
+                              <key>: {status: open|fixed|accepted, reason?}; an
+                              overwrite keeps the previous record's accepted
+                              entries it does not restate. --review must resolve
+                              inside the project root. Needs python3. A phase
+                              owing usage validation cannot reach completed
+                              without passed or skipped recorded.
     usage-validation-required --feature <slug> --phase <id> | [--tasks-file <path>]
                               Read-only. Whether usage validation is owed for a phase
                               (every member of a split phase) or a flat run (the
@@ -19592,6 +19664,7 @@ main() {
     roadmap-write-handoff) shift; cmd_roadmap_write_handoff "$@" ;;
     roadmap-record-visual-gate)   shift; cmd_roadmap_record_visual_gate "$@" ;;
     roadmap-visual-gate-required) shift; cmd_roadmap_visual_gate_required "$@" ;;
+    roadmap-record-usage-validation) shift; cmd_roadmap_record_usage_validation "$@" ;;
     usage-validation-required) shift; cmd_usage_validation_required "$@" ;;
     usage-validation-verdict) shift; cmd_usage_validation_verdict "$@" ;;
     write-review)         shift; cmd_write_review "$@" ;;
