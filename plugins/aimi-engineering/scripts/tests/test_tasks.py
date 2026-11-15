@@ -11928,6 +11928,40 @@ def test_usage_validation_findings_merge_keeps_accepted_and_drops_open_and_fixed
     assert list(_rs_read(path)["metadata"]["usageValidation"]["findings"]) == ["a:1:h"]
 
 
+def test_usage_validation_keeps_a_stored_failing_record_over_an_unable_to_evaluate_skip(tmp_path, capsys):
+    path = _uv_file(tmp_path)
+    assert _uv(path, "--status", "failing", "--reason", "open bug") == 0
+    capsys.readouterr()
+    with open(path, "rb") as handle:
+        before = handle.read()
+    assert _uv(path, "--status", "skipped", "--kind", "unable-to-evaluate", "--reason", "env down") == 0
+    answer = json.loads(capsys.readouterr().out)
+    assert answer["kept"] == "failing" and answer["usageValidation"]["reason"] == "open bug"
+    assert answer["requested"] == {"status": "skipped", "kind": "unable-to-evaluate", "reason": "env down"}
+    with open(path, "rb") as handle:
+        assert handle.read() == before
+
+
+@pytest.mark.parametrize("flags", [
+    ("--status", "passed"),
+    ("--status", "failing", "--reason", "new"),
+    ("--status", "skipped", "--kind", "disabled-by-operator", "--reason", "decided"),
+    ("--status", "skipped", "--kind", "not-applicable", "--reason", "nothing to use"),
+])
+def test_usage_validation_overwrites_a_stored_failing_record_with_a_judged_or_chosen_verdict(tmp_path, capsys, flags):
+    path = _uv_file(tmp_path)
+    assert _uv(path, "--status", "failing", "--reason", "open bug") == 0
+    assert _uv(path, *flags) == 0
+    assert _rs_read(path)["metadata"]["usageValidation"]["status"] == flags[1]
+
+
+def test_usage_validation_an_unable_skip_without_a_failing_record_is_written(tmp_path, capsys):
+    path = _uv_file(tmp_path)
+    assert _uv(path, "--status", "passed") == 0
+    assert _uv(path, "--status", "skipped", "--kind", "unable-to-evaluate", "--reason", "env down") == 0
+    assert _rs_read(path)["metadata"]["usageValidation"]["kind"] == "unable-to-evaluate"
+
+
 def test_usage_validation_findings_cap_and_reason_sanitizing(tmp_path, capsys):
     path = _uv_file(tmp_path)
     many = {"k%d" % i: {"status": "open"} for i in range(250)}

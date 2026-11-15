@@ -6165,7 +6165,8 @@ def op_usage_validation_record(argv):
     confinement is bash's, before the lock; this module takes no path of its
     own for it. An overwrite carries over the previous record's accepted
     findings that the new call does not restate, so an accepted decision is
-    never asked again on a re-run.
+    never asked again on a re-run. A stored failing record is kept over an
+    unable-to-evaluate skip, and the answer is `{"kept": "failing", ...}`.
     """
     prefix = "Error: usage-validation-record: "
     path = _flag(argv, "--tasks-file")
@@ -6188,7 +6189,12 @@ def op_usage_validation_record(argv):
             "a phase's verdict is recorded in roadmap.json: " + path
         )
 
-    record = usage_record.build_record(request, target.get("usageValidation"))
+    action, record = usage_record.build_record(request, target.get("usageValidation"))
+    if action == "keep":
+        # A stored failing record survives an unable-to-evaluate skip; the
+        # file is not written (usage_record.py's docstring says why).
+        _emit(usage_record.kept_answer(record, request))
+        return 0
     target["usageValidation"] = record
     write_docs_atomically(path, docs)
     _emit(record)

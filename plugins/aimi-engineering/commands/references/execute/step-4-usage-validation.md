@@ -98,25 +98,24 @@ fi
 - **A stored `skipped` record** answers that question already: reuse it with no question and no overwrite, print `usage-validation: skipped (<stored kind>) — <stored reason>` and go to Step 5.
 - **`disabled-by-operator`** is never asked about.
 
-A stored `failing` record is replaced only by a verdict that judged the product (`passed`, `failing`) or by a skip somebody chose (`not-applicable`, `disabled-by-operator`). An `unable-to-evaluate` end learned nothing: the block makes no record call, leaves the `failing` record untouched and prints `usage-validation: failing — re-validation could not run (<stage>: <reason>)`, so a broken environment on a re-run cannot unblock a run whose severe findings are still open. A record call that exits non-zero prints `usage-validation: tooling-failed` and records nothing; the run still goes to Step 5.
+A stored `failing` record is replaced only by a verdict that judged the product (`passed`, `failing`) or by a skip somebody chose (`not-applicable`, `disabled-by-operator`). An `unable-to-evaluate` end learned nothing: the writer keeps the `failing` record, answers `{"kept":"failing", ...}` and the block prints `usage-validation: failing — re-validation could not run (<stage>: <reason>)`, so a broken environment on a re-run cannot unblock a run whose severe findings are still open. The writer decides this inside its lock, so the block does not read the stored status itself. A record call that exits non-zero prints `usage-validation: tooling-failed` and records nothing; the run still goes to Step 5.
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 RUN_TASKS_FILE="[tasks path from the init-session output]"
-USAGE_STORED_STATUS="[status= value of usage-validation-stored:]"
 USAGE_KIND="[not-applicable, unable-to-evaluate or disabled-by-operator]"
 USAGE_REASON=$(cat <<'USAGE_REASON_EOF'
 [the reason: the answer's, or the sanitized one for the undeclared surface]
 USAGE_REASON_EOF
 )
 # usage-flat-skip:begin
-if [ "$USAGE_STORED_STATUS" = "failing" ] && [ "$USAGE_KIND" = "unable-to-evaluate" ]; then
-  printf 'usage-validation: failing — re-validation could not run (%s)\n' "$USAGE_REASON"
-elif "$AIMI_CLI" usage-validation-record --tasks-file "$RUN_TASKS_FILE" --status skipped --kind "$USAGE_KIND" --reason "$USAGE_REASON" >/dev/null; then
-  printf 'usage-validation: skipped (%s) — %s\n' "$USAGE_KIND" "$USAGE_REASON"
-else
+if ! USAGE_OUT=$("$AIMI_CLI" usage-validation-record --tasks-file "$RUN_TASKS_FILE" --status skipped --kind "$USAGE_KIND" --reason "$USAGE_REASON"); then
   echo "usage-validation: tooling-failed"
+elif [ "$(printf '%s' "$USAGE_OUT" | jq -r '.kept // empty' 2>/dev/null)" = failing ]; then
+  printf 'usage-validation: failing — re-validation could not run (%s)\n' "$USAGE_REASON"
+else
+  printf 'usage-validation: skipped (%s) — %s\n' "$USAGE_KIND" "$USAGE_REASON"
 fi
 # usage-flat-skip:end
 ```
@@ -130,14 +129,13 @@ fi
 
 #### Record the outcome
 
-Paste the Environment's outcome and reason and the loop's result lines: `USAGE_LOOP_LINE` is the `usage-loop:` line (empty when the loop did not run), `USAGE_LOOP_FINDINGS` the object after `usage-loop-findings:`, `USAGE_LOOP_REASON` the text after `usage-loop-reason:`, and `USAGE_STALE_LINE` the `usage-validation-stale:` line when one printed. The block reads the line by field name and builds optional flags with `set --`; `--review` is passed only when that file exists. `pass` records `passed`; `fails` records `failing` and prints the failing line; `unable-to-evaluate`, `tooling-failed`, any other word or an Environment that was not `ready` is a skip that learned nothing, kept off a stored `failing` record.
+Paste the Environment's outcome and reason and the loop's result lines: `USAGE_LOOP_LINE` is the `usage-loop:` line (empty when the loop did not run), `USAGE_LOOP_FINDINGS` the object after `usage-loop-findings:`, `USAGE_LOOP_REASON` the text after `usage-loop-reason:`, and `USAGE_STALE_LINE` the `usage-validation-stale:` line when one printed. The block reads the line by field name and builds optional flags with `set --`; `--review` is passed only when that file exists. `pass` records `passed`; `fails` records `failing` and prints the failing line; `unable-to-evaluate`, `tooling-failed`, any other word or an Environment that was not `ready` is a skip that learned nothing, which the writer keeps off a stored `failing` record.
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 RUN_TASKS_FILE="[tasks path from the init-session output]"
 AIMI_ROOT="[AIMI_ROOT]"
-USAGE_STORED_STATUS="[status= value of usage-validation-stored:]"
 USAGE_ENV_OUTCOME="[ready, unable-to-evaluate or tooling-failed]"
 USAGE_ENV_REASON="[the usage-env-reason: text, or empty]"
 USAGE_STALE_LINE="[the usage-validation-stale: line, or empty]"
@@ -153,12 +151,12 @@ USAGE_LOOP_REASON_EOF
 # usage-flat-record:begin
 usage_loop_field() { printf '%s\n' "$USAGE_LOOP_LINE" | tr ' ' '\n' | sed -n "s/^$1=//p" | head -n 1; }
 usage_skip_unable() {
-  if [ "$USAGE_STORED_STATUS" = "failing" ]; then
-    printf 'usage-validation: failing — re-validation could not run (%s)\n' "$1"
-  elif "$AIMI_CLI" usage-validation-record --tasks-file "$RUN_TASKS_FILE" --status skipped --kind unable-to-evaluate --reason "$1" >/dev/null; then
-    printf 'usage-validation: skipped (unable-to-evaluate) — %s\n' "$1"
-  else
+  if ! USAGE_OUT=$("$AIMI_CLI" usage-validation-record --tasks-file "$RUN_TASKS_FILE" --status skipped --kind unable-to-evaluate --reason "$1"); then
     echo "usage-validation: tooling-failed"
+  elif [ "$(printf '%s' "$USAGE_OUT" | jq -r '.kept // empty' 2>/dev/null)" = failing ]; then
+    printf 'usage-validation: failing — re-validation could not run (%s)\n' "$1"
+  else
+    printf 'usage-validation: skipped (unable-to-evaluate) — %s\n' "$1"
   fi
 }
 USAGE_OUTCOME=$(usage_loop_field outcome)

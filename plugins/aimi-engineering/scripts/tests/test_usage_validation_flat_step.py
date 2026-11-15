@@ -93,8 +93,11 @@ def test_usage_flat_required_tooling_failed_prints_an_unable_to_evaluate_skip(tm
     assert list((tmp_path / ".aimi").iterdir()) == []
 
 
-def skip_preamble(kind, reason, stored="none"):
-    return 'USAGE_STORED_STATUS="%s"\nUSAGE_KIND="%s"\nUSAGE_REASON=$(cat <<\'E1\'\n%s\nE1\n)\n' % (stored, kind, reason)
+def skip_preamble(kind, reason):
+    return 'USAGE_KIND="%s"\nUSAGE_REASON=$(cat <<\'E1\'\n%s\nE1\n)\n' % (kind, reason)
+
+
+KEPT = '{"kept": "failing", "usageValidation": {"status": "failing", "reason": "old"}}'
 
 
 @pytest.mark.parametrize("shell", SHELLS)
@@ -114,23 +117,26 @@ def test_usage_flat_skip_a_refused_record_is_tooling_failed(tmp_path, shell):
 
 
 @pytest.mark.parametrize("shell", SHELLS)
-def test_usage_flat_skip_unable_keeps_a_stored_failing_record(tmp_path, shell):
-    proc, calls = run_block(tmp_path, shell, "usage-flat-skip", skip_preamble("unable-to-evaluate", "env: down", "failing"),
-                            {"usage-validation-record": (0, "{}")})
-    assert calls == []
+def test_usage_flat_skip_a_kept_answer_prints_the_failing_line(tmp_path, shell):
+    """The writer, not the block, keeps a stored failing record off an
+    unable-to-evaluate skip; the block reads its `kept` answer."""
+    proc, calls = run_block(tmp_path, shell, "usage-flat-skip", skip_preamble("unable-to-evaluate", "env: down"),
+                            {"usage-validation-record": (0, KEPT)})
+    assert calls == ["usage-validation-record --tasks-file %s --status skipped --kind unable-to-evaluate --reason env: down" % TF]
     assert proc.stdout == "usage-validation: failing — re-validation could not run (env: down)\n"
 
 
 @pytest.mark.parametrize("shell", SHELLS)
 @pytest.mark.parametrize("kind", ["not-applicable", "disabled-by-operator"])
 def test_usage_flat_skip_a_chosen_skip_replaces_a_stored_failing_record(tmp_path, shell, kind):
-    proc, calls = run_block(tmp_path, shell, "usage-flat-skip", skip_preamble(kind, "r", "failing"),
-                            {"usage-validation-record": (0, "{}")})
+    proc, calls = run_block(tmp_path, shell, "usage-flat-skip", skip_preamble(kind, "r"),
+                            {"usage-validation-record": (0, '{"status": "skipped"}')})
     assert len(calls) == 1 and "--kind " + kind in calls[0]
+    assert proc.stdout == "usage-validation: skipped (%s) — r\n" % kind
 
 
-def record_preamble(line, findings="{}", reason="", stored="none", env="ready", env_reason="", stale=""):
-    pre = 'USAGE_STORED_STATUS="%s"\nUSAGE_ENV_OUTCOME="%s"\nUSAGE_ENV_REASON="%s"\nUSAGE_STALE_LINE="%s"\n' % (stored, env, env_reason, stale)
+def record_preamble(line, findings="{}", reason="", env="ready", env_reason="", stale=""):
+    pre = 'USAGE_ENV_OUTCOME="%s"\nUSAGE_ENV_REASON="%s"\nUSAGE_STALE_LINE="%s"\n' % (env, env_reason, stale)
     pre += 'USAGE_LOOP_LINE="%s"\n' % line
     pre += "USAGE_LOOP_FINDINGS=$(cat <<'E1'\n%s\nE1\n)\n" % findings
     pre += "USAGE_LOOP_REASON=$(cat <<'E2'\n%s\nE2\n)\n" % reason
@@ -198,17 +204,18 @@ def test_usage_flat_record_a_failed_environment_is_an_unable_skip_without_a_loop
 
 @pytest.mark.parametrize("shell", SHELLS)
 @pytest.mark.parametrize("outcome", ["unable-to-evaluate", "tooling-failed", "banana"])
-def test_usage_flat_record_a_stored_failing_record_survives_an_unable_end(tmp_path, shell, outcome):
-    proc, calls = run_block(tmp_path, shell, "usage-flat-record", record_preamble(loop_line(outcome), "{}", "x", stored="failing"), OK)
-    assert calls == []
-    assert proc.stdout.startswith("usage-validation: failing — re-validation could not run (")
+def test_usage_flat_record_a_kept_answer_on_an_unable_end_prints_the_failing_line(tmp_path, shell, outcome):
+    proc, calls = run_block(tmp_path, shell, "usage-flat-record", record_preamble(loop_line(outcome), "{}", "x"),
+                            {"usage-validation-record": (0, KEPT)})
+    assert len(calls) == 1 and "--status skipped --kind unable-to-evaluate" in calls[0]
+    assert proc.stdout == "usage-validation: failing — re-validation could not run (loop: x)\n"
 
 
 @pytest.mark.parametrize("shell", SHELLS)
 @pytest.mark.parametrize("outcome", ["pass", "fails"])
-def test_usage_flat_record_a_judged_verdict_replaces_a_stored_failing_record(tmp_path, shell, outcome):
-    proc, calls = run_block(tmp_path, shell, "usage-flat-record", record_preamble(loop_line(outcome), "{}", "r", stored="failing"), OK)
-    assert len(calls) == 1
+def test_usage_flat_record_a_judged_verdict_is_always_written(tmp_path, shell, outcome):
+    proc, calls = run_block(tmp_path, shell, "usage-flat-record", record_preamble(loop_line(outcome), "{}", "r"), OK)
+    assert len(calls) == 1 and "--status " + {"pass": "passed", "fails": "failing"}[outcome] in calls[0]
 
 
 @pytest.mark.parametrize("shell", SHELLS)

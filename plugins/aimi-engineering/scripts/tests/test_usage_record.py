@@ -71,13 +71,13 @@ def test_parse_request_defaults_and_sanitizing():
 
 
 def test_build_record_shape_and_key_order():
-    rec = U.build_record(U.parse_request(["--status", "passed"], P), None)
+    _, rec = U.build_record(U.parse_request(["--status", "passed"], P), None)
     assert list(rec) == ["status", "rounds", "recordedAt"]
     assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", rec["recordedAt"])
     req = U.parse_request(["--status", "skipped", "--kind", "not-applicable", "--reason", "no ui",
                            "--review", "r.md", "--rounds", "1",
                            "--findings-json", '{"a:1:H1":{"status":"open"}}'], P)
-    rec = U.build_record(req, None)
+    _, rec = U.build_record(req, None)
     assert list(rec) == ["status", "kind", "reason", "review", "rounds", "findings", "recordedAt"]
 
 
@@ -85,17 +85,17 @@ def test_build_record_carries_only_unrestated_accepted_findings_and_caps():
     previous = {"status": "failing", "reason": "r", "findings": {
         "a": {"status": "accepted", "reason": "known"}, "b": {"status": "open"}, "c": {"status": "fixed"}}}
     req = U.parse_request(["--status", "passed", "--findings-json", '{"d":{"status":"open"}}'], P)
-    assert list(U.build_record(req, previous)["findings"]) == ["d", "a"]
+    assert list(U.build_record(req, previous)[1]["findings"]) == ["d", "a"]
     restated = U.parse_request(["--status", "passed", "--findings-json", '{"a":{"status":"fixed"}}'], P)
-    assert U.build_record(restated, previous)["findings"] == {"a": {"status": "fixed"}}
+    assert U.build_record(restated, previous)[1]["findings"] == {"a": {"status": "fixed"}}
     many = json.dumps({"k%d" % i: {"status": "open"} for i in range(250)})
-    assert len(U.build_record(U.parse_request(["--status", "passed", "--findings-json", many], P), None)["findings"]) == 200
+    assert len(U.build_record(U.parse_request(["--status", "passed", "--findings-json", many], P), None)[1]["findings"]) == 200
 
 
 def test_build_record_tolerates_malformed_previous_records():
     req = U.parse_request(["--status", "passed"], P)
     for previous in ("x", [], {"findings": "x"}, {"findings": {"a": "x"}}):
-        assert "findings" not in U.build_record(req, previous)
+        assert "findings" not in U.build_record(req, previous)[1]
 
 
 def test_module_imports_only_the_standard_library_and_sanitize():
@@ -115,3 +115,35 @@ def test_neither_writer_keeps_a_copy_of_the_rule(module):
     assert "USAGE_VALIDATION_" not in text
     assert "def _usage_validation_findings" not in text
     assert "usage_record.parse_request(" in text and "usage_record.build_record(" in text
+
+
+FAILING = {"status": "failing", "reason": "open bug", "rounds": 1, "findings": {"a": {"status": "accepted", "reason": "k"}}}
+
+
+def test_an_unable_to_evaluate_skip_keeps_a_stored_failing_record():
+    req = U.parse_request(["--status", "skipped", "--kind", "unable-to-evaluate", "--reason", "env down"], P)
+    assert U.build_record(req, FAILING) == ("keep", FAILING)
+    assert U.kept_answer(FAILING, req) == {
+        "kept": "failing",
+        "requested": {"status": "skipped", "kind": "unable-to-evaluate", "reason": "env down"},
+        "usageValidation": FAILING,
+    }
+
+
+@pytest.mark.parametrize("argv", [
+    ["--status", "passed"],
+    ["--status", "failing", "--reason", "new"],
+    ["--status", "skipped", "--kind", "disabled-by-operator", "--reason", "decided"],
+    ["--status", "skipped", "--kind", "not-applicable", "--reason", "nothing to use"],
+])
+def test_a_judged_or_chosen_verdict_overwrites_a_stored_failing_record(argv):
+    action, rec = U.build_record(U.parse_request(argv, P), FAILING)
+    assert action == "write" and rec["status"] == argv[1]
+    assert rec["findings"]["a"]["status"] == "accepted"
+
+
+@pytest.mark.parametrize("previous", [None, {"status": "passed"}, {"status": "skipped", "kind": "not-applicable"}, "x"])
+def test_an_unable_to_evaluate_skip_overwrites_anything_but_failing(previous):
+    req = U.parse_request(["--status", "skipped", "--kind", "unable-to-evaluate", "--reason", "env down"], P)
+    action, rec = U.build_record(req, previous)
+    assert action == "write" and rec["kind"] == "unable-to-evaluate"

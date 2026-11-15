@@ -4841,11 +4841,18 @@ def op_record_visual_gate(argv):
 
 
 def _completed_gate_usage_refusal(roadmap_path, doc, phase_id, phase):
-    """The phase-level usage-validation line for the completed gate: one line
-    when usage validation is owed (usage_validation_requirement answers
-    required) and phase.usageValidation.status is neither passed nor skipped,
-    an empty list otherwise. An absent, malformed or unrecognised record reads
-    as none recorded.
+    """The phase-level usage-validation line for the completed gate, or [].
+
+    A stored `failing` record refuses first, whatever the requirement says: a
+    phase whose recipe disappeared, whose config.json became tracked or whose
+    switch was turned off after the real usage run found severe problems must
+    not close with them open. The way out is a decision written with
+    roadmap-record-usage-validation (passed, or a skip a person chose).
+
+    Otherwise the requirement decides: one line when usage validation is owed
+    (usage_validation_requirement answers required) and no passed or skipped
+    record is stored. An absent, malformed or unrecognised record reads as none
+    recorded.
 
     usage_validation is imported here, never at module scope: it imports this
     module at its own module scope. A requirement that cannot be computed
@@ -4853,6 +4860,15 @@ def _completed_gate_usage_refusal(roadmap_path, doc, phase_id, phase):
     config) draws one advisory and returns [], neither a refusal nor silent.
     The stored reason is never echoed.
     """
+    record = phase.get("usageValidation")
+    status = record.get("status") if isinstance(record, dict) else None
+    if status == "failing":
+        return [
+            "  phase " + _num(phase_id) + ": usage validation recorded failing -- the real "
+            "usage run found problems still open; resolve them and re-record with "
+            "roadmap-record-usage-validation (passed, or skipped with a kind and a reason)"
+        ]
+
     try:
         import usage_validation
 
@@ -4868,19 +4884,8 @@ def _completed_gate_usage_refusal(roadmap_path, doc, phase_id, phase):
             phase_id, "the usage-validation requirement -- " + type(exc).__name__
         )
         return []
-    if not required:
+    if not required or status in ("passed", "skipped"):
         return []
-
-    record = phase.get("usageValidation")
-    status = record.get("status") if isinstance(record, dict) else None
-    if status in ("passed", "skipped"):
-        return []
-    if status == "failing":
-        return [
-            "  phase " + _num(phase_id) + ": usage validation recorded failing -- the real "
-            "usage run found problems still open; resolve them and re-record with "
-            "roadmap-record-usage-validation (passed, or skipped with a kind and a reason)"
-        ]
     return [
         "  phase " + _num(phase_id) + ": owes usage validation of the delivered surface "
         "and none is recorded -- record one with roadmap-record-usage-validation"
@@ -4889,10 +4894,11 @@ def _completed_gate_usage_refusal(roadmap_path, doc, phase_id, phase):
 
 def op_record_usage_validation(argv):
     """The locked write of a phase's usage-validation verdict. Replaces the
-    whole phases[].usageValidation object. The record's vocabulary, its checks
-    and its build are usage_record.py's, shared with tasks.py's flat writer;
-    every vocabulary rule runs before the document is read, so a refusal never
-    opens roadmap.json."""
+    whole phases[].usageValidation object, except that a stored failing record
+    is kept over an unable-to-evaluate skip and the answer says `kept`. The
+    record's vocabulary, its checks and its build are usage_record.py's,
+    shared with tasks.py's flat writer; every vocabulary rule runs before the
+    document is read, so a refusal never opens roadmap.json."""
     prefix = "Error: roadmap-record-usage-validation: "
     path = _flag(argv, "--roadmap")
     phase_raw = _flag(argv, "--phase")
@@ -4910,8 +4916,16 @@ def op_record_usage_validation(argv):
     if not matches:
         die(prefix + "phase " + phase_raw + " not found in " + path)
 
-    for phase in matches:
-        phase["usageValidation"] = usage_record.build_record(request, phase.get("usageValidation"))
+    decisions = [usage_record.build_record(request, phase.get("usageValidation")) for phase in matches]
+    if decisions[0][0] == "keep":
+        # A stored failing record survives an unable-to-evaluate skip; the
+        # document is not written (usage_record.py's docstring says why).
+        answer = usage_record.kept_answer(decisions[0][1], request)
+        _emit(dict({"phase": phase_id}, **answer))
+        return 0
+    for phase, (action, record) in zip(matches, decisions):
+        if action == "write":
+            phase["usageValidation"] = record
     write_doc_atomically(path, doc)
     _emit({"phase": phase_id, "usageValidation": matches[0]["usageValidation"]})
     return 0

@@ -19,8 +19,20 @@ A writer does three things with it, in this order:
    vocabulary refusal happens without opening the file. `prefix` is the
    writer's own `Error: <verb>: ` text, so each refusal keeps its message.
 2. Read the document and find the stored record (the previous one, or None).
-3. `build_record(request, previous)` and write the record it returns in place
-   of the stored one.
+3. `build_record(request, previous)` and act on its decision: `("write",
+   record)` replaces the stored record; `("keep", previous)` changes nothing.
+
+THE ONE RECORD A WRITE DOES NOT REPLACE
+=======================================
+
+A stored `failing` record says the product was used and severe problems were
+left open. A later `skipped` with kind `unable-to-evaluate` learned nothing about
+the product (the environment did not come up, the verdict could not be read), so
+it must not replace that record: doing so would let a phase or a run close with
+the findings still open. The writer keeps the `failing` record and answers
+`{"kept": "failing", ...}` at exit 0. Every other write still replaces it: a
+judged verdict (`passed`, a new `failing`) and a skip a person chose
+(`not-applicable`, `disabled-by-operator`) are the ways out.
 """
 
 import json
@@ -121,10 +133,25 @@ def parse_request(argv, prefix):
     }
 
 
+def keeps_failing(request, previous):
+    """True when `previous` is a stored failing record and the request is an
+    unable-to-evaluate skip: a write that learned nothing about the product."""
+    return (
+        isinstance(previous, dict)
+        and previous.get("status") == "failing"
+        and request["status"] == "skipped"
+        and request["kind"] == "unable-to-evaluate"
+    )
+
+
 def build_record(request, previous):
-    """The record that replaces `previous`, with the previous record's accepted
-    findings that the request does not restate carried over, capped at
-    FINDINGS_MAX entries."""
+    """The decision for one stored record: ("keep", previous) when a stored
+    failing record must survive (see the module docstring), otherwise
+    ("write", record) with the previous record's accepted findings that the
+    request does not restate carried over, capped at FINDINGS_MAX entries."""
+    if keeps_failing(request, previous):
+        return "keep", previous
+
     merged = dict(request["findings"])
     previous_findings = previous.get("findings") if isinstance(previous, dict) else None
     if isinstance(previous_findings, dict):
@@ -144,5 +171,13 @@ def build_record(request, previous):
     if merged:
         record["findings"] = merged
     record["recordedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    return record
+    return "write", record
 
+
+def kept_answer(previous, request):
+    """The stdout object of a write that kept a stored failing record."""
+    return {
+        "kept": "failing",
+        "requested": {"status": request["status"], "kind": request["kind"], "reason": request["reason"]},
+        "usageValidation": previous,
+    }

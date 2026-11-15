@@ -120,6 +120,26 @@ def test_usage_phase_skip_a_refused_record_is_tooling_failed(tmp_path, shell):
     assert calls[-1] == "roadmap-release-claim --feature feat --phase 2.1"
 
 
+KEPT = '{"kept": "failing", "usageValidation": {"status": "failing", "reason": "old"}}'
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_usage_phase_skip_a_kept_answer_fails_the_phase_and_releases(tmp_path, shell):
+    """An unable-to-evaluate skip over a stored failing record: the writer keeps
+    the record and answers `kept`; the block never prints a skipped line, sets
+    verification_failed and releases the claim, so no handoff follows."""
+    proc, calls = run_block(tmp_path, shell, "usage-phase-skip", skip_preamble("unable-to-evaluate", "no recipe"),
+                            {"roadmap-record-usage-validation": (0, KEPT), "roadmap-set-status": (0, ""),
+                             "roadmap-release-claim": (0, "")})
+    assert proc.returncode == 0
+    assert calls == [
+        "roadmap-record-usage-validation --feature feat --phase 2.1 --status skipped --kind unable-to-evaluate --reason no recipe",
+        "roadmap-set-status --feature feat --phase 2.1 --status verification_failed",
+        "roadmap-release-claim --feature feat --phase 2.1",
+    ]
+    assert proc.stdout == "usage-validation: failing — re-validation could not run (no recipe)\n"
+
+
 def record_preamble(line, findings="{}", reason="", review_exists=False, tmp_path=None):
     pre = REQ + 'USAGE_LOOP_LINE="%s"\n' % line
     pre += "USAGE_LOOP_FINDINGS=$(cat <<'E1'\n%s\nE1\n)\n" % findings
@@ -173,6 +193,23 @@ def test_usage_phase_record_unable_to_evaluate_is_a_skip_with_the_loops_reason(t
     assert calls == ["roadmap-record-usage-validation --feature feat --phase 2.1 --status skipped "
                      "--kind unable-to-evaluate --reason no browser --rounds 0"]
     assert proc.stdout == "usage-validation: skipped (unable-to-evaluate) — no browser\n"
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_usage_phase_record_a_kept_answer_fails_the_phase_and_releases(tmp_path, shell):
+    answers = dict(OK)
+    answers["roadmap-record-usage-validation"] = (0, KEPT)
+    proc, calls = run_block(tmp_path, shell, "usage-phase-record",
+                            record_preamble(loop_line("unable-to-evaluate", 0), "{}", "no browser"), answers)
+    assert proc.returncode == 0
+    assert calls == [
+        "roadmap-record-usage-validation --feature feat --phase 2.1 --status skipped "
+        "--kind unable-to-evaluate --reason no browser --rounds 0",
+        "roadmap-set-status --feature feat --phase 2.1 --status verification_failed",
+        "roadmap-release-claim --feature feat --phase 2.1",
+    ]
+    assert proc.stdout == "usage-validation: failing — re-validation could not run (no browser)\n"
+    assert "skipped" not in proc.stdout
 
 
 @pytest.mark.parametrize("shell", SHELLS)
