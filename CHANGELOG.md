@@ -12,10 +12,17 @@ A run that delivered a usable surface is now judged by using it. After a phase's
 - `usage-recipe-record` and `usage-recipe-get` store how a product comes up; `usage-env-up`, `usage-env-status` and `usage-env-down` run and stop it. `/aimi:plan` declares `metadata.usageSurfaces` and asks for the recipe once per project.
 - The skip kinds `not-applicable`, `unable-to-evaluate` and `disabled-by-operator`, and the `AIMI_USAGE_VALIDATION=off` switch, which records `disabled-by-operator`.
 - `docs/dev/usage-validation.md` documents the flow, the verbs, the records and the answer to the new-gate question.
+- `usage-validation-get` prints where a run's usage record lives and the record itself (`{scope, feature, phase, record}`); the gate, Step 5 and `/aimi:open-pr` read it instead of their own queries.
+- The verdict lists a severe finding with no evidence file under `unevidenced`, capped at severity 2: it never blocks and goes to a person.
 
 ### Changed
+- Both usage record writers (`roadmap-record-usage-validation`, `usage-validation-record`, sharing `scripts/usage_record.py`) keep a stored `failing` record against a `skipped` or `unable-to-evaluate` one and answer `{"kept":"failing",...}`, and the completed-phase gate keeps refusing a failing phase whether or not it still owes validation.
+- `usage-env-down` and the detached runner no longer trust `.aimi/state/usage-env/<run>.json`: the manager comes from the wrapper, the cleanup steps are re-read from the trusted recipe, paths are confined, a git-tracked state file is refused and the runner pid is checked before a signal. `usage-env-up` reads the recipe in-process, validates `--repo` paths and waits up to 480 seconds.
+- One loopback rule (`is_loopback_origin` in `usage_recipe.py`) decides every origin; `usage-env-status` prints `origins`, each repository's `loginUrl` and `originsRefused`. `worktree-manager.sh serve status` answers `{running, port, pid, command}`.
+- A phase's usage fix round merges into the phase container, not the toplevel. The validator gets `WORKDIRS` (each project's checkout and recipe `cli` command) for cli charters, the fix executor gets `PROJECT_GUIDELINES`, and a failing record leads the `/aimi:open-pr` body.
+- `/aimi:status` shows a phase's usage validation in its phase view and its roadmap row, and does not print "All stories complete!" while usage validation is failing.
 - `roadmap-set-status --status completed` refuses a phase that owes usage validation with no `passed` or `skipped` record; `archive-task` refuses a failing flat run; `/aimi:execute` Step 5 holds the push on a failing record and `/aimi:open-pr` prints the stored verdict.
-- `hooks/auto-approve-cli.sh` admits the read-only `usage-recipe-get`, `usage-env-status`, `usage-validation-required` and `usage-validation-verdict`; the verbs that run a recipe command or write state still prompt.
+- `hooks/auto-approve-cli.sh` admits the read-only `usage-recipe-get`, `usage-env-status`, `usage-validation-required`, `usage-validation-verdict` and `usage-validation-get`; the verbs that run a recipe command or write state still prompt.
 - `test-install-opencode.sh` pins the validator's OpenCode install: an explicit permission block, no `tools` key, and its Chrome tool pattern dropped with a skip warning.
 - README and `docs/agents-and-skills.md` counts, and `docs/commands.md` (a Usage validation subsection under `/aimi:execute`), follow the files on disk.
 
