@@ -60,7 +60,8 @@ On a re-check, RECHECK names only the keys to re-walk: the keys fixed in the las
 USAGE_SAVED_FILE="[the saved usage-validation-required answer]"
 USAGE_RECHECK_FILE="[the evidence directory]/required-r[k].json"
 USAGE_RECHECK_IDS="[the re-walked charter ids as a JSON array]"
-cat "$USAGE_SAVED_FILE" | jq -c --argjson ids "$USAGE_RECHECK_IDS" '.charters |= map(select(.id as $i | $ids | index($i)))' > "$USAGE_RECHECK_FILE"
+USAGE_RECHECK_JSON=$(cat "$USAGE_SAVED_FILE" | jq -c --argjson ids "$USAGE_RECHECK_IDS" '.charters |= map(select(.id as $i | $ids | index($i)))')
+printf '%s\n' "$USAGE_RECHECK_JSON" > "$USAGE_RECHECK_FILE"
 ```
 
 Run it only after the Usage Validation Environment's bring-up block has run again with `--restart`, which stops the live recipe server and serves again from the merged tree, so the merged fix is built before it is judged.
