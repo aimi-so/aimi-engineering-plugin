@@ -5345,7 +5345,16 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     # build the phase's tasks path. They compose strings and touch nothing: both
     # document-sourced paths reach the disk only through confined_spec_path, and
     # the reads go through load_docs, so no open() arrived with them.
-    assert code.count("os.path.") == 61
+    #
+    # The last SEVEN are op_usage_validation_get's: a relpath, a join, two
+    # dirnames and an abspath that name the roadmap.json two directories above
+    # a phase tasks file when metadata.roadmapPath is absent, then a basename
+    # and a dirname of the resolved roadmap path for the feature slug. They
+    # compose strings only: the roadmap path, whichever way it was named,
+    # reaches the disk only through confined_spec_path, and the read goes
+    # through _read_json_object, so no open() arrived with them. No new root,
+    # and the verb writes nothing.
+    assert code.count("os.path.") == 68
     assert code.count("os.path.isfile(") == 11  # 9 + acknowledge-evidence's two
     assert code.count("os.path.isdir(") == 4  # 3 + R23's verify_grep_directory_findings
     confinement = code.split("def confined_spec_path", 1)[1].split("\ndef ", 1)[0]
