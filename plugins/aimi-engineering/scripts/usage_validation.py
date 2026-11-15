@@ -557,7 +557,7 @@ def _evidence_counts(entry, evidence_dir):
 
 def _verdict_answer(outcome, reason, planned, executed=0, blocked_list=(), actions=0,
                     bugs=(), decisions=(), unmapped=(), unconfirmed=(), reported=(),
-                    dropped=0, summary=None):
+                    unevidenced=(), dropped=0, summary=None):
     return {
         "outcome": outcome,
         "reason": _clean(reason, REASON_MAXLEN),
@@ -568,6 +568,7 @@ def _verdict_answer(outcome, reason, planned, executed=0, blocked_list=(), actio
         "unmapped": list(unmapped),
         "unconfirmed": list(unconfirmed),
         "reported": list(reported),
+        "unevidenced": list(unevidenced),
         "blockedCharters": list(blocked_list),
         "droppedEvidence": dropped,
         "summary": _clean(summary, TEXT_MAXLEN) if isinstance(summary, str) else "",
@@ -608,8 +609,10 @@ def usage_validation_verdict(message, planned_ids, evidence_dir, reproduced=(), 
     for a relative path with no .. segment, crossing no symlink, naming an
     existing regular file under <evidence_dir>, and a command entry also needs an
     integer exitCode; the rest are dropped and tallied in droppedEvidence. A
-    finding rated 3 or 4 with no counted entry is capped to severity 2
-    (capped true, ratedSeverity kept).
+    bug or decision rated 3 or 4 with no counted entry is capped to severity 2
+    (capped true, ratedSeverity kept) and listed in `unevidenced`, never in
+    `reported`: it does not block, and it is never silently downgraded either,
+    so the loop and the report put it in front of a person.
 
     OUTCOME, first match winning: tooling-failed (unusable block, no charter
     planned or reported, or a non-loopback origin), unable-to-evaluate (no
@@ -639,7 +642,7 @@ def usage_validation_verdict(message, planned_ids, evidence_dir, reproduced=(), 
 
     reproduced, accepted = set(reproduced), set(accepted)
     planned_set = set(planned)
-    bugs, decisions, unmapped, unconfirmed, reported = [], [], [], [], []
+    bugs, decisions, unmapped, unconfirmed, reported, unevidenced = [], [], [], [], [], []
     dropped = 0
     for f in block["findings"]:
         counted = [e for e in f["evidence"] if _evidence_counts(e, evidence_dir)]
@@ -661,6 +664,8 @@ def usage_validation_verdict(message, planned_ids, evidence_dir, reproduced=(), 
         }
         if f["kind"] == "unmapped":
             unmapped.append(item)
+        elif capped:
+            unevidenced.append(item)
         elif severity == 0:
             continue
         elif severity >= 3:
@@ -685,14 +690,18 @@ def usage_validation_verdict(message, planned_ids, evidence_dir, reproduced=(), 
 
     common = dict(planned=n_planned, executed=executed, blocked_list=blocked_list,
                   actions=block["actions"], bugs=bugs, decisions=decisions, unmapped=unmapped,
-                  unconfirmed=unconfirmed, reported=reported, dropped=dropped, summary=block["summary"])
+                  unconfirmed=unconfirmed, reported=reported, unevidenced=unevidenced, dropped=dropped,
+                  summary=block["summary"])
     if executed == 0:
         return _verdict_answer("unable-to-evaluate", "no planned charter was executed", **common)
     if bugs or decisions or blocked_list:
         return _verdict_answer("fails", str(len(bugs)) + " blocking bug(s), " + str(len(decisions))
                                + " blocking decision(s), " + str(len(blocked_list)) + " planned charter(s) blocked or absent",
                                **common)
-    return _verdict_answer("pass", "every planned charter executed, no blocking finding", **common)
+    reason = "every planned charter executed, no blocking finding"
+    if unevidenced:
+        reason += ", " + str(len(unevidenced)) + " severe finding(s) with no evidence file left for a person"
+    return _verdict_answer("pass", reason, **common)
 
 
 def _op_verdict(argv):
