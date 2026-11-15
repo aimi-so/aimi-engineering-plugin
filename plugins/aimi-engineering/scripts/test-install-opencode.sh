@@ -112,6 +112,7 @@ echo "== real tree: install into a throwaway root"
 REAL=$(new_tmp)
 run_install "$INSTALL_SH" "$REAL"
 assert_eq "0" "$RC" "real tree: install exits 0"
+REAL_OUT="$OUT"
 
 REFS="$REAL/xdg/opencode/plugins/aimi-engineering/commands/references"
 for doc in cli-path-resolution.md container-execution.md user-communication.md dependency-setup.md; do
@@ -382,6 +383,29 @@ for f in "$AGENTS_DIR"/*.md; do
   fi
 done
 assert_eq "0" "$LEAK" "real tree: no installed agent carries a tools or allowed-tools key"
+
+# The usage validator declares a claude-in-chrome tool pattern in its source.
+# OpenCode has no such tool name: the installed agent keeps an explicit
+# permission block, carries no tools key and no Chrome tool name in its
+# frontmatter, and every Chrome pattern the source declares is named in a skip
+# warning. Counted inside the twenty above, never added to it.
+UV_SRC="$SRC_PLUGIN/agents/review/aimi-usage-validator.md"
+UV_INST="$AGENTS_DIR/aimi-usage-validator.md"
+assert_eq "yes" "$([ -f "$UV_INST" ] && echo yes || echo no)" "real tree: aimi-usage-validator is installed"
+UV_CHROME=$(awk '/^---$/ { fm++; next } fm == 1 && /^tools:/ { print }' "$UV_SRC" | tr ',' '\n' | tr -d ' ' | grep 'claude-in-chrome' || true)
+assert_eq "yes" "$([ -n "$UV_CHROME" ] && echo yes || echo no)" "real tree: usage validator source declares a claude-in-chrome pattern"
+UV_FM=$(awk '/^---$/ { fm++; next } fm == 1 { print }' "$UV_INST")
+case "$UV_FM" in
+  *claude-in-chrome*) fail "real tree: usage validator frontmatter names no Chrome tool" "$UV_FM" ;;
+  *) pass "real tree: usage validator frontmatter names no Chrome tool" ;;
+esac
+assert_file_has "$UV_INST" "permission:" "real tree: usage validator has an explicit permission block"
+for pat in $UV_CHROME; do
+  case "$REAL_OUT" in
+    *"skipping MCP tool pattern '$pat'"*) pass "real tree: install warns it skipped $pat" ;;
+    *) fail "real tree: install warns it skipped $pat" "no skip warning" ;;
+  esac
+done
 
 # An agent with no tools line has no permission block.
 NOTOOLS=""

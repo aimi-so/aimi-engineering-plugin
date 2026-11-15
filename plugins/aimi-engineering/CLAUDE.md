@@ -21,6 +21,7 @@ area live under `docs/dev/`; read the one that matches what you are about to cha
 | `docs/dev/review.md` | `commands/review.md` or an agent under `agents/review/` (why the request is read as it is, why these reviewers, the shared closing sections) |
 | `docs/dev/story-executor.md` | `skills/story-executor/SKILL.md`, the worker's brief, or how a command spawns it |
 | `docs/dev/tasks-schema.md` | the `tasks.json` shape or a validator over it |
+| `docs/dev/usage-validation.md` | the usage-validation gate: `commands/references/execute/*usage-validation*.md`, the `usage-*` verbs, `aimi-usage-validator`, `AIMI_USAGE_VALIDATION`, the `usageValidation` records |
 | `docs/dev/jq-census.md` | a `jq` call in `aimi-cli.sh` or under `commands/` (the principle stays below) |
 
 ## Versioning Requirements
@@ -123,6 +124,13 @@ For a root whose status is `needs-recipe`, `commands/references/dependency-setup
 ## Deliverable Branch and the Closes Rule
 
 `metadata --with-deliverable-branch` adds `.deliverableBranch` to the metadata object: the phase's branch (derived from the roadmap the way execute's Claim the Phase step derives it) for a phase-scoped split member, and `metadata.branchName` for every other file. `commands/open-pr.md` reads it in Steps 2a and 4a, counts plans rather than tasks files, and renders a `Closes` line for `metadata.issues` only when the plan's deliverable branch is the PR's branch; a plan split across repositories renders none, because one repository's PR could close an issue another repository's PR leaves open. Tests: `scripts/tests/test_open_pr_deliverable.py`.
+
+## Usage Validation
+
+A run that delivered a usable surface is judged by using it: `aimi-usage-validator` walks charters through the product brought up from a recorded recipe, after the Phase Visual Gate (phase mode) or after Finalize (flat run). The flow, the `usage-*` verbs, the records and the skip kinds are in `docs/dev/usage-validation.md`; read it before touching any of them.
+
+- A skip is never a pass: every one records a kind (`not-applicable`, `unable-to-evaluate`, `disabled-by-operator`) and a reason. `AIMI_USAGE_VALIDATION=off` records `disabled-by-operator`.
+- The four read-only verbs (`usage-recipe-get`, `usage-env-status`, `usage-validation-required`, `usage-validation-verdict`) are in `hooks/auto-approve-cli.sh` Pattern 2; the writers and anything that runs a recipe command are not and must keep prompting.
 
 ## Output Files
 

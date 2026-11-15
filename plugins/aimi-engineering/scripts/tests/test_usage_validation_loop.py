@@ -220,4 +220,4 @@ def test_usage_loop_finalize_no_longer_claims_the_last_commit():
 
 def test_usage_loop_is_listed_as_a_conditional_read():
     src = (ROOT / "scripts" / "tests" / "measure_execute_reads.py").read_text(encoding="utf-8")
-    assert '"usage-validation-loop.md": set(),' in src
+    assert '"usage-validation-loop.md": FLAT,' in src

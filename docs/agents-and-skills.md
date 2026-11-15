@@ -53,7 +53,7 @@ These are invoked by commands, not by you.
 
 ---
 
-## Agents (27)
+## Agents (28)
 
 ### Research (8)
 

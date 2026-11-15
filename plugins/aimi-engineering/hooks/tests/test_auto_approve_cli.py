@@ -306,6 +306,35 @@ def test_get_story_context_is_approved(line):
     assert run_hook(line), f"a get-story-context shape was not auto-approved:\n  {line}"
 
 
+# The read-only usage-validation verbs are approved bare; the ones that run a
+# recipe command or write state are not (see ADVERSARIAL below).
+USAGE_READ_VERBS = [
+    "usage-recipe-get --project .",
+    "usage-env-status --run run-1",
+    "usage-validation-required --tasks-file .aimi/tasks.json",
+    "usage-validation-verdict --required-file .aimi/r.json --evidence-dir .aimi/ev",
+]
+
+
+@pytest.mark.parametrize("call", USAGE_READ_VERBS)
+def test_usage_read_only_verbs_are_approved(call):
+    assert run_hook("$AIMI_CLI " + call), f"read-only usage verb not approved: {call}"
+
+
+USAGE_PROMPTING_VERBS = [
+    "usage-recipe-record --project . --serve 'npm run dev' --ready /",
+    "usage-env-up --run run-1 --repo .",
+    "usage-env-down --run run-1",
+    "usage-validation-record --status passed",
+    "roadmap-record-usage-validation --feature f --phase 1 --status passed",
+]
+
+
+@pytest.mark.parametrize("call", USAGE_PROMPTING_VERBS)
+def test_usage_writing_verbs_still_prompt(call):
+    assert not run_hook("$AIMI_CLI " + call), f"a usage verb that runs or writes was approved: {call}"
+
+
 # Older spellings that older installs may still carry. The hook keeps matching
 # them on purpose; a fix for today's text must not un-approve yesterday's.
 LEGACY_FORMS = [

@@ -120,6 +120,14 @@ Every ending names `/aimi:open-pr`, whether the run published or not — `/aimi:
 
 **Only publication moved behind that question.** Everything that delivers the work is untouched: each story worktree is still merged into the feature branch locally — a `git merge`, never a push — and the commits, the branch ref, the container teardown that keeps the branch (`--keep-branch`), and story and phase status all behave exactly as before. A run you decline to publish has lost nothing; the branch is complete on your machine, waiting for `/aimi:open-pr`.
 
+### Usage validation
+
+When a run delivers something a person or an agent can use, `/aimi:execute` uses it before calling the work done: after the Phase Visual Gate in phase mode, and after Finalize in a flat run, a validator agent walks each acceptance criterion through the running product and saves proof for what it finds. It brings the product up from the **usage recipe** you confirmed once during `/aimi:plan` (recorded per project with `usage-recipe-record`); a surface with no recipe is skipped as `unable-to-evaluate`, never passed.
+
+- A major or catastrophic finding that stays open leaves the phase `verification_failed`, or records a flat run as failing, and the push and pull request are not offered until it is resolved. Clear bugs are fixed and re-checked for up to two rounds; anything that needs a decision is asked of you, and an unattended run never accepts one.
+- **Re-validation on a re-run:** the re-validation is automatic: running `/aimi:execute` again on a failing phase or flat run validates again, and findings you already accepted are not asked twice.
+- **Off switch:** set `AIMI_USAGE_VALIDATION=off` to skip the gate; it records `disabled-by-operator` with a reason rather than a pass.
+
 ### Choosing the mode
 
 `/aimi:plan` writes `metadata.execution: "container"` into every new flat tasks file, so new plans run in container mode by default. Files created before that change have no `execution` key and keep running inline exactly as before.

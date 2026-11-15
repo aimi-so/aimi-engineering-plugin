@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.162.0] - 2026-11-15
+
+A run that delivered a usable surface is now judged by using it. After a phase's Phase Visual Gate, or after a flat run's Finalize, a validator brings the product up from a recorded recipe and walks each acceptance criterion through it with proof for what it reports.
+
+### Added
+- `aimi-usage-validator`, a review-category agent that walks usage charters as a persona and answers with a `usage_validation_verdict` block. Every finding of severity 3 or 4 cites a saved artifact.
+- `roadmap-record-usage-validation` and the `phases[].usageValidation` record, plus `usage-validation-record` and `metadata.usageValidation` for a flat run; `usage-validation-required` and `usage-validation-verdict` decide whether validation is owed and what its outcome is.
+- `usage-recipe-record` and `usage-recipe-get` store how a product comes up; `usage-env-up`, `usage-env-status` and `usage-env-down` run and stop it. `/aimi:plan` declares `metadata.usageSurfaces` and asks for the recipe once per project.
+- The skip kinds `not-applicable`, `unable-to-evaluate` and `disabled-by-operator`, and the `AIMI_USAGE_VALIDATION=off` switch, which records `disabled-by-operator`.
+- `docs/dev/usage-validation.md` documents the flow, the verbs, the records and the answer to the new-gate question.
+
+### Changed
+- `roadmap-set-status --status completed` refuses a phase that owes usage validation with no `passed` or `skipped` record; `archive-task` refuses a failing flat run; `/aimi:execute` Step 5 holds the push on a failing record and `/aimi:open-pr` prints the stored verdict.
+- `hooks/auto-approve-cli.sh` admits the read-only `usage-recipe-get`, `usage-env-status`, `usage-validation-required` and `usage-validation-verdict`; the verbs that run a recipe command or write state still prompt.
+- `test-install-opencode.sh` pins the validator's OpenCode install: an explicit permission block, no `tools` key, and its Chrome tool pattern dropped with a skip warning.
+- README and `docs/agents-and-skills.md` counts, and `docs/commands.md` (a Usage validation subsection under `/aimi:execute`), follow the files on disk.
+
 ## [1.161.0] - 2026-11-13
 
 Each agent category can carry a reasoning effort beside its model, delivered at every spawn. Unset means `inherit`, so a `models.json` written before this release behaves exactly as before.
