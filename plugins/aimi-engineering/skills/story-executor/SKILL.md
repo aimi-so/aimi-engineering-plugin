@@ -194,10 +194,10 @@ Read `story.notes` before you start. It holds what the plan found that no other 
 measurements, research findings, file paths and gotchas, and the cross-story audit's own
 paragraphs, separated by `---`. A paragraph opening with `[audit-deferred:` records an audit
 finding the plan left open, with the reason given. An older paragraph can describe a sibling
-story as it stood before the audit. When a story runs again after a failed or interrupted
-attempt, `notes` holds what that attempt recorded, its failure cause, in place of the plan's
-notes. It is context, not the contract: where it disagrees with `acceptanceCriteria` or
-`implementation`, those win.
+story as it stood before the audit. A last paragraph opening with `[execution:` is what the
+previous attempt at this story recorded (`failed`, `skipped` or `reset`, then the cause): the
+newest word on it, after the plan's own notes. It is context, not the contract: where it
+disagrees with `acceptanceCriteria` or `implementation`, those win.
 
 ## Step 1.5 — Measure the verify before any work
 

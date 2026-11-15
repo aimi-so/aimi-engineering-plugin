@@ -8,7 +8,7 @@ An **agent** is a worker with its own fresh context. Commands spawn agents to re
 
 ---
 
-## Skills (25)
+## Skills (19)
 
 ### Core — used internally
 
@@ -25,11 +25,7 @@ These are invoked by commands, not by you.
 
 | Skill | What it carries |
 |-------|-----------------|
-| `dhh-rails-style` | Ruby and Rails in DHH's 37signals style |
-| `andrew-kane-gem-writer` | Ruby gems following Andrew Kane's patterns |
-| `dspy-ruby` | Type-safe LLM applications with DSPy.rb |
 | `frontend-design` | Distinctive, production-grade frontend interfaces |
-| `every-style-editor` | Copy review against Every's editorial style |
 | `agent-native-architecture` | Apps where agents are first-class users, not an afterthought |
 | `architecture-foundation` | Clean Architecture and DDD foundations, for both new and existing repositories |
 | `react-best-practices` | React and Next.js performance, from Vercel Engineering |
@@ -47,21 +43,19 @@ These are invoked by commands, not by you.
 | `agent-browser` | Browser automation through Vercel's agent-browser CLI |
 | `create-agent-skills` | How to author Claude Code skills and slash commands |
 | `git-worktree` | Managing git worktrees for isolated parallel work |
-| `rclone` | Uploading and syncing to S3, R2, B2, Google Drive, Dropbox |
 | `forge` | Every GitHub or GitLab action through the CLI's forge verbs, confirmed with you before each write |
 
 ### Disabled — kept for reference
 
 | Skill | What it carries |
 |-------|-----------------|
-| `file-todos` | File-based todo tracking |
 | `resolve-pr-parallel` | Resolving PR comments in parallel |
 
 ---
 
-## Agents (33)
+## Agents (27)
 
-### Research (7)
+### Research (8)
 
 | Agent | What it does |
 |-------|--------------|
@@ -72,27 +66,24 @@ These are invoked by commands, not by you.
 | `aimi-bundle-prototype-author` | Builds a self-contained prototype HTML from a design bundle |
 | `aimi-design-bundle-researcher` | Reads BusinessSpec and DesignSpec bundles into structured findings |
 | `aimi-foundation-architect` | Proposes a stack-adaptive Clean Architecture foundation for new repositories |
+| `aimi-spec-deriver` | Extracts entities and HTTP endpoints from a repository as evidence-backed records |
 
-### Review (16)
+### Review (10)
 
 | Agent | What it does |
 |-------|--------------|
-| `aimi-architecture-strategist` | Architectural compliance and design integrity |
-| `aimi-security-sentinel` | Security vulnerabilities and OWASP compliance |
-| `aimi-code-simplicity-reviewer` | YAGNI violations and simplification opportunities |
-| `aimi-performance-oracle` | Performance bottlenecks and scalability |
-| `aimi-agent-native-reviewer` | Whether an agent can do everything a user can |
-| `aimi-data-integrity-guardian` | Migrations, data models, transaction safety |
-| `aimi-data-migration-expert` | Data migrations, backfills, schema changes |
-| `aimi-deployment-verification-agent` | Go/No-Go deployment checklists |
-| `aimi-schema-drift-detector` | Unrelated `schema.rb` changes sneaking into a PR |
-| `aimi-pattern-recognition-specialist` | Design patterns, anti-patterns, naming |
-| `aimi-dhh-rails-reviewer` | DHH and 37signals Rails style |
-| `aimi-kieran-rails-reviewer` | Rails conventions, clarity, maintainability |
-| `aimi-kieran-typescript-reviewer` | TypeScript type safety and modern patterns |
-| `aimi-kieran-python-reviewer` | Pythonic patterns, type safety, maintainability |
-| `aimi-julik-frontend-races-reviewer` | JavaScript race conditions and DOM lifecycle bugs |
-| `aimi-cross-story-auditor` | Audits staged stories for drift between them; emits patches, writes no file |
+| `aimi-correctness-reviewer` | Bugs in a change: logic, boundaries, null and error propagation, races, state transitions |
+| `aimi-security-reviewer` | Injection, broken access control, secrets, SSRF, cryptographic failures |
+| `aimi-performance-reviewer` | N+1 queries, unbounded memory, missing pagination, blocking calls |
+| `aimi-maintainability-reviewer` | Structure and simplicity: duplicated logic, speculative abstraction, dead code, coupling, type holes |
+| `aimi-project-standards-reviewer` | Checks a change against the rules in the target project's own CLAUDE.md or AGENTS.md |
+| `aimi-frontend-races-reviewer` | Timing and lifecycle bugs in browser UI code, in any framework |
+| `aimi-agent-native-reviewer` | Whether an agent can still do and know what a change lets a person do and know |
+| `aimi-data-migration-reviewer` | Migrations, backfills, schema drift and deploy-window breaks, in any migration tool |
+| `aimi-deployment-verification-agent` | Whether a risky data change has the checks, queries and rollback it needs |
+| `aimi-cross-story-auditor` | Audits staged stories for drift between them; writes its patches to the result file it is given |
+
+Every review agent but the auditor ends with the same two sections, how it works and what it returns, so `/aimi:review` can merge and check their findings. See `plugins/aimi-engineering/docs/dev/review.md`.
 
 ### Design (2)
 

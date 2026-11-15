@@ -274,7 +274,7 @@ for src in "$SRC_PLUGIN"/agents/*/*.md; do
   done
   assert_eq "yes" "$ok" "real tree: $base carries an explicit permission for all ten names"
 done
-assert_eq "10" "$WITH_TOOLS" "real tree: ten agent sources declare a tools line"
+assert_eq "19" "$WITH_TOOLS" "real tree: nineteen agent sources declare a tools line"
 
 AUD="$AGENTS_DIR/aimi-cross-story-auditor.md"
 assert_eq "allow" "$(perm_get "$AUD" read)" "real tree: auditor read is allow"
@@ -284,6 +284,10 @@ VER="$AGENTS_DIR/aimi-scope-negative-verifier.md"
 assert_eq "deny" "$(perm_get "$VER" edit)" "real tree: scope verifier edit is deny"
 for n in read grep bash; do
   assert_eq "allow" "$(perm_get "$VER" "$n")" "real tree: scope verifier $n is allow"
+done
+for rev in aimi-correctness-reviewer aimi-security-reviewer aimi-performance-reviewer aimi-maintainability-reviewer aimi-project-standards-reviewer aimi-frontend-races-reviewer aimi-agent-native-reviewer aimi-data-migration-reviewer aimi-deployment-verification-agent; do
+  assert_eq "deny" "$(perm_get "$AGENTS_DIR/$rev.md" edit)" "real tree: $rev edit is deny"
+  assert_eq "allow" "$(perm_get "$AGENTS_DIR/$rev.md" bash)" "real tree: $rev bash is allow (it may run a check)"
 done
 RES="$AGENTS_DIR/aimi-codebase-researcher.md"
 assert_eq "allow" "$(perm_get "$RES" edit)" "real tree: codebase researcher edit is allow"
@@ -345,6 +349,47 @@ if [ -e "$BAD/xdg/opencode/agents/aimi-bad.md" ]; then
   fail "agent fixture: no destination file written for the failing agent"
 else
   pass "agent fixture: no destination file written for the failing agent"
+fi
+
+# ---------------------------------------------------------------------------
+echo "== upgrade: agents and skills the plugin dropped leave the destination"
+# ---------------------------------------------------------------------------
+# The installer used to only add files, so a release that removed or renamed an
+# agent or a skill left the old one installed and offered to the model.
+UP=$(new_tmp)
+run_install "$INSTALL_SH" "$UP"
+assert_eq "0" "$RC" "upgrade: first install exits 0"
+AG="$UP/xdg/opencode/agents"
+SK="$UP/xdg/opencode/skills"
+PL="$UP/xdg/opencode/plugins/aimi-engineering"
+printf -- '---\ndescription: retired\n---\nold\n' > "$AG/aimi-kieran-rails-reviewer.md"
+mkdir -p "$SK/aimi-rclone" "$PL/skills/rclone" "$PL/agents/review"
+printf 'old\n' > "$SK/aimi-rclone/SKILL.md"
+printf 'old\n' > "$PL/skills/rclone/SKILL.md"
+printf 'old\n' > "$PL/agents/review/aimi-kieran-rails-reviewer.md"
+printf 'mine\n' > "$AG/my-own-agent.md"
+
+run_install "$INSTALL_SH" "$UP" --dry-run
+assert_eq "0" "$RC" "upgrade: dry run exits 0"
+case "$OUT" in
+  *"Would remove retired agent: aimi-kieran-rails-reviewer.md"*"Would remove retired skill: aimi-rclone"*) pass "upgrade: dry run names the retired agent and skill" ;;
+  *) fail "upgrade: dry run names the retired agent and skill" "$OUT" ;;
+esac
+if [ -e "$AG/aimi-kieran-rails-reviewer.md" ] && [ -d "$SK/aimi-rclone" ]; then
+  pass "upgrade: dry run removes nothing"
+else
+  fail "upgrade: dry run removes nothing"
+fi
+
+run_install "$INSTALL_SH" "$UP"
+assert_eq "0" "$RC" "upgrade: second install exits 0"
+for gone in "$AG/aimi-kieran-rails-reviewer.md" "$SK/aimi-rclone" "$PL/skills/rclone" "$PL/agents/review/aimi-kieran-rails-reviewer.md"; do
+  if [ -e "$gone" ]; then fail "upgrade: retired path is gone: ${gone#$UP/}"; else pass "upgrade: retired path is gone: ${gone#$UP/}"; fi
+done
+if [ -f "$AG/my-own-agent.md" ] && [ -f "$AG/aimi-correctness-reviewer.md" ] && [ -f "$SK/aimi-git-worktree/SKILL.md" ]; then
+  pass "upgrade: a file of the user's and the current agents and skills stay"
+else
+  fail "upgrade: a file of the user's and the current agents and skills stay"
 fi
 
 echo

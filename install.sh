@@ -690,6 +690,14 @@ install_plugin_source() {
   # The files named in REFERENCE_ALLOWLIST_* are then rewritten in place by
   # install_references, which runs right after this function; everything else
   # stays byte-identical to the source.
+  #
+  # agents/ and skills/ are replaced rather than merged: cp -R only adds, so an
+  # agent or a skill the plugin has since dropped would stay in this copy for
+  # good. Both directories hold plugin files only, and the path is checked so
+  # an empty variable can never widen the removal.
+  if [ -n "$plugin_dst" ] && [ -n "$PLUGIN_NAME" ] && [ "$(basename "$plugin_dst")" = "$PLUGIN_NAME" ]; then
+    rm -rf "$plugin_dst/agents" "$plugin_dst/skills"
+  fi
   cp -R "$src/." "$plugin_dst/"
 
   # Ensure scripts are executable
@@ -901,6 +909,7 @@ install_agents() {
       esac
       log "[dry-run]   Would translate agent: $dst_name"
     done
+    _retired_agents "$src" "$agent_dir" 1
     return 0
   fi
 
@@ -925,6 +934,40 @@ install_agents() {
   done
 
   ok "Installed $count agents to $agent_dir"
+  _retired_agents "$src" "$agent_dir" 0
+}
+
+# ---------------------------------------------------------------------------
+# _retired_agents — list (dry run) or remove the aimi-*.md agent files in the
+# destination that this plugin no longer produces. The installer only ever
+# added files, so an agent the plugin dropped or renamed stayed installed and
+# kept being offered to the model. The uninstaller already treats every
+# aimi-*.md in this directory as the plugin's own, and so does this.
+# ---------------------------------------------------------------------------
+_retired_agents() {
+  local src="$1" agent_dir="$2" dry="$3"
+  local produced=" " src_file name old retired=0
+  for src_file in "$src/agents/"*/*.md; do
+    [ -f "$src_file" ] || continue
+    name=$(basename "$src_file")
+    case "$name" in aimi-*) ;; *) name="aimi-$name" ;; esac
+    produced="$produced$name "
+  done
+  for old in "$agent_dir"/aimi-*.md; do
+    [ -f "$old" ] || continue
+    name=$(basename "$old")
+    case "$produced" in *" $name "*) continue ;; esac
+    if [ "$dry" -eq 1 ]; then
+      log "[dry-run]   Would remove retired agent: $name"
+    else
+      rm -f "$old"
+      [ "$VERBOSE" -eq 1 ] && log "  Removed retired agent: $name"
+    fi
+    retired=$((retired + 1))
+  done
+  if [ "$retired" -gt 0 ] && [ "$dry" -eq 0 ]; then
+    ok "Removed $retired retired agents from $agent_dir"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -950,6 +993,7 @@ install_skills() {
       [ -d "$skill_parent/templates" ]  && log "[dry-run]     + templates/"
       [ -f "$skill_parent/NOTICE.md" ]  && log "[dry-run]     + NOTICE.md"
     done
+    _retired_skills "$src" "$skill_dir" 1
     return 0
   fi
 
@@ -997,6 +1041,36 @@ install_skills() {
   done
 
   ok "Installed $count skills to $skill_dir"
+  _retired_skills "$src" "$skill_dir" 0
+}
+
+# ---------------------------------------------------------------------------
+# _retired_skills — the same for skills: the aimi-* directories in the
+# destination that this plugin no longer produces. The uninstaller removes
+# every aimi-*/ directory there, so it is the plugin's own.
+# ---------------------------------------------------------------------------
+_retired_skills() {
+  local src="$1" skill_dir="$2" dry="$3"
+  local produced=" " src_skill name old retired=0
+  for src_skill in "$src/skills/"*/SKILL.md; do
+    [ -f "$src_skill" ] || continue
+    produced="$produced""aimi-$(basename "$(dirname "$src_skill")") "
+  done
+  for old in "$skill_dir"/aimi-*/; do
+    [ -d "$old" ] || continue
+    name=$(basename "$old")
+    case "$produced" in *" $name "*) continue ;; esac
+    if [ "$dry" -eq 1 ]; then
+      log "[dry-run]   Would remove retired skill: $name"
+    else
+      rm -rf "$old"
+      [ "$VERBOSE" -eq 1 ] && log "  Removed retired skill: $name"
+    fi
+    retired=$((retired + 1))
+  done
+  if [ "$retired" -gt 0 ] && [ "$dry" -eq 0 ]; then
+    ok "Removed $retired retired skills from $skill_dir"
+  fi
 }
 
 # ---------------------------------------------------------------------------

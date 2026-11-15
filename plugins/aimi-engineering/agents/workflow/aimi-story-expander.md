@@ -312,20 +312,25 @@ Emit the measurement in that order — resolve the branch, refuse-if-empty, deri
 
 ## skills[] inference (file-pattern mapping)
 
-Match each path in `implementation.files` against this table. Collect matches, deduplicate (first-match-wins), cap at 10:
+Match each path in `implementation.files` against this table. Collect every match, never the same skill twice, cap at 10:
 
 ```
-*.rb, *_spec.rb                            → dhh-rails-style
 app/javascript/**, *.tsx (non-test), *.jsx → react-best-practices
 *tailwind*, *.css, *design-token*          → frontend-design
-*.rake, db/migrate/**                      → dhh-rails-style
-.aimi/solutions/*.md                       → every-style-editor
-*.ts (non-test, non-.tsx), bunfig.toml, bun.lock, bun.lockb → typescript-node-conventions
+*.ts (non-test, non-.tsx) that runs on Node.js or Bun, bunfig.toml, bun.lock, bun.lockb → typescript-node-conventions
 *.module.ts, *.controller.ts, *.service.ts, nest-cli.json → nestjs-conventions
-app/**/*.tsx, app/**/*.ts (non-test), next.config.*, *tanstack* → nextjs-tanstack-conventions
+app/**/*.tsx, app/**/*.ts (non-test), next.config.* in a project that depends on `next` → nextjs-tanstack-conventions
+files that use TanStack Query (`@tanstack/react-query`: query keys, mutations, invalidation) → nextjs-tanstack-conventions
 *.go, go.mod → go-conventions
 *.rs, Cargo.toml → rust-conventions
+app.config.*, metro.config.*, eas.json, files of a project that depends on `react-native` or `expo` → react-native-skills
 ```
+
+Three rows turn on where a file runs or what the project is, which a path alone does not say:
+
+- **`typescript-node-conventions`** is for TypeScript that runs on Node.js or Bun: a service, CLI, script, worker or library. A `.ts` file that runs only in the browser (hooks, client state or helpers under the UI tree of a package whose `package.json` depends on react, vue or svelte, next to `.tsx` files) does not get it; it gets the rows that match it. When the paths and the repository's layout do not settle it, read the package's `package.json` and `tsconfig.json`.
+- **`nextjs-tanstack-conventions`** covers the Next.js App Router and TanStack Query. A path that contains `tanstack`, a `routes/` tree, TanStack Start or TanStack Router attach nothing by themselves.
+- **`react-native-skills`** is attached by the directory name `react-native-skills`, not by the `vercel-react-native-skills` name in its frontmatter.
 
 Names must satisfy `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`. Omit `skills` entirely when no patterns match (do NOT emit `"skills": []`). Cross-skill stacking is intentional — a file matching both a generic pattern (e.g. `*.ts`) and a framework-specific pattern (e.g. `*.service.ts`) receives BOTH skills; the 10-entry cap still governs the final list.
 

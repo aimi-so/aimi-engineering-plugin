@@ -11,7 +11,7 @@
 # `path` for `exempt` follows the same two-root relpath rule every other
 # baseline here uses: bare and relative to commands/ (`status.md`,
 # `design/craft.md`), or `skills/`- or `agents/`-prefixed and relative to
-# the plugin directory (`agents/review/aimi-code-simplicity-reviewer.md`).
+# the plugin directory (`agents/review/aimi-maintainability-reviewer.md`).
 #
 # The reason field is REQUIRED for `non-artifact-root` and `exempt` — the
 # suite fails loudly on either kind carrying none, the same rule
@@ -54,7 +54,7 @@ non-artifact-root	plans	# named in the corpus only as read context (a reviewer c
 # file that no longer matches the predicate, or that now carries the anchor,
 # fails as stale — the same rule command-size-baseline.txt applies to its
 # byte budgets.
-exempt	agents/review/aimi-code-simplicity-reviewer.md	# names .aimi/plans/, .aimi/solutions/ and .aimi/brainstorms/ only to say never to flag them for removal; authors nothing under any of the three
+exempt	agents/review/aimi-maintainability-reviewer.md	# names .aimi/plans/, .aimi/solutions/, .aimi/brainstorms/ and .aimi/tasks/ only to say never to recommend deleting or ignoring them; authors nothing under any of the four
 exempt	design/craft.md	# reads .aimi/brainstorms/ as context for a design critique; authors no artifact under .aimi/
 exempt	design/shape.md	# reads .aimi/brainstorms/ as context for a design shaping pass; authors no artifact under .aimi/
 exempt	design/polish.md	# declares Write/Edit to polish the target project's own source; never a plugin-owned .aimi/ artifact

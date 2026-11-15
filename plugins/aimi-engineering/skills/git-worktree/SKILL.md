@@ -1,11 +1,12 @@
 ---
 name: git-worktree
 description: This skill manages Git worktrees for isolated parallel development. It handles creating, listing, switching, and cleaning up worktrees with a simple interactive interface, following KISS principles.
+license: MIT (NOTICE.md)
 ---
 
 # Git Worktree Manager
 
-This skill provides a unified interface for managing Git worktrees across your development workflow. Whether you're reviewing PRs in isolation or working on features in parallel, this skill handles all the complexity.
+This skill manages Git worktrees for reviewing PRs in isolation or working on features in parallel.
 
 ## What This Skill Does
 

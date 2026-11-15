@@ -4,6 +4,7 @@ description: Resolve all PR comments using parallel processing. Use when address
 argument-hint: "[optional: PR number or current PR]"
 disable-model-invocation: true
 allowed-tools: Bash(git *), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Read
+license: MIT (NOTICE.md)
 ---
 
 # Resolve PR Comments in Parallel

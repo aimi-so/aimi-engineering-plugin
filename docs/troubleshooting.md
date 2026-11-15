@@ -11,7 +11,7 @@ No plan exists yet. Run `/aimi:plan [feature]` to create one.
 ## A story keeps failing
 
 1. Check what went wrong with `/aimi:status` — the failure reason is stored on the story.
-2. Retry with `/aimi:next`, adjusting the approach.
+2. `/aimi:next` retries a failing story once on its own, then asks whether to skip, retry with your guidance or stop. A story that is already `failed` is not picked up by a later `/aimi:execute` or `/aimi:next`: to run it again, set it back to `pending` with `update-field US-NNN status pending`.
 3. If it stays blocked, skip it. The story is marked `skipped` and anything depending on it is skipped too, rather than run against a broken foundation.
 
 ---

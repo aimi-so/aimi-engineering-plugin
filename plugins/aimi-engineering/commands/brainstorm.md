@@ -15,9 +15,9 @@ Clarify **WHAT** to build through collaborative dialogue before planning **HOW**
 
 > Note: the `--non-interactive` token (if present in `$ARGUMENTS`) is stripped from the feature description in Step 0.5 before any prompt or research uses it.
 
-**If the feature description above is empty (after stripping `--non-interactive`), ask the user:** "What would you like to explore? Describe the feature, problem, or improvement you're thinking about."
+**If the feature description above is empty (after stripping `--non-interactive`), ask the user:** "What do you want to explore? Describe the feature, problem or change you have in mind."
 
-Do not proceed until you have a feature description from the user.
+Do not continue without a feature description from the user.
 
 ## Step 0: Resolve CLI Path
 
@@ -410,7 +410,7 @@ Certain literal phrases typed in the topic or in a reply trigger one-shot render
 
 ## Phase 0: Assess Requirements Clarity
 
-Evaluate whether brainstorming is needed based on the feature description.
+Decide from the feature description whether brainstorming is needed.
 
 **Clear requirements signals:**
 - Specific acceptance criteria provided
@@ -419,7 +419,7 @@ Evaluate whether brainstorming is needed based on the feature description.
 - Constrained, well-defined scope
 
 **If requirements are already clear:**
-Use **AskUserQuestion** to suggest: "Your requirements seem detailed enough to proceed directly to planning. Should I run `/aimi:plan` instead, or would you like to explore the idea further?"
+Use **AskUserQuestion** to suggest: "The requirements already look detailed enough to plan. Run `/aimi:plan` now, or keep exploring the idea first?"
 
 *Agent-mode fallback: if `INTERACTIVE_MODE=agent`, auto-proceed to `/aimi:plan` (the non-disruptive default). Log: `agent-mode: phase-0-plan-redirect auto-proceeded to plan`.*
 
@@ -1095,9 +1095,9 @@ If the Approach category remains unaddressed after all Phase 2 rounds complete, 
 - Pros and cons
 - When it's best suited
 
-Lead with a recommendation and explain why. Apply YAGNI — prefer simpler solutions.
+Say which option you recommend and why, and favor the simplest one that meets the need.
 
-Keep output sections concise (200-300 words max). After presenting approaches or key decisions, pause to validate: "Does this match what you had in mind? Any adjustments before we continue?"
+Keep output sections concise (200-300 words max). After presenting approaches or key decisions, pause to validate: "Is this the direction you want? Should anything change before we go on?"
 
 Use **AskUserQuestion** to ask which approach the user prefers.
 
@@ -1757,7 +1757,7 @@ If neither variant prototypes were saved nor bundle prototypes are available (ne
 **Before proceeding to handoff**, check the Open Questions section. If there are unresolved questions:
 
 1. Ask the user about each open question using AskUserQuestion
-2. Move resolved questions to a "Resolved Questions" section
+2. File each answered question under a "Resolved Questions" section
 3. Only proceed when Open Questions is empty or user explicitly defers them
 
 *Agent-mode fallback: if `INTERACTIVE_MODE=agent`, move every open question to a "Deferred Questions" section (one line per question) instead of asking. Log: `agent-mode: phase-4-open-questions deferred <N> questions`.*
