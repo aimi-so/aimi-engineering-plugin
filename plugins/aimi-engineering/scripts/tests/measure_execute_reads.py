@@ -63,6 +63,7 @@ TABLE = {
     "multi-repo-handling.md": ALL,
     "step-0-5-archival-check.md": ALL,
     "visual-follow-lifecycle.md": set(),
+    "usage-validation-environment.md": set(),
     "step-0-7-visual-follow-prompt.md": ALL,
     "step-0-9-split-detection.md": ALL,
     "step-0-9-split-flow.md": set(),
