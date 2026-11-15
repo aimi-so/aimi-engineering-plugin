@@ -355,7 +355,7 @@ for src in "$SRC_PLUGIN"/agents/*/*.md; do
   done
   assert_eq "yes" "$ok" "real tree: $base carries an explicit permission for all ten names"
 done
-assert_eq "19" "$WITH_TOOLS" "real tree: nineteen agent sources declare a tools line"
+assert_eq "20" "$WITH_TOOLS" "real tree: twenty agent sources declare a tools line"
 
 AUD="$AGENTS_DIR/aimi-cross-story-auditor.md"
 assert_eq "allow" "$(perm_get "$AUD" read)" "real tree: auditor read is allow"

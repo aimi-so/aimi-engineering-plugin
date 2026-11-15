@@ -34,10 +34,13 @@ TABLE = {
     "research/aimi-bundle-prototype-author.md": {"Read", "Write", "Grep", "Glob"},
     "research/aimi-foundation-architect.md": {"Read", "Write", "Grep", "Glob", CONTEXT7},
     "review/aimi-cross-story-auditor.md": {"Read", "Write"},
+    # drives a running product, so it also has the Chrome tools as a pattern
+    "review/aimi-usage-validator.md": READ_ONLY | {"mcp__claude-in-chrome__*"},
 }
 
 # The agents that review code: Bash may run a check, never edit. They are the
-# nine files of agents/review/ other than the cross-story auditor.
+# nine files of agents/review/ other than the cross-story auditor and the
+# usage validator.
 REVIEWERS = {
     "review/aimi-correctness-reviewer.md",
     "review/aimi-security-reviewer.md",
@@ -129,3 +132,12 @@ def test_reviewers_may_run_a_check_and_never_change_the_repository(rel):
     assert "Bash is for reading, searching and running one check that confirms a finding" in text, rel
     assert "Never edit, write, stage, commit or otherwise change the repository or its git state" in text, rel
     assert "Bash is for reading and searching only" not in text, rel
+
+
+def test_usage_validator_may_drive_the_product_and_never_change_the_repository():
+    _, body = _split("review/aimi-usage-validator.md")
+    text = "\n".join(body)
+    assert ("Bash is for driving the product, the browser CLI and the commands a charter calls for, "
+            "and for saving evidence under `EVIDENCE_DIR`.") in text
+    assert "Never edit, write, stage, commit or otherwise change the repository or its git state." in text
+    assert "Bash is for reading and searching only" not in text

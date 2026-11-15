@@ -35,9 +35,14 @@ def _text(name):
     return (REVIEW / f"{name}.md").read_text(encoding="utf-8")
 
 
-def test_the_review_directory_holds_these_reviewers_and_the_auditor_only():
+# Files of agents/review/ that are not code reviewers: the auditor audits staged
+# stories and the usage validator drives the running product.
+NON_REVIEWERS = ["aimi-cross-story-auditor", "aimi-usage-validator"]
+
+
+def test_the_review_directory_holds_these_reviewers_and_the_non_reviewers_only():
     found = sorted(p.stem for p in REVIEW.glob("*.md"))
-    assert found == sorted(REVIEWERS + ["aimi-cross-story-auditor"])
+    assert found == sorted(REVIEWERS + NON_REVIEWERS)
 
 
 @pytest.mark.parametrize("name", REVIEWERS)
@@ -101,7 +106,7 @@ def test_the_catalogue_lists_the_same_reviewers():
     catalogue = (REPO / "docs" / "agents-and-skills.md").read_text(encoding="utf-8")
     section = catalogue.split("### Review (")[1].split("###")[0]
     listed = sorted(re.findall(r"^\| `(aimi-[a-z-]+)` \|", section, re.M))
-    assert listed == sorted(REVIEWERS + ["aimi-cross-story-auditor"])
+    assert listed == sorted(REVIEWERS + NON_REVIEWERS)
 
 
 def test_the_readme_counts_match_the_tree():
@@ -112,6 +117,7 @@ def test_the_readme_counts_match_the_tree():
     assert re.search(rf"^\| Skills \| {skills} \|", readme, re.M), f"README skills row should say {skills}"
     review = len(list(REVIEW.glob("*.md")))
     assert f"{review} review," in readme
+    assert review == len(REVIEWERS) + len(NON_REVIEWERS)
 
 
 def test_the_plugin_notice_credits_every_reviewer_and_ships_with_the_plugin():
