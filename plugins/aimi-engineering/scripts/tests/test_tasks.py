@@ -7129,6 +7129,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "acknowledge-smell",
         "acknowledge-evidence",
         "usage-validation-record",
+        "usage-validation-get",
         "judge-verification",
         "reset-orphaned",
         "archive-task",

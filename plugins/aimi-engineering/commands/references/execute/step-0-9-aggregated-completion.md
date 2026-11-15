@@ -44,7 +44,7 @@ USAGE_FAILING_N=0
 while IFS= read -r record; do
   [ -n "$record" ] || continue
   USAGE_FILE=$(printf '%s' "$record" | jq -r '.file')
-  USAGE_STATUS=$("$AIMI_CLI" metadata --tasks-file "$USAGE_FILE" 2>/dev/null | jq -r '.usageValidation.status // "none"' 2>/dev/null)
+  USAGE_STATUS=$("$AIMI_CLI" usage-validation-get --tasks-file "$USAGE_FILE" 2>/dev/null | jq -r '.record.status // "none"' 2>/dev/null)
   [ -n "$USAGE_STATUS" ] || USAGE_STATUS=unknown
   printf 'usage-validation: %s\t%s\n' "$USAGE_FILE" "$USAGE_STATUS"
   if [ "$USAGE_STATUS" = failing ]; then
@@ -102,7 +102,7 @@ while IFS= read -r record; do
   [ -n "$record" ] || continue
   SPLIT_ROOT=$(printf '%s' "$record" | jq -r '.root')
   SPLIT_BRANCH=$(printf '%s' "$record" | jq -r '.branch')
-  USAGE_STATUS=$("$AIMI_CLI" metadata --tasks-file "$(printf '%s' "$record" | jq -r '.file')" 2>/dev/null | jq -r '.usageValidation.status // "none"' 2>/dev/null)
+  USAGE_STATUS=$("$AIMI_CLI" usage-validation-get --tasks-file "$(printf '%s' "$record" | jq -r '.file')" 2>/dev/null | jq -r '.record.status // "none"' 2>/dev/null)
   if [ "$USAGE_STATUS" = failing ]; then
     echo "kept: $SPLIT_BRANCH worktree — usage validation is failing there"
     continue

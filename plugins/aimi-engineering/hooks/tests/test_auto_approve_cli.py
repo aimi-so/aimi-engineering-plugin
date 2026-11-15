@@ -313,6 +313,9 @@ USAGE_READ_VERBS = [
     "usage-env-status --run run-1",
     "usage-validation-required --tasks-file .aimi/tasks.json",
     "usage-validation-verdict --required-file .aimi/r.json --evidence-dir .aimi/ev",
+    "usage-validation-get --tasks-file .aimi/tasks.json",
+    "usage-validation-get --feature f --phase 1",
+    "usage-validation-get",
 ]
 
 

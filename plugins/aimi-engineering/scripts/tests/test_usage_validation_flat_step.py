@@ -246,7 +246,7 @@ def _help_flags(verb):
     return set(re.findall(r"--[a-z][a-z-]*", lines[0]))
 
 
-@pytest.mark.parametrize("verb", ["usage-validation-required", "usage-validation-record", "metadata"])
+@pytest.mark.parametrize("verb", ["usage-validation-required", "usage-validation-record", "metadata", "usage-validation-get"])
 def test_usage_flat_every_flag_passed_is_one_the_cli_help_lists(verb):
     help_flags = _help_flags(verb)
     used = set()

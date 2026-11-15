@@ -22,7 +22,7 @@ echo "PENDING=$PENDING"
 if [ "$PENDING" != "0" ]; then
   $AIMI_CLI validate-deps --tasks-file "$RUN_TASKS_FILE" || echo "VALIDATE_DEPS=failed"
 elif [ "$PHASE_MODE" != "true" ]; then
-  USAGE_STORED=$($AIMI_CLI metadata --tasks-file "$RUN_TASKS_FILE" | jq -r '.usageValidation.status // "none"' 2>/dev/null) || USAGE_STORED="none"
+  USAGE_STORED=$($AIMI_CLI usage-validation-get --tasks-file "$RUN_TASKS_FILE" | jq -r '.record.status // "none"' 2>/dev/null) || USAGE_STORED="none"
   echo "USAGE_STORED=${USAGE_STORED:-none}"
 fi
 ```

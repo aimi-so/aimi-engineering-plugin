@@ -522,7 +522,7 @@ Store as `$DIFF_STAT` and `$FILES_CHANGED`.
 
 ### 2g. Report the plan's stored usage validation
 
-When the active tasks file's deliverable branch is the branch being published, print that plan's stored usage-validation verdict to stderr before anything is pushed. It never stops the command and never changes `--merge`; it prints nothing when the deliverable branch is another branch or no record exists. A phase-scoped file reads the roadmap phase's record, a flat file its own `metadata.usageValidation`.
+When the active tasks file's deliverable branch is the branch being published, print that plan's stored usage-validation verdict to stderr before anything is pushed. It never stops the command and never changes `--merge`; it prints nothing when the deliverable branch is another branch or no record exists. `usage-validation-get` decides where the record lives: the roadmap phase's for a phase-scoped file, the file's own `metadata.usageValidation` for a flat one.
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -533,13 +533,7 @@ USAGE_META=$("$AIMI_CLI" metadata --with-deliverable-branch 2>/dev/null) || USAG
 USAGE_DELIVERABLE=$(printf '%s' "$USAGE_META" | jq -r '.deliverableBranch // empty' 2>/dev/null)
 USAGE_REC=""
 if [ -n "$USAGE_DELIVERABLE" ] && [ "$USAGE_DELIVERABLE" = "$CURRENT_BRANCH" ]; then
-  USAGE_ROADMAP=$(printf '%s' "$USAGE_META" | jq -r '.roadmapPath // empty' 2>/dev/null)
-  USAGE_PHASE=$(printf '%s' "$USAGE_META" | jq -r '.phase.id // empty' 2>/dev/null)
-  if [ -n "$USAGE_ROADMAP" ] && [ -n "$USAGE_PHASE" ]; then
-    USAGE_REC=$("$AIMI_CLI" roadmap-get --feature "$(basename "$(dirname "$USAGE_ROADMAP")")" --phase "$USAGE_PHASE" 2>/dev/null | jq -c '.usageValidation // empty' 2>/dev/null)
-  else
-    USAGE_REC=$(printf '%s' "$USAGE_META" | jq -c '.usageValidation // empty' 2>/dev/null)
-  fi
+  USAGE_REC=$("$AIMI_CLI" usage-validation-get 2>/dev/null | jq -c '.record // empty' 2>/dev/null)
 fi
 if [ -n "$USAGE_REC" ]; then
   USAGE_STATUS=$(printf '%s' "$USAGE_REC" | jq -r '.status // "unknown"')
@@ -552,7 +546,7 @@ fi
 # usage-open-pr:end
 ```
 
-`$CURRENT_BRANCH` is retyped from the value Step 2a resolved, because each block runs in its own shell. The phase is read from `metadata.phase.id` and the feature from `roadmapPath` as Step 2b-i derives it.
+`$CURRENT_BRANCH` is retyped from the value Step 2a resolved, because each block runs in its own shell. Both calls read the session's active tasks file.
 
 ## Step 4: Build PR Title and Description
 

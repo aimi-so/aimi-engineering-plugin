@@ -6155,6 +6155,91 @@ def _usage_validation_failing(docs):
     return False
 
 
+def _usage_phase_answer(roadmap_path, feature, phase_id, prefix):
+    """usage-validation-get's answer for a roadmap phase. Dies naming the
+    roadmap when it cannot be read or holds no such phase: a reader that
+    cannot find the record must not answer "none recorded"."""
+    roadmap = _read_json_object(roadmap_path)
+    if roadmap is None:
+        die(prefix + "cannot read roadmap.json: " + roadmap_path)
+    phases = roadmap.get("phases")
+    phase = None
+    if isinstance(phases, list):
+        phase = next(
+            (p for p in phases if isinstance(p, dict) and jq_equal(p.get("id"), phase_id)),
+            None,
+        )
+    if phase is None:
+        die(prefix + "phase " + _num(phase_id) + " not found in " + roadmap_path)
+    record = phase.get("usageValidation")
+    return {
+        "scope": "phase",
+        "feature": feature,
+        "phase": phase_id,
+        "record": record if isinstance(record, dict) else None,
+    }
+
+
+def op_usage_validation_get(argv):
+    """usage-validation-get: where a run's usage-validation record lives, and
+    the record. The one reader every command calls instead of branching on
+    phase versus flat itself.
+
+    `--roadmap/--feature/--phase` answers a roadmap phase directly. With
+    `--tasks-file`, a phase-scoped file (metadata.phase present) is followed to
+    its roadmap phase through metadata.roadmapPath, confined the way every
+    document-sourced path is (confined_spec_path), or, when that key is absent,
+    to the roadmap.json two directories above the file, where /aimi:plan puts
+    it. A flat file answers its own metadata.usageValidation. Prints
+    {scope, feature, phase, record}; record is null when none is stored or
+    the stored value is not an object.
+    """
+    prefix = "Error: usage-validation-get: "
+    roadmap_arg = _flag(argv, "--roadmap")
+    if roadmap_arg:
+        phase_raw = _flag(argv, "--phase")
+        if phase_raw is None:
+            die("Usage: tasks.py usage-validation-get --roadmap <path> --feature <slug> --phase <id>")
+        _emit(_usage_phase_answer(roadmap_arg, _flag(argv, "--feature"), jq_numbers(json.loads(phase_raw)), prefix))
+        return 0
+
+    path = _flag(argv, "--tasks-file")
+    project_root = _flag(argv, "--project-root")
+    if not path or not project_root:
+        die("Usage: tasks.py usage-validation-get --tasks-file <path> --project-root <path>")
+    docs = read_docs(path, "usage-validation-get")
+    first = docs[0] if docs else None
+    metadata = first.get("metadata") if isinstance(first, dict) else None
+    if not isinstance(metadata, dict):
+        die(prefix + "no metadata object in " + path)
+    phase_meta = metadata.get("phase")
+    if phase_meta is None:
+        record = metadata.get("usageValidation")
+        _emit({
+            "scope": "flat",
+            "feature": None,
+            "phase": None,
+            "record": record if isinstance(record, dict) else None,
+        })
+        return 0
+
+    phase_id = phase_meta.get("id") if isinstance(phase_meta, dict) else None
+    if isinstance(phase_id, bool) or not isinstance(phase_id, (int, float)):
+        die(prefix + "metadata.phase.id is not a number in " + path)
+    roadmap_rel = metadata.get("roadmapPath")
+    if not (isinstance(roadmap_rel, str) and roadmap_rel):
+        roadmap_rel = os.path.relpath(
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(path))), "roadmap.json"),
+            project_root,
+        )
+    roadmap_path, inside = confined_spec_path(project_root, roadmap_rel)
+    if not inside:
+        die(prefix + "the roadmap path escapes the project: " + roadmap_rel)
+    feature = os.path.basename(os.path.dirname(roadmap_path))
+    _emit(_usage_phase_answer(roadmap_path, feature, phase_id, prefix))
+    return 0
+
+
 def op_usage_validation_record(argv):
     """usage-validation-record: write metadata.usageValidation, the run-level
     verdict of the real-usage validation gate, replacing any earlier record.
@@ -9838,6 +9923,7 @@ _OPS = {
     "acknowledge-smell": op_acknowledge_smell,
     "acknowledge-evidence": op_acknowledge_evidence,
     "usage-validation-record": op_usage_validation_record,
+    "usage-validation-get": op_usage_validation_get,
     "judge-verification": op_judge_verification,
     "reset-orphaned": op_reset_orphaned,
     "gate-pass": _gate_op("gate-pass", "passed"),

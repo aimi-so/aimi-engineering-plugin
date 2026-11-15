@@ -53,7 +53,7 @@ A `usage-validation: tooling-failed` line (a non-zero exit, an empty answer or a
 
 #### The stored record and the run values
 
-Read the phase's stored `usageValidation` through a pipe, never by opening a file with `jq`. Set `USAGE_ANSWER_FILE` to the saved answer's path when validation is owed, and to an empty string otherwise.
+Read the phase's stored record with `usage-validation-get` through a pipe, never by opening a file with `jq`. Set `USAGE_ANSWER_FILE` to the saved answer's path when validation is owed, and to an empty string otherwise.
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -64,11 +64,11 @@ AIMI_ROOT="[AIMI_ROOT]"
 PHASE_BRANCH="[PHASE_BRANCH]"
 USAGE_ANSWER_FILE="[the usage-validation-answer path, or empty]"
 # usage-phase-stored:begin
-PHASE_JSON=$("$AIMI_CLI" roadmap-get --feature "$FEATURE" --phase "$PHASE_ID") || PHASE_JSON="{}"
+USAGE_REC_JSON=$("$AIMI_CLI" usage-validation-get --feature "$FEATURE" --phase "$PHASE_ID") || USAGE_REC_JSON="{}"
 printf 'usage-validation-stored: status=%s kind=%s\n' \
-  "$(printf '%s' "$PHASE_JSON" | jq -r '.usageValidation.status // "none"')" \
-  "$(printf '%s' "$PHASE_JSON" | jq -r '.usageValidation.kind // "none"')"
-printf '%s' "$PHASE_JSON" | jq -r '(.usageValidation.findings // {}) | to_entries[] | select(.value.status == "accepted") | "usage-validation-accepted: " + .key'
+  "$(printf '%s' "$USAGE_REC_JSON" | jq -r '.record.status // "none"')" \
+  "$(printf '%s' "$USAGE_REC_JSON" | jq -r '.record.kind // "none"')"
+printf '%s' "$USAGE_REC_JSON" | jq -r '(.record.findings // {}) | to_entries[] | select(.value.status == "accepted") | "usage-validation-accepted: " + .key'
 if [ -n "$USAGE_ANSWER_FILE" ]; then
   USAGE_SAVED=$(cat "$USAGE_ANSWER_FILE")
   printf 'usage-run: %s-phase-%s\n' "$FEATURE" "$(printf '%s' "$PHASE_ID" | tr . -)"

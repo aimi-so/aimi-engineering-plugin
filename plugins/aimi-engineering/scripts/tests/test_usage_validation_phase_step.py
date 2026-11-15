@@ -246,7 +246,7 @@ def _help_flags(verb):
 
 
 @pytest.mark.parametrize("verb", ["usage-validation-required", "roadmap-record-usage-validation", "roadmap-set-status",
-                                  "roadmap-release-claim", "roadmap-get"])
+                                  "roadmap-release-claim", "usage-validation-get"])
 def test_usage_phase_every_flag_passed_is_one_the_cli_help_lists(verb):
     help_flags = _help_flags(verb)
     used = set()

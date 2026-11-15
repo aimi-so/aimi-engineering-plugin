@@ -130,7 +130,7 @@ For a root whose status is `needs-recipe`, `commands/references/dependency-setup
 A run that delivered a usable surface is judged by using it: `aimi-usage-validator` walks charters through the product brought up from a recorded recipe, after the Phase Visual Gate (phase mode) or after Finalize (flat run). The flow, the `usage-*` verbs, the records and the skip kinds are in `docs/dev/usage-validation.md`; read it before touching any of them.
 
 - A skip is never a pass: every one records a kind (`not-applicable`, `unable-to-evaluate`, `disabled-by-operator`) and a reason. `AIMI_USAGE_VALIDATION=off` records `disabled-by-operator`.
-- The four read-only verbs (`usage-recipe-get`, `usage-env-status`, `usage-validation-required`, `usage-validation-verdict`) are in `hooks/auto-approve-cli.sh` Pattern 2; the writers and anything that runs a recipe command are not and must keep prompting.
+- The five read-only verbs (`usage-recipe-get`, `usage-env-status`, `usage-validation-required`, `usage-validation-verdict`, `usage-validation-get`) are in `hooks/auto-approve-cli.sh` Pattern 2; the writers and anything that runs a recipe command are not and must keep prompting.
 
 ## Output Files
 
