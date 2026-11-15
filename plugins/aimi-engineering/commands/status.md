@@ -107,6 +107,16 @@ Count each status from the JSON:
 - Pending: P
 ```
 
+### Usage Validation
+
+When the `status` JSON carries a top-level `usageValidation`, print one line under Progress and nothing otherwise:
+
+```
+Usage validation: passed
+Usage validation: FAILING — [reason] (rounds: [rounds], open findings: [count of findings with status open])
+Usage validation: skipped ([kind]) — [reason]
+```
+
 ### Execution Waves
 
 Group stories into waves using topological level assignment:
@@ -168,6 +178,11 @@ For each story that has other stories depending on it, show: `[story_id] -> [lis
 Only show stories that have dependents (skip leaf nodes with no downstream).
 
 ### Next Steps
+
+If `usageValidation.status` is `failing`, lead Next Steps with this notice, before any other line:
+```
+Usage validation is failing. /aimi:execute re-validates it. /aimi:open-pr would publish a run whose usage validation is failing.
+```
 
 If there are pending or in_progress stories:
 ```

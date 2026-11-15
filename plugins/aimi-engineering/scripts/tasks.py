@@ -852,6 +852,9 @@ def status_view(doc, counts_only):
     for status in STATUS_COUNTS:
         view[status] = count_with_status(stories, status)
     view["total"] = len(stories)
+    recorded = metadata.get("usageValidation") if isinstance(metadata, dict) else None
+    if recorded is not None:
+        view["usageValidation"] = recorded
     if not counts_only:
         view["userStories"] = [story_row(story) for story in stories]
     return view
@@ -1234,6 +1237,17 @@ SMELL_ACKNOWLEDGE_REASON_MAXLEN = 500
 # acknowledge-evidence's own cap on --reason, through rm_sanitize. Its own
 # name for the same reason: a different field that merely agrees today.
 EVIDENCE_ACKNOWLEDGE_REASON_MAXLEN = 500
+
+# usage-validation-record's vocabulary and caps. The run-level verdict of the
+# real-usage validation gate is stored on metadata.usageValidation; the words
+# below are the only ones the op writes, and the reason rules live beside them.
+USAGE_VALIDATION_STATUSES = ("passed", "failing", "skipped")
+USAGE_VALIDATION_KINDS = ("not-applicable", "unable-to-evaluate", "disabled-by-operator")
+USAGE_VALIDATION_FINDING_STATUSES = ("open", "fixed", "accepted")
+USAGE_VALIDATION_REASON_MAXLEN = 2000
+USAGE_VALIDATION_FINDING_REASON_MAXLEN = 500
+USAGE_VALIDATION_FINDINGS_MAX = 200
+USAGE_VALIDATION_FINDING_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 # set-verification never writes "pending" -- recording a verdict is the
 # opposite of "nobody looked yet" -- so its own allowed set is this tuple
@@ -6132,6 +6146,131 @@ def op_acknowledge_evidence(argv):
     return 0
 
 
+def _usage_validation_failing(docs):
+    """True when any document's metadata.usageValidation.status is `failing`.
+
+    The one rule archive-task and the archivable predicate both read, so they
+    cannot disagree about which record blocks an archive. Shapes it cannot read
+    answer False: only a stored `failing` blocks.
+    """
+    for doc in docs:
+        metadata = doc.get("metadata") if isinstance(doc, dict) else None
+        record = metadata.get("usageValidation") if isinstance(metadata, dict) else None
+        if isinstance(record, dict) and record.get("status") == "failing":
+            return True
+    return False
+
+
+def _usage_validation_findings(raw):
+    """Parse and check --findings-json: {key: {status, reason?}}. Dies naming the flag."""
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        die("Error: usage-validation-record: --findings-json is not valid JSON")
+    if not isinstance(parsed, dict):
+        die("Error: usage-validation-record: --findings-json must be a JSON object")
+    findings = {}
+    for key, entry in parsed.items():
+        if not USAGE_VALIDATION_FINDING_KEY.match(key):
+            die("Error: usage-validation-record: --findings-json key is not allowed: " + key)
+        if not isinstance(entry, dict) or entry.get("status") not in USAGE_VALIDATION_FINDING_STATUSES:
+            die(
+                "Error: usage-validation-record: --findings-json entry '" + key
+                + "' needs a status of " + "|".join(USAGE_VALIDATION_FINDING_STATUSES)
+            )
+        reason = entry.get("reason")
+        if reason is not None and not isinstance(reason, str):
+            die("Error: usage-validation-record: --findings-json reason of '" + key + "' must be a string")
+        clean = rm_sanitize(reason, USAGE_VALIDATION_FINDING_REASON_MAXLEN) if reason else ""
+        if entry["status"] == "accepted" and not clean.strip():
+            die("Error: usage-validation-record: --findings-json entry '" + key + "' is accepted and needs a reason")
+        built = {"status": entry["status"]}
+        if clean.strip():
+            built["reason"] = clean
+        findings[key] = built
+    return findings
+
+
+def op_usage_validation_record(argv):
+    """usage-validation-record: write metadata.usageValidation, the run-level
+    verdict of the real-usage validation gate, replacing any earlier record.
+
+    Every vocabulary rule runs BEFORE the document is read, so a refusal never
+    opens the file. Only --review's confinement is bash's, before the lock;
+    this module takes no path of its own for it. An overwrite carries over the
+    previous record's accepted findings that the new call does not restate, so
+    an accepted decision is never asked again on a re-run.
+    """
+    prefix = "Error: usage-validation-record: "
+    path = _flag(argv, "--tasks-file")
+    if not path:
+        die("Usage: tasks.py usage-validation-record --tasks-file <path> --status <passed|failing|skipped> [flags]")
+    status = _flag(argv, "--status")
+    if status not in USAGE_VALIDATION_STATUSES:
+        die(prefix + "--status must be one of " + "|".join(USAGE_VALIDATION_STATUSES) + ", got: " + str(status or ""))
+    kind = _flag(argv, "--kind") if "--kind" in argv else None
+    if kind is not None and kind not in USAGE_VALIDATION_KINDS:
+        die(prefix + "--kind must be one of " + "|".join(USAGE_VALIDATION_KINDS) + ", got: " + kind)
+    if status == "skipped" and kind is None:
+        die(prefix + "--kind is required with --status skipped")
+    if status != "skipped" and kind is not None:
+        die(prefix + "--kind is only allowed with --status skipped")
+    raw_reason = _flag(argv, "--reason")
+    clean_reason = rm_sanitize(raw_reason, USAGE_VALIDATION_REASON_MAXLEN) if raw_reason else ""
+    if status in ("failing", "skipped") and not clean_reason.strip():
+        die(prefix + "--reason is required with --status " + status)
+    rounds = 0
+    if "--rounds" in argv:
+        raw_rounds = _flag(argv, "--rounds")
+        if raw_rounds is None or not re.fullmatch(r"[0-9]+", raw_rounds):
+            die(prefix + "--rounds must be a non-negative integer, got: " + str(raw_rounds or ""))
+        rounds = int(raw_rounds)
+    findings = {}
+    if "--findings-json" in argv:
+        findings = _usage_validation_findings(_flag(argv, "--findings-json") or "")
+    review = _flag(argv, "--review")
+
+    docs = read_docs(path, "usage-validation-record")
+    first = docs[0] if docs else None
+    if not isinstance(first, dict):
+        die(prefix + "no metadata object in " + path)
+    if first.get("metadata") is None:
+        first["metadata"] = {}
+    target = first["metadata"]
+    if not isinstance(target, dict):
+        die(prefix + "no metadata object in " + path)
+    if target.get("phase") is not None:
+        die(
+            prefix + "refused on a phase-scoped tasks file (metadata.phase is present); "
+            "a phase's verdict is recorded in roadmap.json: " + path
+        )
+
+    merged = dict(findings)
+    previous = target.get("usageValidation")
+    previous_findings = previous.get("findings") if isinstance(previous, dict) else None
+    if isinstance(previous_findings, dict):
+        for key, entry in previous_findings.items():
+            if key not in merged and isinstance(entry, dict) and entry.get("status") == "accepted":
+                merged[key] = entry
+    merged = dict(list(merged.items())[:USAGE_VALIDATION_FINDINGS_MAX])
+
+    record = {"status": status}
+    if kind is not None:
+        record["kind"] = kind
+    if clean_reason.strip():
+        record["reason"] = clean_reason
+    if review:
+        record["review"] = review
+    record["rounds"] = rounds
+    if merged:
+        record["findings"] = merged
+    record["recordedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    target["usageValidation"] = record
+    write_docs_atomically(path, docs)
+    _emit(record)
+    return 0
+
+
 # skipReason text for judge-verification's "no usable exit" outcome. Two
 # literal strings, not one templated by a boolean, because the two name
 # different facts: the first says a check was declared and ran somewhere the
@@ -6553,6 +6692,9 @@ def op_archive_task(argv):
     if not counts or (len(counts) == 1 and counts[0] != 0):
         sys.stderr.write("Error: Task file has non-terminal stories — cannot archive\n")
         return 1
+    if _usage_validation_failing(docs):
+        sys.stderr.write("Error: Task file's usage validation is failing — cannot archive\n")
+        return 1
 
     os.makedirs(archive_dir, exist_ok=True)
     archived_task = archive_move(archive_dir, path)
@@ -6764,6 +6906,8 @@ def op_archivable_file_is_terminal(argv):
     if not totals:
         return _archivable_verdict(False)
     if len(totals) == 1 and totals[0] == 0:
+        return _archivable_verdict(False)
+    if _usage_validation_failing(docs):
         return _archivable_verdict(False)
     return _archivable_verdict(True)
 
@@ -9763,6 +9907,7 @@ _OPS = {
     "set-verification": op_set_verification,
     "acknowledge-smell": op_acknowledge_smell,
     "acknowledge-evidence": op_acknowledge_evidence,
+    "usage-validation-record": op_usage_validation_record,
     "judge-verification": op_judge_verification,
     "reset-orphaned": op_reset_orphaned,
     "gate-pass": _gate_op("gate-pass", "passed"),

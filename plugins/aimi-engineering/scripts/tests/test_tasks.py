@@ -5456,6 +5456,7 @@ def test_every_locked_tasks_verb_crosses_into_python_exactly_once():
         "cmd_set_verification",
         "cmd_acknowledge_smell",
         "cmd_acknowledge_evidence",
+        "cmd_usage_validation_record",
         "cmd_judge_verification",
         "cmd_set_execution_mode",
         "cmd_normalize_status",
@@ -7126,6 +7127,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "set-verification",
         "acknowledge-smell",
         "acknowledge-evidence",
+        "usage-validation-record",
         "judge-verification",
         "reset-orphaned",
         "archive-task",
@@ -11823,3 +11825,174 @@ def test_deliverable_branch_flag_without_project_root_is_a_usage_error(tmp_path)
     result = _run_metadata(tmp_path, _member_doc(), "--with-deliverable-branch")
     assert result.returncode == 1
     assert "--project-root" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# usage-validation-record -- metadata.usageValidation and what it blocks
+# ---------------------------------------------------------------------------
+
+
+def _uv_file(tmp_path, name="u.json", status="completed", phase=None):
+    return _rs_file(tmp_path, name, [_rs_story("US-001", status)], phase=phase)
+
+
+def _uv(path, *flags):
+    return T.op_usage_validation_record(["usage-validation-record", "--tasks-file", path, *flags])
+
+
+def _uv_cli(path, *flags, home=None):
+    root = os.path.dirname(os.path.dirname(path))
+    return subprocess.run(
+        ["bash", CLI, *flags[:0], "usage-validation-record", "--tasks-file", path, *flags],
+        capture_output=True, text=True, cwd=root,
+        env={**os.environ, "AIMI_AGENT_MODE": "1"},
+    )
+
+
+def test_usage_validation_writes_the_record_and_replaces_the_earlier_one(tmp_path, capsys):
+    path = _uv_file(tmp_path)
+    assert _uv(path, "--status", "failing", "--reason", "login broken", "--rounds", "2") == 0
+    out = json.loads(capsys.readouterr().out)
+    saved = _rs_read(path)["metadata"]["usageValidation"]
+    assert out == saved
+    assert saved["status"] == "failing" and saved["rounds"] == 2
+    assert saved["reason"] == "login broken"
+    assert re.match(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$", saved["recordedAt"])
+    assert _uv(path, "--status", "passed") == 0
+    saved = _rs_read(path)["metadata"]["usageValidation"]
+    assert set(saved) == {"status", "rounds", "recordedAt"} and saved["rounds"] == 0
+
+
+def test_usage_validation_skipped_needs_a_kind_and_only_skipped_takes_one(tmp_path, capsys):
+    path = _uv_file(tmp_path)
+    assert _uv(path, "--status", "skipped", "--kind", "not-applicable", "--reason", "no ui") == 0
+    assert _rs_read(path)["metadata"]["usageValidation"]["kind"] == "not-applicable"
+
+
+@pytest.mark.parametrize(
+    "flags,named",
+    [
+        (["--status", "bogus"], "--status"),
+        (["--status", "skipped", "--kind", "nope", "--reason", "x"], "--kind"),
+        (["--status", "passed", "--kind", "not-applicable"], "--kind"),
+        (["--status", "skipped", "--reason", "x"], "--kind"),
+        (["--status", "failing"], "--reason"),
+        (["--status", "failing", "--reason", "  "], "--reason"),
+        (["--status", "skipped", "--kind", "disabled-by-operator"], "--reason"),
+        (["--status", "passed", "--rounds", ""], "--rounds"),
+        (["--status", "passed", "--rounds", "x"], "--rounds"),
+        (["--status", "passed", "--rounds", "-1"], "--rounds"),
+        (["--status", "passed", "--findings-json", "{"], "--findings-json"),
+        (["--status", "passed", "--findings-json", "[]"], "--findings-json"),
+        (["--status", "passed", "--findings-json", '{"-bad": {"status": "open"}}'], "--findings-json"),
+        (["--status", "passed", "--findings-json", '{"a": {"status": "weird"}}'], "--findings-json"),
+        (["--status", "passed", "--findings-json", '{"a": {"status": "accepted"}}'], "--findings-json"),
+    ],
+)
+def test_usage_validation_refuses_and_names_the_flag_and_writes_nothing(tmp_path, capsys, flags, named):
+    path = _uv_file(tmp_path)
+    before = open(path, encoding="utf-8").read()
+    with pytest.raises(SystemExit) as raised:
+        _uv(path, *flags)
+    assert raised.value.code == 1
+    assert named in capsys.readouterr().err
+    assert open(path, encoding="utf-8").read() == before
+
+
+def test_usage_validation_refuses_a_phase_scoped_file(tmp_path, capsys):
+    path = _uv_file(tmp_path, phase={"id": "1"})
+    before = open(path, encoding="utf-8").read()
+    with pytest.raises(SystemExit) as raised:
+        _uv(path, "--status", "passed")
+    assert raised.value.code == 1
+    assert "metadata.phase" in capsys.readouterr().err
+    assert open(path, encoding="utf-8").read() == before
+
+
+def test_usage_validation_findings_merge_keeps_accepted_and_drops_open_and_fixed(tmp_path, capsys):
+    path = _uv_file(tmp_path)
+    first = json.dumps({
+        "a:1:h": {"status": "accepted", "reason": "known"},
+        "b:1:h": {"status": "open"},
+        "c:1:h": {"status": "fixed"},
+    })
+    assert _uv(path, "--status", "failing", "--reason", "r", "--findings-json", first) == 0
+    second = json.dumps({"d:1:h": {"status": "open"}, "a:1:h": {"status": "fixed"}})
+    assert _uv(path, "--status", "failing", "--reason", "r", "--findings-json", second) == 0
+    assert _rs_read(path)["metadata"]["usageValidation"]["findings"] == {
+        "d:1:h": {"status": "open"}, "a:1:h": {"status": "fixed"},
+    }
+    assert _uv(path, "--status", "failing", "--reason", "r", "--findings-json", first) == 0
+    assert _uv(path, "--status", "passed", "--findings-json", "{}") == 0
+    assert list(_rs_read(path)["metadata"]["usageValidation"]["findings"]) == ["a:1:h"]
+
+
+def test_usage_validation_findings_cap_and_reason_sanitizing(tmp_path, capsys):
+    path = _uv_file(tmp_path)
+    many = {"k%d" % i: {"status": "open"} for i in range(250)}
+    assert _uv(path, "--status", "passed", "--findings-json", json.dumps(many)) == 0
+    assert len(_rs_read(path)["metadata"]["usageValidation"]["findings"]) == T.USAGE_VALIDATION_FINDINGS_MAX
+    one = json.dumps({"a": {"status": "accepted", "reason": "x" * 900}})
+    assert _uv(path, "--status", "passed", "--findings-json", one) == 0
+    reason = _rs_read(path)["metadata"]["usageValidation"]["findings"]["a"]["reason"]
+    assert len(reason) <= T.USAGE_VALIDATION_FINDING_REASON_MAXLEN
+
+
+def test_usage_validation_failing_blocks_archive_and_the_predicate_until_passed(tmp_path):
+    path = _uv_file(tmp_path)
+    tasks_dir = os.path.dirname(path)
+    root = os.path.dirname(tasks_dir)
+    os.makedirs(os.path.join(root, ".aimi", "tasks"), exist_ok=True)
+    proc = _uv_cli(path, "--status", "failing", "--reason", "broken")
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["status"] == "failing"
+    archive = os.path.join(root, "archive")
+    argv = ["archive-task", "--tasks-file", path, "--project-root", root, "--archive-dir", archive]
+    assert T.op_archive_task(argv) == 1
+    assert os.path.exists(path) and not os.path.exists(archive)
+    assert T.op_archivable_file_is_terminal(["x", "--tasks-file", path]) == 0
+    _uv(path, "--status", "passed")
+    assert T.op_archive_task(argv) == 0
+    assert not os.path.exists(path)
+
+
+def test_usage_validation_predicate_prints_false_for_failing_and_true_otherwise(tmp_path, capsys):
+    path = _uv_file(tmp_path)
+    assert T.op_archivable_file_is_terminal(["x", "--tasks-file", path]) == 0
+    assert capsys.readouterr().out.strip() == "true"
+    _uv(path, "--status", "failing", "--reason", "r")
+    capsys.readouterr()
+    assert T.op_archivable_file_is_terminal(["x", "--tasks-file", path]) == 0
+    assert capsys.readouterr().out.strip() == "false"
+    _uv(path, "--status", "skipped", "--kind", "not-applicable", "--reason", "r")
+    capsys.readouterr()
+    assert T.op_archivable_file_is_terminal(["x", "--tasks-file", path]) == 0
+    assert capsys.readouterr().out.strip() == "true"
+
+
+def test_usage_validation_status_view_adds_the_key_only_when_recorded(tmp_path):
+    doc = _rs_read(_uv_file(tmp_path))
+    assert "usageValidation" not in T.status_view(doc, False)
+    doc["metadata"]["usageValidation"] = {"status": "passed", "rounds": 0}
+    assert T.status_view(doc, True)["usageValidation"] == {"status": "passed", "rounds": 0}
+    assert T.status_view(doc, False)["usageValidation"] == {"status": "passed", "rounds": 0}
+
+
+def test_usage_validation_wrapper_works_in_agent_mode_and_is_in_the_help(tmp_path):
+    path = _uv_file(tmp_path)
+    os.makedirs(os.path.join(os.path.dirname(os.path.dirname(path)), ".aimi", "tasks"), exist_ok=True)
+    before = open(path, encoding="utf-8").read()
+    proc = _uv_cli(path, "--status", "passed", "--review", "/etc/passwd")
+    assert proc.returncode == 1
+    assert open(path, encoding="utf-8").read() == before
+    proc = _uv_cli(path, "--status", "passed")
+    assert proc.returncode == 0, proc.stderr
+    helped = subprocess.run(["bash", CLI, "help"], capture_output=True, text=True)
+    assert "usage-validation-record" in helped.stdout + helped.stderr
+
+
+def test_usage_validation_status_md_carries_the_line_and_the_notice():
+    text = open(os.path.join(SCRIPTS, "..", "commands", "status.md"), encoding="utf-8").read()
+    assert "Usage validation:" in text and "FAILING" in text
+    assert "/aimi:open-pr" in text and "re-validates" in text
+    assert len(text.encode("utf-8")) <= 16384

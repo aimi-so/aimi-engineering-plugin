@@ -2834,6 +2834,63 @@ cmd_acknowledge_evidence() {
   printf '%s\n' "$out"
 }
 
+# Record the run-level usage-validation verdict on metadata.usageValidation.
+# Unlike acknowledge-evidence it has no agent-mode refusal: an unattended run
+# must be able to record its own verdict. Every vocabulary rule is tasks.py's
+# and runs before the document is read; only --review is confined here, ahead
+# of the lock, the way every path that arrives as a CLI argument is.
+# Usage: usage-validation-record --status <passed|failing|skipped> [flags] [--tasks-file <path>]
+cmd_usage_validation_record() {
+  local tasks_file positional=() remaining=() op_args=() review=""
+  local args=("$@")
+  local i=0 n=${#args[@]}
+  while [ "$i" -lt "$n" ]; do
+    case "${args[$i]}" in
+      --status|--kind|--reason|--rounds|--findings-json)
+        op_args+=("${args[$i]}")
+        i=$((i + 1))
+        op_args+=("${args[$i]:-}")
+        ;;
+      --review)
+        i=$((i + 1))
+        review="${args[$i]:-}"
+        ;;
+      *) remaining+=("${args[$i]}") ;;
+    esac
+    i=$((i + 1))
+  done
+  _parse_positional_tasks_file tasks_file positional "${remaining[@]}"
+
+  if [ "${#positional[@]}" -gt 0 ]; then
+    echo "Usage: aimi-cli.sh usage-validation-record --status <passed|failing|skipped> [--kind <kind>] [--reason <text>] [--review <path>] [--rounds <n>] [--findings-json <json>] [--tasks-file <path>]" >&2
+    exit 1
+  fi
+
+  if [ -n "$review" ]; then
+    validate_path_in_project "$review"
+    op_args+=(--review "$review")
+  fi
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+
+  # One crossing, inside the lock.
+  check_python3
+  local out
+  out=$(
+    (
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" usage-validation-record \
+        --tasks-file "$tasks_file" "${op_args[@]}"
+    ) 200>"${tasks_file}.lock"
+  ) || exit $?
+  printf '%s\n' "$out"
+}
+
 # Persist a --container/--inline override onto metadata.execution.
 # execute.md and next.md call this after resolving a session-level override so
 # a later re-invocation without the flag continues in the same mode instead of
@@ -17785,6 +17842,15 @@ COMMANDS:
                               is the phase-aggregate completed-story count; the gate stops
                               honoring it when that count changes. Refuses (writes nothing)
                               in agent mode or with an empty --reason. Idempotent.
+    usage-validation-record --status <passed|failing|skipped> [--kind <not-applicable|unable-to-evaluate|disabled-by-operator>] [--reason <text>] [--review <path>] [--rounds <n>] [--findings-json <json>] [--tasks-file <path>]
+                              Record metadata.usageValidation {status, kind?, reason?, review?,
+                              rounds, findings?, recordedAt} in one locked crossing, replacing
+                              any earlier record, and print it. --kind goes with skipped and
+                              only with it; failing and skipped need a --reason. --findings-json
+                              is {<key>: {status: open|fixed|accepted, reason?}}; accepted
+                              findings of the previous record carry over. A failing record makes
+                              archive-task refuse. Refuses on a phase-scoped tasks file.
+                              Works in agent mode.
     set-execution-mode <container|inline> [--tasks-file <path>]
                               Persist a --container/--inline override onto metadata.execution
                               (returns {execution} JSON). Refuses with non-zero exit on a
@@ -19462,6 +19528,7 @@ main() {
     set-verification)  shift; cmd_set_verification "$@" ;;
     acknowledge-smell) shift; cmd_acknowledge_smell "$@" ;;
     acknowledge-evidence) shift; cmd_acknowledge_evidence "$@" ;;
+    usage-validation-record) shift; cmd_usage_validation_record "$@" ;;
     judge-verification) shift; cmd_judge_verification "$@" ;;
     triage-verify) shift; cmd_triage_verify "$@" ;;
     validate-waves)    shift; cmd_validate_waves "$@" ;;
