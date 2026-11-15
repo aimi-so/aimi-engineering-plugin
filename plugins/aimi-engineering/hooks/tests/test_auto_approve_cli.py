@@ -388,6 +388,10 @@ ADVERSARIAL = [
         "$AIMI_CLI deps-recipe-record --project . --command 'make setup'",
         id="deps-recipe-record-is-a-human-decision-verb",
     ),
+    pytest.param(
+        "$AIMI_CLI usage-recipe-record --project . --serve 'npm run dev' --ready /",
+        id="usage-recipe-record-is-a-human-decision-verb",
+    ),
     pytest.param("mkdir -p /etc/aimi", id="mkdir-outside-the-aimi-dir"),
     pytest.param("$AIMI_CLI status; cat /etc/shadow", id="whitelisted-subcommand-then-chain"),
     pytest.param(

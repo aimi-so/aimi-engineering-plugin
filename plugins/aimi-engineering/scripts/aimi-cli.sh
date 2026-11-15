@@ -12006,6 +12006,73 @@ cmd_deps_recipe_record() {
   return "$rc"
 }
 
+# usage-recipe-record --project <key> (--serve <cmd> | --cli <cmd>) [flags]
+# usage-recipe-get --project <key>
+#
+# The usage recipe is how a person confirmed the whole product comes up for
+# real-usage validation, stored at usage.recipe[<key>] of
+# <AIMI_ROOT>/.aimi/config.json beside dependencies.install[<key>]. Bash owns
+# the flag shapes, check_python3 and the lock; scripts/usage_recipe.py owns the
+# document rules and makes the read-merge-write in ONE crossing inside the
+# lock `deps-recipe-record` takes, so records for different keys, and a record
+# racing a deps-recipe-record, all survive. Both verbs refuse without python3:
+# for the reader an `absent` answer would read as "no recipe recorded" and make
+# validation skip as if the person had declined. None of the flag values is a
+# path, so none is in _PATH_ARG_FLAGS.
+_usage_recipe_flags() {
+  # $1 = verb, $2 = "record" or "get"; remaining args are the caller's flags.
+  # Fills the global array _USAGE_RECIPE_ARGS with the python argv tail.
+  local verb="$1" mode="$2"; shift 2
+  _USAGE_RECIPE_ARGS=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project) ;;
+      --serve|--cli|--setup|--cleanup|--port|--ready|--login|--login-url|--browser|--external-services)
+        if [ "$mode" != "record" ]; then
+          echo "Error: $verb: unknown flag: $1" >&2
+          exit 1
+        fi ;;
+      *)
+        echo "Error: $verb: unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh $verb --project <key>$([ "$mode" = record ] && echo ' (--serve <cmd> | --cli <cmd>) [--setup <cmd>]... [--cleanup <cmd>]... [--port <n>] [--ready <url>] [--login none|manual] [--login-url <url>] [--browser agent-browser|chrome] [--external-services <text>]')" >&2
+        exit 1 ;;
+    esac
+    if [ $# -lt 2 ]; then
+      echo "Error: $verb: $1 requires a value" >&2
+      exit 1
+    fi
+    _USAGE_RECIPE_ARGS+=("$1" "$2")
+    shift 2
+  done
+}
+
+cmd_usage_recipe_record() {
+  _usage_recipe_flags usage-recipe-record record "$@"
+  check_python3
+
+  local config="$AIMI_DIR/config.json"
+  validate_path_in_project "$config"
+
+  local rc=0
+  (
+    _lock "${config}.lock"
+    python3 "$(_aimi_script_py usage_recipe.py)" record --config "$config" \
+      ${_USAGE_RECIPE_ARGS[@]+"${_USAGE_RECIPE_ARGS[@]}"}
+  ) 200>"${config}.lock" || rc=$?
+  return "$rc"
+}
+
+cmd_usage_recipe_get() {
+  _usage_recipe_flags usage-recipe-get get "$@"
+  check_python3
+
+  local config="$AIMI_DIR/config.json"
+  validate_path_in_project "$config"
+
+  python3 "$(_aimi_script_py usage_recipe.py)" get --config "$config" \
+    ${_USAGE_RECIPE_ARGS[@]+"${_USAGE_RECIPE_ARGS[@]}"}
+}
+
 # Check whether the first-run model-selection prompt should be shown.
 # Echoes exactly one token to stdout:
 #   skip   — models.json already exists OR the marker file already exists
@@ -18033,6 +18100,24 @@ COMMANDS:
                               "recorded" or "unchanged". Refuses an unsafe command
                               or key, an unreadable config and a config tracked by
                               git; needs python3.
+    usage-recipe-record --project <key> (--serve <cmd> | --cli <cmd>) [--setup <cmd>]...
+                        [--cleanup <cmd>]... [--port <n>] [--ready <url>]
+                        [--login none|manual] [--login-url <url>]
+                        [--browser agent-browser|chrome] [--external-services <text>]
+                              Record how the whole product comes up at
+                              usage.recipe[<key>] of .aimi/config.json (same key rule as
+                              deps-recipe-record). --serve needs --ready; --port, --ready,
+                              --login, --login-url and --browser need --serve. Commands are
+                              plain (no ; | & $ < > or backtick, at most 512 chars, at most
+                              20 setup and 20 cleanup steps); ready and login url are a
+                              /-path or an http(s) loopback URL; port is 1024-65535. No
+                              default is filled in. Prints {status, project, recipe, config};
+                              status is "recorded" or "unchanged". Needs python3.
+    usage-recipe-get --project <key>
+                              Print {status, project, recipe} for a recorded recipe,
+                              {status:"absent", recipe:null} for none, and
+                              {status:"untrusted", recipe:null} for a config tracked by git.
+                              Refuses a stored entry that fails validation; needs python3.
     models-prompt-check       Check whether the model-selection prompt should be shown.
                               Per-host decision:
                               - prompt when the config file is missing entirely (always
@@ -19153,6 +19238,8 @@ main() {
     validate-outline) shift; cmd_validate_outline "$@" ;;
     validate-staging) shift; cmd_validate_staging "$@" ;;
     deps-recipe-record) shift; cmd_deps_recipe_record "$@" ;;
+    usage-recipe-record) shift; cmd_usage_recipe_record "$@" ;;
+    usage-recipe-get) shift; cmd_usage_recipe_get "$@" ;;
     outline-shift) shift; cmd_outline_shift "$@" ;;
     split-detect)      shift; cmd_split_detect "$@" ;;
     roadmap-init)          shift; cmd_roadmap_init "$@" ;;
