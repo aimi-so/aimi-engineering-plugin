@@ -18499,10 +18499,15 @@ COMMANDS:
                               AIMI_USAGE_ENV_READY_TIMEOUT (300 s). Needs python3.
     usage-env-status --run <key> [--wait <0-480>]
                               Print {run,status,stage,reason,repositories:[{project,
-                              status,url}],log}; status is starting|ready|
-                              unable-to-evaluate|failed|down|absent. Returns as soon as
-                              status leaves "starting" or the wait ends; exit 0 in every
-                              state case. Needs python3.
+                              status,url,loginUrl}],origins,originsRefused,log}; status is
+                              starting|ready|unable-to-evaluate|failed|down|absent. For a
+                              ready run, origins are the de-duplicated loopback origins of
+                              every server URL and recipe login URL (a relative login URL
+                              joined to its repository's server, as loginUrl) and
+                              originsRefused names every URL that is not http(s) on
+                              localhost, 127.0.0.1 or [::1] without userinfo. Returns as
+                              soon as status leaves "starting" or the wait ends; exit 0 in
+                              every state case. Needs python3.
     usage-env-down --run <key>
                               Stop a live runner, run the recorded recipe's cleanup steps
                               (re-read from the trusted recipe, never the state file's copy),

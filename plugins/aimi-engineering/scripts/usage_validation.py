@@ -38,12 +38,10 @@ surface with a project whose recipe is absent, untrusted or unreadable counts as
 "no recipe recorded".
 """
 
-import ipaddress
 import json
 import os
 import re
 import sys
-from urllib.parse import urlsplit
 
 import roadmap as R
 from sanitize import rm_sanitize
@@ -67,7 +65,8 @@ EVIDENCE_TYPES = ("screenshot", "console", "network", "command")
 RATINGS = ("severity", "frequency", "impact", "persistence")
 TEXT_MAXLEN = 1000
 KEY_PATTERN = re.compile(r"^[^:/\s]+:[1-9][0-9]*:(?:H10|H[1-9]|S|F|D|P|O|T)$")
-LOOPBACK_SCHEMES = ("http", "https", "ws", "wss")
+# A validator lists every origin it contacted, a live-reload socket included.
+ORIGIN_SCHEMES = U.WEB_SCHEMES + U.SOCKET_SCHEMES
 
 
 def _advise(detail):
@@ -526,23 +525,6 @@ def _evidence_counts(entry, evidence_dir):
     return inside and os.path.isfile(here) and not os.path.islink(here)
 
 
-def _loopback(origin):
-    try:
-        parts = urlsplit(origin)
-        host = parts.hostname
-        parts.port
-    except ValueError:
-        return False
-    if parts.scheme not in LOOPBACK_SCHEMES or not host:
-        return False
-    if host == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
 def _verdict_answer(outcome, reason, planned, executed=0, blocked_list=(), actions=0,
                     bugs=(), decisions=(), unmapped=(), unconfirmed=(), reported=(),
                     dropped=0, summary=None):
@@ -620,7 +602,7 @@ def usage_validation_verdict(message, planned_ids, evidence_dir, reproduced=(), 
     if not planned and not status:
         return _verdict_answer("tooling-failed", "no charter is planned or reported", 0)
     for origin in block["origins"]:
-        if not _loopback(origin):
+        if not U.is_loopback_origin(origin, ORIGIN_SCHEMES):
             return _verdict_answer("tooling-failed",
                                    "origin " + repr(_clean(origin, 200)) + " is not a loopback origin",
                                    n_planned, actions=block["actions"])

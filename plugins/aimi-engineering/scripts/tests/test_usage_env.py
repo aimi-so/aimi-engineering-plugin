@@ -122,7 +122,9 @@ def test_usage_env_lifecycle_runs_setup_serves_and_cleans_up(lay):
 
     st = lay.wait("run-a")
     assert st["status"] == "ready"
-    assert st["repositories"] == [{"project": ".", "status": "ready", "url": "http://127.0.0.1:%d" % port}]
+    assert st["repositories"] == [{"project": ".", "status": "ready", "url": "http://127.0.0.1:%d" % port,
+                                   "loginUrl": None}]
+    assert st["origins"] == ["http://127.0.0.1:%d" % port] and st["originsRefused"] == []
     wt = os.path.join(lay.root, ".worktrees", "w1")
     assert os.path.exists(os.path.join(wt, "setup-1")) and os.path.exists(os.path.join(wt, "setup-2"))
     assert not os.path.exists(os.path.join(lay.root, "setup-1"))
@@ -526,3 +528,31 @@ def test_usage_env_up_confines_every_repo_value_before_python_starts(lay, tmp_pa
         assert out.returncode == 1 and "Path escapes project root" in out.stderr, (spec, out.stderr)
         assert out.stdout == ""
     assert not os.path.exists(os.path.join(lay.root, ".aimi", "state", "usage-env"))
+
+
+@needs_tools
+def test_usage_env_status_joins_the_login_url_and_judges_every_origin(lay):
+    port = free_port()
+    lay.record(serve=lay.serve_cmd(port), port=port, ready="/", login="manual", login_url="/login")
+    lay.up("run-o", ".=w1")
+    st = lay.wait("run-o")
+    assert st["status"] == "ready", st
+    base = "http://127.0.0.1:%d" % port
+    assert st["repositories"][0]["loginUrl"] == base + "/login"
+    assert st["origins"] == [base] and st["originsRefused"] == []
+
+    # An absolute login URL on another loopback host is its own origin.
+    lay.record(serve=lay.serve_cmd(port), port=port, ready="/", login="manual",
+               login_url="http://localhost:%d/sign-in" % port)
+    st = lay.js("usage-env-status", "--run", "run-o")
+    assert st["origins"] == [base, "http://localhost:%d" % port]
+
+    # A server URL the state file names outside loopback is refused, not navigated.
+    path = os.path.join(lay.root, ".aimi", "state", "usage-env", "run-o.json")
+    doc = lay.state("run-o")
+    doc["repositories"][0]["url"] = "http://127.0.0.2:%d" % port
+    with open(path, "w") as fh:
+        json.dump(doc, fh)
+    st = lay.js("usage-env-status", "--run", "run-o")
+    assert st["originsRefused"] and "http://127.0.0.2:%d" % port in st["originsRefused"]
+    assert lay.js("usage-env-status", "--run", "never")["origins"] == []

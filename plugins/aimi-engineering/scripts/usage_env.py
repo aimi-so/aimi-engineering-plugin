@@ -161,7 +161,7 @@ def _emit(doc):
 
 def _public_repos(state):
     return [
-        {"project": r.get("project"), "status": r.get("status"), "url": r.get("url")}
+        {"project": r.get("project"), "status": r.get("status"), "url": r.get("url"), "loginUrl": None}
         for r in state.get("repositories", [])
     ]
 
@@ -791,7 +791,8 @@ def _op_status(args):
     while True:
         state = _read_state(state_path)
         if state is None:
-            _emit({"run": run, "status": "absent", "stage": None, "reason": None, "repositories": [], "log": None})
+            _emit({"run": run, "status": "absent", "stage": None, "reason": None, "repositories": [],
+                   "origins": [], "originsRefused": [], "log": None})
             return 0
         status, reason = state.get("status"), state.get("reason")
         if status == "starting" and not _runner_alive(lock_path):
@@ -804,11 +805,58 @@ def _op_status(args):
         if status != "starting" or time.monotonic() >= deadline:
             break
         time.sleep(0.25)
+    repositories = _public_repos(state)
+    origins, refused = _origins(f["--aimi-root"], repositories) if status == "ready" else ([], [])
     _emit({
         "run": run, "status": status, "stage": state.get("stage"), "reason": reason,
-        "repositories": _public_repos(state), "log": state.get("log"),
+        "repositories": repositories, "origins": origins, "originsRefused": refused,
+        "log": state.get("log"),
     })
     return 0
+
+
+def _origins(aimi_root, repositories):
+    """(origins, refused) of a ready run; fills each repository's loginUrl.
+
+    Every URL a browser may be sent to is judged by usage_recipe's one loopback
+    rule: each repository's server URL, and its recipe's login URL, a relative
+    one joined to that repository's own server URL. The login URL comes from the
+    trusted recipe, never from the state file. `origins` is the de-duplicated
+    scheme://authority list in repository order; `refused` names every URL that
+    failed, and a caller treats a non-empty one as a refusal."""
+    origins, refused = [], []
+
+    def judge(url):
+        if not U.is_loopback_origin(url):
+            refused.append(url)
+            return False
+        origin = U.origin_of(url)
+        if origin not in origins:
+            origins.append(origin)
+        return True
+
+    for repo in repositories:
+        repo["loginUrl"] = None
+        url = repo.get("url")
+        if url is not None:
+            judge(url)
+        project = repo.get("project")
+        try:
+            D.validate_key(project)
+        except Refusal:
+            continue
+        recipe, _reason = _fetch_recipe(aimi_root, project)
+        login = ((recipe or {}).get("login") or {}).get("url")
+        if not isinstance(login, str) or not login:
+            continue
+        if login.startswith("/"):
+            if not isinstance(url, str):
+                refused.append("%s login url %s has no server to join" % (project, login))
+                continue
+            login = url + login
+        if judge(login):
+            repo["loginUrl"] = login
+    return origins, refused
 
 
 # --------------------------------------------------------------------------

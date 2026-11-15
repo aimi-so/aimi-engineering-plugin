@@ -153,7 +153,8 @@ def test_usage_validation_verdict_classification(root):
 def test_usage_validation_verdict_outcome_ladder(root):
     a = answer(root, block(good(origins=["http://example.com", "http://localhost"])))
     assert a["outcome"] == "tooling-failed" and "example.com" in a["reason"]
-    for origin in ["http://localhost@evil.com", "ftp://localhost", "http://localhost.evil.com", "localhost"]:
+    for origin in ["http://localhost@evil.com", "ftp://localhost", "http://localhost.evil.com", "localhost",
+                   "http://127.0.0.2:3000", "http://u@localhost:3000", "ws://127.0.0.2"]:
         assert answer(root, block(good(origins=[origin])))["outcome"] == "tooling-failed"
     for origin in ["http://127.0.0.1:80", "ws://[::1]:3000/x", "https://localhost"]:
         assert answer(root, block(good(origins=[origin])))["outcome"] == "pass"
