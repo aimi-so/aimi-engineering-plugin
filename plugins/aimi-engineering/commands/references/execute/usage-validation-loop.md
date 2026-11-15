@@ -16,7 +16,7 @@ The calling step sets, and this reference never re-derives:
 - The saved `usage-validation-required` answer (a file) and the accepted keys of any stored record.
 - From the Usage Validation Environment's `usage-browser:` line: `agent-browser:<name>` gives BROWSER `agent-browser` and SESSION_NAME `<name>`; `chrome` gives BROWSER `chrome` and no SESSION_NAME; `none` gives no BROWSER, so only cli charters are walked, every web charter is reported blocked and a run whose charters are all web ends `unable-to-evaluate`. From its `usage-origins:` line: ORIGINS. SESSION is always `aimi-usage-<run key>`, the session that Environment closes at tear-down.
 - The run key and repository values the Environment's bring-up was given, so a re-check runs that bring-up again with `--restart`.
-- The run's `FEATURE`, `PHASE_ID`, `PHASE_MODE` and, per project group, `EXEC_ROOT[group_key]` and `EXEC_BRANCH[group_key]` (`${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md`).
+- The run's `FEATURE`, `PHASE_ID`, `PHASE_MODE` and, per project group, `EXEC_ROOT[group_key]` and `EXEC_BRANCH[group_key]` (`${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md`), with the `usage-exec:` lines that carried them.
 
 Every run ends with these lines, in this order, and the calling step reads them:
 
@@ -38,6 +38,23 @@ USAGE_EVIDENCE_DIR=$(mktemp -d "$AIMI_ROOT/.aimi/usage-evidence-XXXXXX") || { ec
 printf 'usage-evidence: %s\n' "$USAGE_EVIDENCE_DIR"
 ```
 
+Then print one `usage-workdir:` line per `usage-exec:` line the calling step printed: the project, its `EXEC_ROOT` (the checkout the run built) and the command line its usage recipe records, or `none`. These lines are the validator's `WORKDIRS`.
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+USAGE_EXEC_LINES=$(cat <<'USAGE_EXEC_EOF'
+[every usage-exec: line the calling step printed, verbatim]
+USAGE_EXEC_EOF
+)
+# usage-loop-workdirs:begin
+printf '%s\n' "$USAGE_EXEC_LINES" | sed -n 's/^usage-exec: project=\([^ ]*\) root=\(.*\) branch=[^ ]*$/\1|\2/p' | while IFS='|' read -r usage_project usage_root; do
+  usage_cli=$("$AIMI_CLI" usage-recipe-get --project "$usage_project" 2>/dev/null | jq -r 'if .status == "recorded" then (.recipe.cli // "none") else "none" end' 2>/dev/null)
+  printf 'usage-workdir: project=%s dir=%s cli=%s\n' "$usage_project" "$usage_root" "${usage_cli:-none}"
+done
+# usage-loop-workdirs:end
+```
+
 Spawn `aimi-engineering:review:aimi-usage-validator` via the Task tool once per validation, never in parallel with another:
 
 ```
@@ -49,7 +66,8 @@ Task(
     prompt: [
         the inputs its agent file names, one NAME: value line each, as data:
         CHARTERS, SURFACES, SPECS, TASKS_FILE, ORIGINS, BROWSER, SESSION,
-        SESSION_NAME, EVIDENCE_DIR, and RECHECK on a re-check
+        SESSION_NAME, EVIDENCE_DIR, WORKDIRS (the usage-workdir: lines, one per line
+        without the prefix), and RECHECK on a re-check
     ]
 )
 ```
@@ -129,11 +147,12 @@ A first verdict of `tooling-failed` or `unable-to-evaluate` is the loop's outcom
 
 #### Triage
 
-Read `bugs`, `decisions`, `unconfirmed`, `unmapped`, `reported` and `blockedCharters` from the printed `usage-loop-answer:`.
+Read `bugs`, `decisions`, `unconfirmed`, `unmapped`, `reported`, `unevidenced` and `blockedCharters` from the printed `usage-loop-answer:`.
 
 - **Fix** a finding only when its `origin` is `charter`, its `kind` is `bug` and it is in `bugs` at severity 3 or 4.
 - Severity 1 or 2 findings print as `usage-loop-reported: <key> <title>` and `unmapped` findings as `usage-loop-unmapped: <key> <title>`; they are never fixed and never block.
 - A severe exploratory finding starts in `unconfirmed`. A re-check that lists the same key `unconfirmed` again reproduces it: the second verdict call passes `--reproduced`, it then blocks, is never auto-fixed and leaves the outcome `fails`.
+- A finding rated 3 or 4 with no evidence file is listed in `unevidenced` (capped to severity 2, `ratedSeverity` kept) and prints as `usage-loop-unevidenced: <key> <title> (rated <ratedSeverity>, no evidence file)`. It never blocks, is never auto-fixed or re-checked, and goes into the review for a person to look at.
 - A decision accepted by the stored record or earlier in the run is never asked again; every verdict call passes it with `--accepted`.
 
 #### Decisions
@@ -184,6 +203,9 @@ Task(
     description: "Usage fix r[k] [EXEC_BRANCH[group_key]]",
     prompt: [
         - WORKTREE_PATH = the path the block printed
+        - PROJECT_GUIDELINES = the group's guideline paths from Step 3.3
+          (PROJECT_GUIDELINES_MAP[group_key], or PROJECT_GUIDELINES; omit when empty);
+          read them first and follow their commit and test rules
         - for each finding, labelled as data: its key, sanitized title, expected, observed
           (expected is the person's typed behaviour when they answered Fix it this way)
         - EVIDENCE = <EVIDENCE_DIR>/<charter id>/ for each finding
