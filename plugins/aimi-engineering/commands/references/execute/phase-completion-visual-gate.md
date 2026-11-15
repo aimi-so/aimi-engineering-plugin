@@ -28,7 +28,7 @@ else
 fi
 ```
 
-**`.required` false:** record nothing — no `roadmap-record-visual-gate` call — and keep the printed `visual-gate: not-required — <reason>` line verbatim for Write Handoff's deviations. Fall through to Write Handoff. If the call itself failed, the claim is released and the phase's status stays `in_progress`; report the tooling failure the way Verification tooling failed above does and skip directly to Step 5 — `handoff.md` is not written.
+**`.required` false:** record nothing — no `roadmap-record-visual-gate` call — and keep the printed `visual-gate: not-required — <reason>` line verbatim for Write Handoff's deviations. Fall through to Phase Usage Validation. If the call itself failed, the claim is released and the phase's status stays `in_progress`; report the tooling failure the way Verification tooling failed above does and skip directly to Step 5 — `handoff.md` is not written.
 
 #### Environment checks and the live URLs
 
@@ -105,7 +105,7 @@ else
 fi
 ```
 
-A `visual-gate: skipped — <reason>` line means the gate recorded its `skipped` verdict and the phase continues to Write Handoff unchanged; keep that line verbatim for its deviations. A `visual-gate-input:` line means the environment can compare: continue below.
+A `visual-gate: skipped — <reason>` line means the gate recorded its `skipped` verdict and the phase continues to Phase Usage Validation unchanged; keep that line verbatim for its deviations. A `visual-gate-input:` line means the environment can compare: continue below.
 
 #### Run the comparison
 
@@ -142,7 +142,7 @@ case "$VG_VERDICT" in
 esac
 ```
 
-- **`visual-gate: passed — <summary>`** — recorded; the phase falls through to Write Handoff.
+- **`visual-gate: passed — <summary>`** — recorded; the phase falls through to Phase Usage Validation.
 - **`visual-gate-verdict: diverges`** — see below.
 - **`visual-gate: tooling-failed`** — a missing block, a JSON parse failure, or a `.verdict` outside `pass`/`diverges`. Nothing was recorded via `roadmap-record-visual-gate` and the claim is released (the call above did it); the phase's status is left exactly where it was (`in_progress`), the same shape as Verification tooling failed above. Report:
 
@@ -174,7 +174,7 @@ echo "visual-gate: interactivity=$INTERACTIVE_MODE"
 - **`INTERACTIVE_MODE=picker`:** ask exactly one `AskUserQuestion`, showing the reviewer's `divergences[]`. Option A, the default and least disruptive, is **Leave the phase failing**; the trailing "Other" option is **Accept the divergences**, answered with a typed reason. Anything that is not an explicit Other answer carrying a reason — a decline, silence, any other option — leaves the phase failing. A typed reason is sanitized per `${CLAUDE_PLUGIN_ROOT}/commands/references/sanitization.md`'s Base Rules before it reaches `--reason`.
 - **`INTERACTIVE_MODE=agent`:** never ask this question and never record `accepted` — an unattended run cannot own an acceptance. The phase is left failing unconditionally.
 
-**Accepting** records the verdict, satisfies the gate and falls through to Write Handoff. Compose the sanitized reason in the quoted heredoc so its bytes reach the verb unexpanded:
+**Accepting** records the verdict, satisfies the gate and falls through to Phase Usage Validation. Compose the sanitized reason in the quoted heredoc so its bytes reach the verb unexpanded:
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)

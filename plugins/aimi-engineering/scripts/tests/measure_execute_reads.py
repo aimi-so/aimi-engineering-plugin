@@ -97,6 +97,7 @@ TABLE = {
     "phase-completion-pending-count.md": PHASES,
     "phase-completion-creates-verification.md": PHASES,
     "phase-completion-visual-gate.md": PHASES,
+    "phase-completion-usage-validation.md": PHASES,
     "phase-completion-handoff-and-mark.md": PHASES,
     "phase-completion-offer-pull-request.md": PHASES,
     "phase-completion-next-phase.md": PHASES,
