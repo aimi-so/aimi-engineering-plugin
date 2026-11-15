@@ -769,11 +769,12 @@ def _op_status(args):
             if not (raw.isascii() and raw.isdigit()) or not 0 <= int(raw) <= MAX_WAIT:
                 raise Refusal("--wait must be an integer from 0 to %d" % MAX_WAIT)
             wait = int(raw)
+        state_path, log_path, lock_path = _state_paths(f["--aimi-root"], run)
+        _refuse_tracked_state(state_path)
     except Refusal as exc:
         sys.stderr.write("Error: %s: %s\n" % (STATUS_VERB, exc))
         return 1
 
-    state_path, log_path, lock_path = _state_paths(f["--aimi-root"], run)
     deadline = time.monotonic() + wait
     while True:
         state = _read_state(state_path)

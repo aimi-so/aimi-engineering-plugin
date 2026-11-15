@@ -512,6 +512,9 @@ def test_usage_env_a_state_file_git_tracks_is_refused(lay, tmp_path):
     assert down.returncode == 1 and "tracked by git" in down.stderr
     up = lay.cli("usage-env-up", "--run", "run8", "--repo", ".=w1")
     assert up.returncode == 1 and "tracked by git" in up.stderr
+    status = lay.cli("usage-env-status", "--run", "run8")
+    assert status.returncode == 1 and "tracked by git" in status.stderr
+    assert status.stdout == ""
     assert not manager_marker.exists()
     lay.git("rm", "-q", "--cached", path)
 
