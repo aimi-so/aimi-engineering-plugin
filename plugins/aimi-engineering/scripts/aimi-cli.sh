@@ -12131,7 +12131,7 @@ cmd_usage_recipe_get() {
 }
 
 # usage-env-up --run <key> --repo <project>[=<branch>]... [--restart]
-# usage-env-status --run <key> [--wait <0-60>]
+# usage-env-status --run <key> [--wait <0-480>]
 # usage-env-down --run <key>
 #
 # Bring the product up from the recorded usage recipe, detached, and report on
@@ -12204,7 +12204,7 @@ cmd_usage_env_status() {
         shift 2 ;;
       *)
         echo "Error: usage-env-status: unknown flag: $1" >&2
-        echo "Usage: aimi-cli.sh usage-env-status --run <key> [--wait <0-60>]" >&2
+        echo "Usage: aimi-cli.sh usage-env-status --run <key> [--wait <0-480>]" >&2
         exit 1 ;;
     esac
   done
@@ -18478,7 +18478,7 @@ COMMANDS:
                               --restart serves again without repeating setup steps.
                               Env: AIMI_USAGE_ENV_STEP_TIMEOUT (900 s),
                               AIMI_USAGE_ENV_READY_TIMEOUT (300 s). Needs python3.
-    usage-env-status --run <key> [--wait <0-60>]
+    usage-env-status --run <key> [--wait <0-480>]
                               Print {run,status,stage,reason,repositories:[{project,
                               status,url}],log}; status is starting|ready|
                               unable-to-evaluate|failed|down|absent. Returns as soon as

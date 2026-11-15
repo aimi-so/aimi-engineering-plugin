@@ -186,7 +186,7 @@ def test_usage_env_refusals_exit_1_before_anything_starts(lay):
 def test_usage_env_status_flags(lay):
     out = lay.cli("usage-env-status")
     assert out.returncode == 1 and "usage-env-status: --run" in out.stderr
-    for wait in ("61", "-1", "x"):
+    for wait in ("481", "-1", "x"):
         out = lay.cli("usage-env-status", "--run", "r", "--wait", wait)
         assert out.returncode == 1, wait
     assert lay.js("usage-env-status", "--run", "never")["status"] == "absent"

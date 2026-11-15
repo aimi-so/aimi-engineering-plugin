@@ -86,7 +86,7 @@ DEV_SERVER_STATE = os.path.join(".aimi", "state", "dev-server.json")
 
 DEFAULT_STEP_TIMEOUT = 900
 DEFAULT_READY_TIMEOUT = 300
-MAX_WAIT = 60
+MAX_WAIT = 480
 STATUSES = ("starting", "ready", "unable-to-evaluate", "failed", "down", "absent")
 STOP_GRACE = 10
 

@@ -68,13 +68,13 @@ Its JSON line carries `status`: `starting` goes to Poll, `ready` (a reused run) 
 
 #### Poll
 
-Run this block in a separate Bash call, with the Bash tool timeout set to `540000` ms (under the `600000` ms cap), and no state carried from the previous call. It performs one poll, waits up to 60 seconds inside the verb, and prints the state.
+Run this block in a separate Bash call, with the Bash tool timeout set to `540000` ms (under the `600000` ms cap), and no state carried from the previous call. It performs one poll, waits up to 480 seconds inside the verb (returning as soon as the status leaves `starting`), and prints the state.
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 USAGE_RUN="[the run key]"
-STATUS_JSON=$("$AIMI_CLI" usage-env-status --run "$USAGE_RUN" --wait 60) || { echo "usage-env-state: tooling-failed usage-env-status exited non-zero"; exit 1; }
+STATUS_JSON=$("$AIMI_CLI" usage-env-status --run "$USAGE_RUN" --wait 480) || { echo "usage-env-state: tooling-failed usage-env-status exited non-zero"; exit 1; }
 printf 'usage-env-state: %s stage=%s reason=%s\n' "$(printf '%s' "$STATUS_JSON" | jq -r '.status')" "$(printf '%s' "$STATUS_JSON" | jq -r '.stage // ""')" "$(printf '%s' "$STATUS_JSON" | jq -r '.reason // ""')"
 ```
 
