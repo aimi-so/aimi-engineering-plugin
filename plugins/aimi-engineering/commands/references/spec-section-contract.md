@@ -53,15 +53,15 @@ invisible to the stricter of the two readers.
 | Section | Backs | Consumers |
 | --- | --- | --- |
 | `BusinessSpec § 1` | Purpose / overview | `brainstorm.md` Purpose auto-pass, `plan.md`, `commands/references/business-spec-authoring.md` |
-| `BusinessSpec § 2` | The canonical screen/view list (see *Screen List* below) | `aimi-story-expander.md` screen-per-story decomposition and `references/plan/phase-4-checklist.md` validation, `deepen.md` missing-AC gate (around line 226) |
+| `BusinessSpec § 2` | The canonical screen/view list (see *Screen List* below) | `aimi-usage-validator.md` screens to compare, `aimi-story-expander.md` screen-per-story decomposition and `references/plan/phase-4-checklist.md` validation, `deepen.md` missing-AC gate (around line 226) |
 | `BusinessSpec § 3` | Business rules, each with an `RN-NN` id | `plan.md` `businessRules`, `deepen.md` rule-id annotation gate, `skills/story-executor/SKILL.md` Rule-ID citation rule, `commands/references/business-spec-authoring.md` |
 | `BusinessSpec § 4` | Data models / entities; one story per non-trivial entity | `plan.md` `dataModels`, `aimi-design-bundle-researcher.md` verbatim passthrough |
 | `BusinessSpec § 4.1` | A numbered subsection of § 4 | `aimi-design-bundle-researcher.md` (citation-example use only) |
 | `BusinessSpec § 5` | Endpoint / API groups (with `§ 5.1`, `§ 5.3` subsections) | `plan.md`, `aimi-design-bundle-researcher.md` |
 | `BusinessSpec § 5.1` | An endpoint group subsection of § 5 | `plan.md` |
 | `BusinessSpec § 5.3` | An endpoint group subsection of § 5; every `endpoints[].responseShape` source cites a subsection here, checked by `spec_contains`'s fixed-string containment | `plan.md`, `tasks.py` `validate-tasks` |
-| `BusinessSpec § 7` | Personas / roles; one story per tier | `brainstorm.md` Users auto-pass and Personas render, `plan.md` `userRoles`, `commands/references/business-spec-authoring.md` |
-| `BusinessSpec § 9` | Acceptance / success criteria, seeded verbatim with rule ids preserved | `brainstorm.md` Success auto-pass, `plan.md` AC seeding, `deepen.md` missing-AC gate, `aimi-design-bundle-researcher.md`, `aimi-bundle-prototype-author.md`, `aimi-story-expander.md`, `skills/story-executor/SKILL.md` Rule-ID citation rule, `commands/references/business-spec-authoring.md` |
+| `BusinessSpec § 7` | Personas / roles; one story per tier | `aimi-usage-validator.md` persona per role, `brainstorm.md` Users auto-pass and Personas render, `plan.md` `userRoles`, `commands/references/business-spec-authoring.md` |
+| `BusinessSpec § 9` | Acceptance / success criteria, seeded verbatim with rule ids preserved | `aimi-usage-validator.md` success meaning, `brainstorm.md` Success auto-pass, `plan.md` AC seeding, `deepen.md` missing-AC gate, `aimi-design-bundle-researcher.md`, `aimi-bundle-prototype-author.md`, `aimi-story-expander.md`, `skills/story-executor/SKILL.md` Rule-ID citation rule, `commands/references/business-spec-authoring.md` |
 | `BusinessSpec § 11` | Open questions; bundle-sourced OQs are not exempt from resolve/defer | `brainstorm.md`, `plan.md`, `commands/references/business-spec-authoring.md` |
 
 ## DesignSpec Sections
