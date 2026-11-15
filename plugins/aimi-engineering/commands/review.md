@@ -234,7 +234,7 @@ These paths must never be flagged for deletion or removal by any review agent:
 
 ## Step 1.5: Resolve Agent Models
 
-Read and follow the **Resolve Agent Models** section of `commands/references/cli-path-resolution.md` to populate `AGENT_MODELS`. When resolution fails, treat every category as `"inherit"` and continue.
+Read and follow the **Resolve Agent Models** section of `commands/references/cli-path-resolution.md` to populate `AGENT_MODELS` and `AGENT_EFFORTS`. When resolution fails, treat every category as `"inherit"` and continue.
 
 ## Step 2: Choose the Reviewers
 
@@ -261,6 +261,7 @@ Run the chosen reviewers **in parallel** with the Task tool, one per repository.
 ```
 Task subagent_type="aimi-engineering:review:[REVIEWER]"
   [model: <AGENT_MODELS.review when not "inherit">]
+  [effort: <AGENT_EFFORTS.review when not "inherit">]
   prompt: "REPO: [repository name]
            WORKDIR: [absolute path of the checkout]
            REVISION: [commit or ref under review]
@@ -274,7 +275,7 @@ Task subagent_type="aimi-engineering:review:[REVIEWER]"
            FILES: [changed files to read first, for the second pass in Step 4 only, or none]"
 ```
 
-The learnings researcher is `Task subagent_type="aimi-engineering:research:aimi-learnings-researcher"` with `[model: <AGENT_MODELS.research when not "inherit">]` and the prompt "Search .aimi/solutions/ for past issues related to: [INTENT and the changed file paths]".
+The learnings researcher is `Task subagent_type="aimi-engineering:research:aimi-learnings-researcher"` with `[model: <AGENT_MODELS.research when not "inherit">] [effort: <AGENT_EFFORTS.research when not "inherit">]` and the prompt "Search .aimi/solutions/ for past issues related to: [INTENT and the changed file paths]".
 
 ### Design Fidelity Agent (Conditional)
 
@@ -307,6 +308,7 @@ Design fidelity review skipped: agent-browser not installed
 ```
 Task subagent_type="aimi-engineering:design:aimi-design-implementation-reviewer"
   [model: <AGENT_MODELS.design when not "inherit">]
+  [effort: <AGENT_EFFORTS.design when not "inherit">]
   prompt: "Compare the implementation against the design prototype and report visual fidelity drift.
            Story ID: [story.id]
            Story title: [story.title]

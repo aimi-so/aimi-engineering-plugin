@@ -546,7 +546,8 @@ def test_each_reader_crosses_at_most_once_per_invocation():
     cli = _source(CLI)
     bodies = {}
     for name in ("cmd_resolve_models", "cmd_get_current_models",
-                 "cmd_models_prompt_check", "cmd_list_models"):
+                 "cmd_models_prompt_check", "cmd_list_models",
+                 "cmd_resolve_efforts", "cmd_effort_options"):
         start = cli.index("\n" + name + "() {")
         end = cli.index("\n}\n", start)
         bodies[name] = cli[start:end]
@@ -958,3 +959,463 @@ def test_indexing_a_non_object_aborts_where_indexing_null_does_not():
         M.read_categories({"categories": "nope"}, "claudeCode")
     with pytest.raises(T.MalformedTasks):
         M.read_categories({"categories": {"claudeCode": "nope"}}, "claudeCode")
+
+
+# ---------------------------------------------------------------------------
+# Efforts: the reasoning level (Claude Code) or variant (OpenCode) beside each
+# category's model. See models.py's EFFORTS note.
+# ---------------------------------------------------------------------------
+
+EFFORT_CASES = {c["label"]: c for c in GOLDEN["models_effort_cases"]}
+
+_ALL_INHERIT = {c: "inherit" for c in M.CATEGORIES}
+_MODELS_CC = ["--research", "haiku", "--review", "opus", "--design", "sonnet",
+              "--workflow", "sonnet", "--executor", "sonnet"]
+_MODELS_OC = ["--research", "p/haiku", "--review", "p/opus", "--design", "p/sonnet",
+              "--workflow", "p/sonnet", "--executor", "p/sonnet"]
+
+_CATALOG_TEXT = """p/opus
+{
+  "id": "opus",
+  "variants": {"high": {}, "max": {}, "bad name": {}}
+}
+p/haiku
+{
+  "id": "haiku"
+}
+p/sonnet
+{
+  "variants": {"low": {}}
+}
+"""
+
+
+def _detect(doc, host_key, args, catalog=None, tmp_path=None):
+    """Run op_detect's CLI half as a subprocess: (exit, stdout, stderr)."""
+    argv = [sys.executable, os.path.join(SCRIPTS, "models.py"), "detect", "--host-key", host_key] + args
+    if catalog is not None:
+        path = tmp_path / "catalog.txt"
+        path.write_text(catalog, encoding="utf-8")
+        argv += ["--catalog-file", str(path)]
+    stdin = "" if doc is None else json.dumps(doc)
+    done = subprocess.run(argv, input=stdin, capture_output=True, text=True)
+    return done.returncode, done.stdout, done.stderr
+
+
+def test_effort_levels_are_the_six_and_in_order():
+    assert M.EFFORT_LEVELS == ("inherit", "low", "medium", "high", "xhigh", "max")
+
+
+@pytest.mark.parametrize("label", sorted(EFFORT_CASES))
+def test_effort_read_golden_cases(label):
+    case = EFFORT_CASES[label]
+    efforts, warnings = M.read_efforts(case["doc"], case["host"])
+    assert efforts == case["efforts"]
+    assert len(warnings) == case["warnings"]
+
+
+def test_effort_read_valid_values_per_host():
+    doc = {"categories": {"claudeCode": {"efforts": {"review": "xhigh", "design": " low "}}}}
+    efforts, warnings = M.read_efforts(doc, "claudeCode")
+    assert efforts["review"] == "xhigh" and efforts["design"] == "low"
+    assert efforts["research"] == "inherit" and warnings == []
+    doc = {"categories": {"opencode": {"efforts": {"review": "none", "design": "My.Var-1"}}}}
+    efforts, warnings = M.read_efforts(doc, "opencode")
+    assert efforts["review"] == "none" and efforts["design"] == "My.Var-1" and warnings == []
+
+
+def test_effort_read_unset_shapes_say_nothing():
+    for unset in (None, False, "", "   "):
+        doc = {"categories": {"claudeCode": {"efforts": {"review": unset}}}}
+        assert M.read_efforts(doc, "claudeCode") == (_ALL_INHERIT, [])
+    for doc in ({}, None, [], {"categories": None}, {"categories": {"claudeCode": None}},
+                {"categories": {"claudeCode": {"efforts": None}}}):
+        assert M.read_efforts(doc, "claudeCode") == (_ALL_INHERIT, [])
+
+
+def test_effort_read_invalid_values_warn_once_and_echo_cut():
+    long_value = "x" * 100
+    for bad in ("High", "ultra", True, 0, long_value, ["a"]):
+        doc = {"categories": {"claudeCode": {"efforts": {"review": bad}}}}
+        efforts, warnings = M.read_efforts(doc, "claudeCode")
+        assert efforts == _ALL_INHERIT
+        assert len(warnings) == 1 and "review" in warnings[0]
+    _, warnings = M.read_efforts(
+        {"categories": {"claudeCode": {"efforts": {"review": long_value}}}}, "claudeCode")
+    assert long_value not in warnings[0] and '"' + "x" * 10 in warnings[0]
+    _, warnings = M.read_efforts(
+        {"categories": {"opencode": {"efforts": {"review": "has space"}}}}, "opencode")
+    assert len(warnings) == 1 and '"has space"' in warnings[0]
+
+
+def test_effort_read_malformed_container_is_all_inherit_with_one_warning():
+    for container in ("high", ["high"], 5, True):
+        doc = {"categories": {"claudeCode": {"efforts": container}}}
+        efforts, warnings = M.read_efforts(doc, "claudeCode", verb="resolve-efforts")
+        assert efforts == _ALL_INHERIT and len(warnings) == 1
+        assert warnings[0].startswith("Warning: resolve-efforts:")
+
+
+def test_effort_malformed_container_leaves_model_reads_untouched():
+    doc = {"schemaVersion": "2.0", "categories": {"claudeCode": {
+        "research": "haiku", "review": "opus", "efforts": "garbage"}}}
+    values = M.read_categories(doc, "claudeCode")
+    assert values["research"] == "haiku" and values["review"] == "opus"
+    assert values["design"] is None
+    assert M.read_efforts(doc, "claudeCode")[0] == _ALL_INHERIT
+
+
+def test_effort_read_never_raises_on_odd_documents():
+    for doc in (1, "x", [1], {"categories": [1]}, {"categories": {"claudeCode": 3}}):
+        efforts, warnings = M.read_efforts(doc, "claudeCode")
+        assert efforts == _ALL_INHERIT and warnings == []
+
+
+def test_effort_catalog_parses_ids_variants_and_order(capsys):
+    catalog = M.catalog_variants(_CATALOG_TEXT)
+    assert catalog == {"p/opus": ["high", "max"], "p/haiku": [], "p/sonnet": ["low"]}
+    assert list(catalog) == ["p/opus", "p/haiku", "p/sonnet"]
+    err = capsys.readouterr().err
+    assert err.count('"bad name"') == 1 and err.count("\n") == 1
+
+
+def test_effort_catalog_none_when_empty_or_unparseable():
+    assert M.catalog_variants("") is None
+    assert M.catalog_variants("  \n\n") is None
+    assert M.catalog_variants("no models here\nat all\n") is None
+    assert M.catalog_variants("p/x\n{ broken") is None
+
+
+def test_effort_write_stores_and_keeps_and_clears_on_claude_code(tmp_path):
+    code, out, _ = _detect(None, "claudeCode", _MODELS_CC + ["--review-effort", "high"])
+    assert code == 0
+    doc = json.loads(out)
+    assert doc["categories"]["claudeCode"]["efforts"] == {"review": "high"}
+    assert doc["schemaVersion"] == "2.0"
+    assert [k for k in doc["categories"]["claudeCode"] if k != "efforts"] == list(M.CATEGORIES)
+    # a later write with no effort flag keeps it
+    code, out, _ = _detect(doc, "claudeCode", _MODELS_CC)
+    assert json.loads(out)["categories"]["claudeCode"]["efforts"] == {"review": "high"}
+    # inherit clears it and drops the empty container
+    code, out, _ = _detect(doc, "claudeCode", _MODELS_CC + ["--review-effort", "inherit"])
+    assert "efforts" not in json.loads(out)["categories"]["claudeCode"]
+
+
+def test_effort_write_without_efforts_has_no_efforts_key():
+    code, out, _ = _detect(None, "claudeCode", _MODELS_CC)
+    assert code == 0 and "efforts" not in out
+
+
+def test_effort_write_trims_and_is_case_sensitive():
+    code, out, _ = _detect(None, "claudeCode", _MODELS_CC + ["--review-effort", "  max\t"])
+    assert code == 0 and json.loads(out)["categories"]["claudeCode"]["efforts"] == {"review": "max"}
+    code, out, err = _detect(None, "claudeCode", _MODELS_CC + ["--review-effort", "MAX"])
+    assert code == 1 and out == "" and err.startswith("Error: detect-models:")
+
+
+def test_effort_write_refuses_invalid_claude_code_value_and_cuts_the_echo():
+    value = "z" * 90
+    code, out, err = _detect(None, "claudeCode", _MODELS_CC + ["--design-effort", value])
+    assert code == 1 and out == ""
+    assert err.startswith('Error: detect-models: --design-effort value "' + "z" * 10)
+    assert value not in err
+
+
+def test_effort_write_allows_effort_beside_model_inherit_on_claude_code():
+    models = ["--research", "inherit", "--review", "opus", "--design", "sonnet",
+              "--workflow", "sonnet", "--executor", "sonnet"]
+    code, out, _ = _detect(None, "claudeCode", models + ["--research-effort", "low"])
+    assert code == 0
+    table = json.loads(out)["categories"]["claudeCode"]
+    assert table["research"] == "inherit" and table["efforts"] == {"research": "low"}
+
+
+def test_effort_write_keeps_the_other_hosts_models_and_efforts():
+    other = {"research": "p/a", "review": "p/b", "design": "p/c", "workflow": "p/d",
+             "executor": "p/e", "efforts": {"review": "deep"}}
+    existing = {"schemaVersion": "2.0", "categories": {"opencode": other}}
+    code, out, _ = _detect(existing, "claudeCode", _MODELS_CC + ["--review-effort", "high"])
+    assert code == 0
+    merged = json.loads(out)["categories"]
+    assert merged["opencode"] == other
+    assert merged["claudeCode"]["efforts"] == {"review": "high"}
+
+
+def test_effort_write_malformed_stored_container_does_not_block_a_write():
+    existing = {"schemaVersion": "2.0", "categories": {"claudeCode": {
+        "research": "haiku", "efforts": "garbage"}}}
+    code, out, err = _detect(existing, "claudeCode", _MODELS_CC)
+    assert code == 0 and "efforts" not in json.loads(out)["categories"]["claudeCode"]
+    assert "not an object" in err
+
+
+def test_effort_write_opencode_charset_and_none_variant_verbatim():
+    code, out, _ = _detect(None, "opencode", _MODELS_OC + ["--review-effort", "none"])
+    assert code == 0 and json.loads(out)["categories"]["opencode"]["efforts"] == {"review": "none"}
+    for bad in ("-lead", "has space", "a" * 65, "x/y"):
+        code, out, err = _detect(None, "opencode", _MODELS_OC + ["--review-effort", bad])
+        assert code == 1 and out == "" and err.startswith("Error: detect-models:")
+
+
+def test_effort_write_opencode_model_inherit_writes_inherit_with_notice():
+    models = ["--research", "inherit", "--review", "p/opus", "--design", "p/sonnet",
+              "--workflow", "p/sonnet", "--executor", "p/sonnet"]
+    code, out, err = _detect(None, "opencode", models + ["--research-effort", "high"])
+    assert code == 0 and "efforts" not in json.loads(out)["categories"]["opencode"]
+    assert "research" in err
+
+
+def test_effort_write_opencode_catalog_refuses_new_and_drops_kept(tmp_path):
+    code, out, err = _detect(None, "opencode", _MODELS_OC + ["--review-effort", "high"],
+                             catalog=_CATALOG_TEXT, tmp_path=tmp_path)
+    assert code == 0 and json.loads(out)["categories"]["opencode"]["efforts"] == {"review": "high"}
+    code, out, err = _detect(None, "opencode", _MODELS_OC + ["--review-effort", "medium"],
+                             catalog=_CATALOG_TEXT, tmp_path=tmp_path)
+    assert code == 1 and out == "" and "p/opus" in err
+    # a model with no variants refuses any new variant
+    code, out, err = _detect(None, "opencode", _MODELS_OC + ["--research-effort", "high"],
+                             catalog=_CATALOG_TEXT, tmp_path=tmp_path)
+    assert code == 1 and out == ""
+    # a kept variant the model does not define is dropped with a notice
+    existing = {"schemaVersion": "2.0", "categories": {"opencode": {
+        **{c: "p/opus" for c in M.CATEGORIES}, "efforts": {"design": "max"}}}}
+    code, out, err = _detect(existing, "opencode", _MODELS_OC, catalog=_CATALOG_TEXT,
+                             tmp_path=tmp_path)
+    assert code == 0 and "efforts" not in json.loads(out)["categories"]["opencode"]
+    assert '"max"' in err and "p/sonnet" in err
+
+
+def test_effort_write_opencode_without_catalog_keeps_unchanged_drops_changed(tmp_path):
+    existing = {"schemaVersion": "2.0", "categories": {"opencode": {
+        **{c: "p/sonnet" for c in M.CATEGORIES}, "efforts": {"design": "low"}}}}
+    # model unchanged: kept
+    code, out, _ = _detect(existing, "opencode", _MODELS_OC[:4] + ["--design", "p/sonnet"] + _MODELS_OC[6:])
+    assert code == 0
+    assert json.loads(out)["categories"]["opencode"]["efforts"] == {"design": "low"}
+    # model changed: dropped, and the notice says the catalog was unavailable
+    changed = ["--research", "p/sonnet", "--review", "p/sonnet", "--design", "p/opus",
+               "--workflow", "p/sonnet", "--executor", "p/sonnet"]
+    code, out, err = _detect(existing, "opencode", changed)
+    assert code == 0 and "efforts" not in json.loads(out)["categories"]["opencode"]
+    assert "catalog was unavailable" in err
+    # a new variant is written as given after the charset check
+    code, out, _ = _detect(None, "opencode", _MODELS_OC + ["--review-effort", "whatever"])
+    assert json.loads(out)["categories"]["opencode"]["efforts"] == {"review": "whatever"}
+
+
+def test_effort_flags_do_not_change_the_unknown_flag_usage_line(tmp_path):
+    env = dict(os.environ, CLAUDECODE="1", AIMI_CONFIG_DIR=str(tmp_path))
+    done = subprocess.run(["bash", CLI, "detect-models", "--bogus"], capture_output=True,
+                          text=True, env=env, stdin=subprocess.DEVNULL)
+    assert done.returncode == 1
+    assert ("Usage: aimi-cli.sh detect-models [--research <model>] [--review <model>] "
+            "[--design <model>] [--workflow <model>] [--executor <model>]\n") in done.stderr
+
+
+def test_effort_cli_help_lists_all_five_flags():
+    done = subprocess.run(["bash", CLI, "help"], capture_output=True, text=True,
+                          stdin=subprocess.DEVNULL)
+    for category in M.CATEGORIES:
+        assert "--" + category + "-effort" in done.stdout + done.stderr
+
+
+# ---------------------------------------------------------------------------
+# resolve-efforts and effort-options: the two effort READER verbs.
+# ---------------------------------------------------------------------------
+
+EFFORTS_READ_CASES = {c["label"]: c for c in GOLDEN["efforts_read_cases"]}
+_INHERIT_LINE = json.dumps(_ALL_INHERIT, separators=(",", ":"))
+_VERBOSE = (
+    'p/glm\n{\n  "variants": {"high": {}, "max": {}}\n}\n'
+    'p/plain\n{\n  "id": "plain"\n}\n'
+)
+
+
+def _stub_bin(tmp_path, catalog=_VERBOSE, variant_flag=True, fail_verbose=False):
+    """A directory holding a stub `opencode` that logs every call to calls.log."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    (bindir / "catalog.txt").write_text(catalog)
+    script = (
+        "#!/usr/bin/env bash\n"
+        'echo "$*" >> "' + str(tmp_path / "calls.log") + '"\n'
+        'case "${1:-} ${2:-}" in\n'
+        '  "run --help") ' + ('echo "  --variant  v"' if variant_flag else 'echo "  --model"') + ' ;;\n'
+        '  "models --verbose") ' + ('exit 1' if fail_verbose else 'cat "$(dirname "$0")/catalog.txt"') + ' ;;\n'
+        "esac\n"
+    )
+    stub = bindir / "opencode"
+    stub.write_text(script)
+    stub.chmod(0o755)
+    return bindir
+
+
+def _cli(tmp_path, host, args, config=None, bindir=None, strip_python=False):
+    cfg = tmp_path / "cfg"
+    cfg.mkdir(exist_ok=True)
+    if config is not None:
+        (cfg / "models.json").write_text(config)
+    env = {k: v for k, v in os.environ.items() if k not in ("AIMI_PLUGIN_DIR", "CLAUDECODE")}
+    env["AIMI_CONFIG_DIR"] = str(cfg)
+    if host == "cc":
+        env["CLAUDECODE"] = "1"
+    path = env["PATH"]
+    if strip_python:
+        # A PATH holding only bash plus the coreutils the verb needs, no python3.
+        safe = tmp_path / "nopy"
+        safe.mkdir(exist_ok=True)
+        for tool in ("bash", "cat", "mkdir", "dirname", "env", "grep", "sed", "tr", "head", "stat", "rm"):
+            found = shutil.which(tool)
+            if found and not (safe / tool).exists():
+                (safe / tool).symlink_to(found)
+        path = str(safe)
+    if bindir is not None:
+        path = str(bindir) + ":" + path
+    env["PATH"] = path
+    done = subprocess.run(["bash", CLI] + args, env=env, capture_output=True,
+                          text=True, timeout=120, cwd=str(tmp_path))
+    return done.returncode, done.stdout.strip(), done.stderr
+
+
+@pytest.mark.parametrize("label", sorted(EFFORTS_READ_CASES))
+def test_resolve_efforts_golden_cases(label, tmp_path):
+    case = EFFORTS_READ_CASES[label]
+    host = "cc" if case["host"] == "claudeCode" else "oc"
+    rc, out, err = _cli(tmp_path, host, ["resolve-efforts"], config=case["config"])
+    assert rc == 0
+    assert out == case["stdout"]
+    assert json.loads(out)
+    assert len([l for l in err.splitlines() if "resolve-efforts" in l]) == case["stderr_lines"]
+
+
+def test_efforts_golden_says_no_jq_produced_it():
+    assert "no jq produced" in GOLDEN["_comment_efforts_read"]
+
+
+def test_efforts_golden_pins_false_as_unset_and_zero_as_invalid():
+    assert EFFORTS_READ_CASES["er-false-is-unset-cc"]["stderr_lines"] == 0
+    assert EFFORTS_READ_CASES["er-zero-is-invalid-cc"]["stderr_lines"] == 1
+
+
+def test_resolve_efforts_claudecode_example(tmp_path):
+    cfg = json.dumps({"schemaVersion": "2.0",
+                      "categories": {"claudeCode": {"efforts": {"review": "high"}}}})
+    rc, out, err = _cli(tmp_path, "cc", ["resolve-efforts"], config=cfg)
+    assert (rc, out, err) == (0, '{"research":"inherit","review":"high","design":"inherit",'
+                                 '"workflow":"inherit","executor":"inherit"}', "")
+
+
+def test_resolve_efforts_missing_file_is_silent_and_never_crosses(tmp_path):
+    rc, out, err = _cli(tmp_path, "cc", ["resolve-efforts"], strip_python=True)
+    assert (rc, out, err) == (0, _INHERIT_LINE, "")
+
+
+@pytest.mark.parametrize("text", ["", "   \n", "{not json", "[]"])
+def test_resolve_efforts_unreadable_file_is_all_inherit(tmp_path, text):
+    rc, out, err = _cli(tmp_path, "cc", ["resolve-efforts"], config=text)
+    assert (rc, out) == (0, _INHERIT_LINE)
+    if text != "[]":
+        assert err.count("Warning: resolve-efforts:") == 1
+
+
+def test_resolve_efforts_without_python3_degrades_with_one_line(tmp_path):
+    cfg = json.dumps({"schemaVersion": "2.0",
+                      "categories": {"claudeCode": {"efforts": {"review": "high"}}}})
+    rc, out, err = _cli(tmp_path, "cc", ["resolve-efforts"], config=cfg, strip_python=True)
+    assert (rc, out) == (0, _INHERIT_LINE)
+    assert err.strip() == ("Warning: resolve-efforts: python3 is required to read models.json "
+                           "and was not found; falling back to all-inherit.")
+
+
+def test_resolve_efforts_never_invokes_opencode(tmp_path):
+    bindir = _stub_bin(tmp_path)
+    cfg = json.dumps({"schemaVersion": "2.0", "categories": {"opencode": {
+        "research": "p/glm", "efforts": {"research": "high"}}}})
+    rc, out, _ = _cli(tmp_path, "oc", ["resolve-efforts"], config=cfg, bindir=bindir)
+    assert json.loads(out)["research"] == "high"
+    assert not (tmp_path / "calls.log").exists()
+
+
+def test_resolve_efforts_leaves_resolve_models_alone(tmp_path):
+    cfg = json.dumps({"schemaVersion": "2.0", "categories": {"claudeCode": {
+        "review": "opus", "efforts": {"review": "high", "design": 0}}}})
+    rc, out, _ = _cli(tmp_path, "cc", ["resolve-models"], config=cfg)
+    assert json.loads(out)["review"] == "opus" and rc == 0
+
+
+def test_effort_options_claudecode_is_a_constant_without_python3(tmp_path):
+    expected = json.dumps(list(M.EFFORT_LEVELS), separators=(",", ":"))
+    assert _cli(tmp_path, "cc", ["effort-options"], strip_python=True)[:2] == (0, expected)
+    assert _cli(tmp_path, "cc", ["effort-options", "--model", "x/y"])[:2] == (0, expected)
+
+
+def test_effort_options_opencode_variants_in_catalog_order(tmp_path):
+    bindir = _stub_bin(tmp_path)
+    assert _cli(tmp_path, "oc", ["effort-options", "--model", "p/glm"], bindir=bindir)[:2] == (0, '["high","max"]')
+    assert _cli(tmp_path, "oc", ["effort-options", "--model", "p/plain"], bindir=bindir)[:2] == (0, "[]")
+    assert _cli(tmp_path, "oc", ["effort-options", "--model", "p/absent"], bindir=bindir)[:2] == (0, "[]")
+    calls = (tmp_path / "calls.log").read_text().splitlines()
+    assert calls.count("models --verbose") == 3
+
+
+def test_effort_options_inherit_does_not_fetch(tmp_path):
+    bindir = _stub_bin(tmp_path)
+    assert _cli(tmp_path, "oc", ["effort-options", "--model", "inherit"], bindir=bindir)[:2] == (0, "[]")
+    assert not (tmp_path / "calls.log").exists()
+
+
+def test_effort_options_never_prints_a_name_outside_the_pattern(tmp_path):
+    bindir = _stub_bin(tmp_path, catalog='p/m\n{"variants": {"ok": {}, "bad name": {}}}\n')
+    rc, out, _ = _cli(tmp_path, "oc", ["effort-options", "--model", "p/m"], bindir=bindir)
+    assert (rc, out) == (0, '["ok"]')
+
+
+@pytest.mark.parametrize("kind", ["no-opencode", "no-variant-flag", "verbose-fails", "unparseable"])
+def test_effort_options_unavailable_catalog_is_null_with_a_warning(tmp_path, kind):
+    bindir = None
+    if kind == "no-variant-flag":
+        bindir = _stub_bin(tmp_path, variant_flag=False)
+    elif kind == "verbose-fails":
+        bindir = _stub_bin(tmp_path, fail_verbose=True)
+    elif kind == "unparseable":
+        bindir = _stub_bin(tmp_path, catalog="not a catalog\n")
+    env_strip = kind == "no-opencode"
+    rc, out, err = _cli(tmp_path, "oc", ["effort-options", "--model", "p/glm"], bindir=bindir)
+    if env_strip:
+        pytest.skip("host has a real opencode on PATH") if shutil.which("opencode") else None
+    assert (rc, out) == (0, "null")
+    assert "Warning: effort-options:" in err
+
+
+def test_effort_options_without_python3_is_null_with_a_warning(tmp_path):
+    bindir = _stub_bin(tmp_path)
+    rc, out, err = _cli(tmp_path, "oc", ["effort-options", "--model", "p/glm"],
+                        bindir=bindir, strip_python=True)
+    assert (rc, out) == (0, "null")
+    assert err.count("Warning: effort-options:") == 1
+
+
+@pytest.mark.parametrize("args", [[], ["--model"], ["--bogus"], ["--model", "p/glm", "extra"]])
+def test_effort_options_bad_arguments_exit_one_on_opencode(tmp_path, args):
+    bindir = _stub_bin(tmp_path)
+    rc, out, err = _cli(tmp_path, "oc", ["effort-options"] + args, bindir=bindir)
+    assert (rc, out) == (1, "")
+    assert "Error: effort-options:" in err
+
+
+def test_effort_verbs_are_listed_in_help_and_dispatched_without_a_root(tmp_path):
+    rc, out, err = _cli(tmp_path, "cc", ["help"])
+    for verb in ("resolve-efforts", "effort-options"):
+        assert "    " + verb in out + err
+    cli = _source(CLI)
+    assert "resolve-efforts) cmd_resolve_efforts" in cli
+    assert "effort-options) shift; cmd_effort_options" in cli
+    assert '"resolve-efforts": op_resolve_efforts' in _source(os.path.join(SCRIPTS, "models.py"))
+    assert '"effort-options": op_effort_options' in _source(os.path.join(SCRIPTS, "models.py"))
+
+
+def test_resolve_efforts_op_malformed_models_table_means_every_model_unset():
+    done = subprocess.run(
+        [sys.executable, os.path.join(SCRIPTS, "models.py"), "resolve-efforts", "--host", "opencode"],
+        input=json.dumps({"categories": {"opencode": "nope"}}), capture_output=True, text=True)
+    assert done.returncode == 0 and done.stdout.strip() == _INHERIT_LINE

@@ -110,6 +110,7 @@ Run these agents **in parallel** using the Task tool.
 ```
 Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
   [model: <AGENT_MODELS.research when not "inherit">]
+  [effort: <AGENT_EFFORTS.research when not "inherit">]
   prompt: "Analyze the codebase for patterns relevant to: [feature description].
            topicSlug: [topicSlug]
            [If pathHints is non-empty]: paths: [<comma-joined pathHints>]
@@ -141,6 +142,7 @@ Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
 ```
 Task subagent_type="aimi-engineering:research:aimi-learnings-researcher"
   [model: <AGENT_MODELS.research when not "inherit">]
+  [effort: <AGENT_EFFORTS.research when not "inherit">]
   prompt: "Search .aimi/solutions/ for learnings relevant to: [feature description].
            topicSlug: [topicSlug]
            [If ROADMAP_MODE]: Phase scope — this research is scoped to phase

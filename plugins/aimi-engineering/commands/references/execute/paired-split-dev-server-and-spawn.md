@@ -86,6 +86,7 @@ For each active split file (loop over PHASE_ACTIVE_SPLIT_FILES, all Task( calls 
 Task(
     subagent_type: "general-purpose",
     model: <AGENT_MODELS.executor when not "inherit">,
+    effort: <AGENT_EFFORTS.executor when not "inherit">,
     description: "Execute split for phase [PHASE_ID]: [split_file basename]",
     prompt: [
         SPAWNED_SPLIT_TASK=phase-split-sub-orchestrator
@@ -97,6 +98,7 @@ Task(
         - VISUAL_FOLLOW = [the value Step 0.7 set]
         - PHASE_SPLIT_MODE = false
         - AGENT_MODELS = [the value Resolve Agent Models echoed]
+        - AGENT_EFFORTS = [the value Resolve Agent Models echoed]
         - BASE_BRANCH = [the value Parse --base Override echoed, or empty when --base was absent]
         - PHASE_MODE = true
         - DEPS_STATUS = [that member's status from its echoed DEPS_STATUS[...] line; failed when none]

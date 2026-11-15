@@ -19,6 +19,7 @@ Sanitize inputs before interpolation using the same threat model as every other 
 ```
 Task subagent_type="aimi-engineering:research:aimi-foundation-architect"
   [model: <AGENT_MODELS.research when not "inherit">]
+  [effort: <AGENT_EFFORTS.research when not "inherit">]
   prompt: "Propose a stack-adaptive, reviewable architecture foundation for this repository.
 
   featureDescription: <FEATURE_DESCRIPTION>

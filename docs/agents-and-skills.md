@@ -109,4 +109,6 @@ Every review agent but the auditor ends with the same two sections, how it works
 
 Each of the four agent categories can run on a different Claude model. Configure it with `/aimi:setup-models`, or by hand in `~/.config/aimi/models.json`.
 
+Each category also carries an effort: delivered per spawn on Claude Code, as the model variant through `aimi-task` on OpenCode, and readable with `aimi-cli resolve-efforts`. See [commands.md](commands.md#aimisetup-models) for what it means per host and what overrides it.
+
 See [architecture.md](architecture.md#per-category-model-configuration) for how the resolution works.

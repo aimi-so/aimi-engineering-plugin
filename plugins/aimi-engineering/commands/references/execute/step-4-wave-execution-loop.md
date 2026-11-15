@@ -245,6 +245,7 @@ while true:
         Task(
             subagent_type: "general-purpose",
             model: <AGENT_MODELS.executor when not "inherit">,
+            effort: <AGENT_EFFORTS.executor when not "inherit">,
             description: "Execute [full_story.id]: [full_story.title]",
             prompt: exactly this text, one "NAME: value" line per field below, nothing else:
                 "You are a story worker for aimi-engineering. Before any other action, read
@@ -720,6 +721,7 @@ while true:
                         DESIGN_REVIEW_OUTPUT = Task(
                             subagent_type: "aimi-engineering:design:aimi-design-implementation-reviewer",
                             model: <AGENT_MODELS.design when not "inherit">,
+                            effort: <AGENT_EFFORTS.design when not "inherit">,
                             description: "Design review: [full_story.id]",
                             prompt: "Review the implementation of [full_story.id] ([full_story.title]).
 

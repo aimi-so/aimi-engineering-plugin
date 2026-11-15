@@ -89,6 +89,16 @@ json.dumps writes as the bare token NaN (jq_finite). A corpus of quote,
 backslash, newline, tab, non-ASCII and control-character ids in
 `models_write_cases` is what proves the rest of the escaping already agreed.
 
+EFFORTS. Beside each category's model a host table may carry
+`efforts.<category>`: a reasoning level on Claude Code (EFFORT_LEVELS) or a
+variant name of the category's model on OpenCode. Only non-`inherit` values are
+stored. `read_efforts` reads them without ever raising, and `op_detect` applies
+the effort flags on top of the stored ones. op_detect now reads ONE more input
+besides stdin: `--catalog-file`, a file aimi-cli.sh wrote holding the text of
+`opencode models --verbose` (argv is too small for it, ~60 KB). The file is
+only given on OpenCode, and only when an effort is being set or already stored;
+this module still opens nothing else and writes nothing.
+
 ONE THING THIS FILE DOES NOT DO: extract jq_numbers. tasks.py's import comment
 says the jq-semantics helpers should follow sanitize.py into a module of their
 own once a THIRD module needs them, and this is that third module. Doing it
@@ -97,6 +107,7 @@ nothing moved; it is a commit of its own, exactly as sanitize.py was.
 """
 
 import json
+import re
 import sys
 
 # The jq semantics prior slices already solved, imported from whichever module
@@ -119,6 +130,16 @@ from tasks import (
 # The five categories, in the order the resolution jq built them, which is the
 # order their warnings come out in.
 CATEGORIES = ("research", "review", "design", "workflow", "executor")
+
+# The reasoning levels Claude Code accepts, case-sensitive. `inherit` means "no
+# effort parameter on the spawn".
+EFFORT_LEVELS = ("inherit", "low", "medium", "high", "xhigh", "max")
+
+# An OpenCode variant name. fullmatch, never `$`, which would admit a trailing
+# newline.
+_VARIANT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+_ECHO_LIMIT = 40
 
 # The v1.0 rejection, in Portuguese, ONE literal emitted at BOTH of its sites.
 # It was written twice in aimi-cli.sh -- once in resolve-models, once in
@@ -396,6 +417,122 @@ def merge_models_document(existing, host_key, categories):
     }
 
 
+
+def _echo(value):
+    """A value as a message shows it: JSON-quoted, cut at about 40 characters."""
+    try:
+        text = json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        text = repr(value)
+    if len(text) > _ECHO_LIMIT:
+        text = text[:_ECHO_LIMIT] + "..."
+    return text
+
+
+def variant_name_valid(value):
+    return isinstance(value, str) and _VARIANT_RE.fullmatch(value) is not None
+
+
+def _host_name(host):
+    return "Claude Code" if host == "claudeCode" else "OpenCode"
+
+
+def _effort_valid(value, host):
+    if host == "claudeCode":
+        return value in EFFORT_LEVELS
+    return variant_name_valid(value)
+
+
+def read_efforts(doc, host, verb="resolve-efforts"):
+    """The host's stored efforts as (efforts, warnings); it never raises.
+
+    `efforts` always has the five CATEGORIES keys, each a validated string or
+    "inherit". Absent, null, false, "" and whitespace-only are UNSET and say
+    nothing; any other non-string, or a string outside the host's set, reads as
+    "inherit" with one warning. A container that is not an object reads as all
+    "inherit" with one warning. It does not go through read_categories, so a
+    malformed efforts container can never disturb a model read.
+    """
+    efforts = {category: "inherit" for category in CATEGORIES}
+    warnings = []
+    container = None
+    try:
+        categories = doc.get("categories") if isinstance(doc, dict) else None
+        table = categories.get(host) if isinstance(categories, dict) else None
+        container = table.get("efforts") if isinstance(table, dict) else None
+    except Exception:  # defensive: the contract is that this never raises
+        container = None
+    if container is None or container is False:
+        return efforts, warnings
+    host_name = _host_name(host)
+    if not isinstance(container, dict):
+        warnings.append("Warning: " + verb + ": efforts for " + host_name
+                        + " host is not an object (" + _echo(container)
+                        + "), reading every category as inherit")
+        return efforts, warnings
+    for category in CATEGORIES:
+        value = container.get(category)
+        if value is None or value is False:
+            continue
+        if isinstance(value, str):
+            trimmed = value.strip(_SPACE)
+            if trimmed == "":
+                continue
+            if _effort_valid(trimmed, host):
+                efforts[category] = trimmed
+                continue
+        warnings.append("Warning: " + verb + ": effort " + _echo(value)
+                        + " is not valid for " + host_name + " host (category: "
+                        + category + "), falling back to inherit")
+    return efforts, warnings
+
+
+def catalog_variants(text):
+    """`opencode models --verbose` -> {model_id: [variant, ...]}, or None.
+
+    The text is, per model, an id line `provider/model` and then a multi-line
+    JSON object whose `variants` keys are the names. Catalog order is kept; a
+    model with no `variants` maps to []; a name outside the variant pattern is
+    omitted with one stderr note. None when the text is empty or holds no
+    parseable model.
+    """
+    if not isinstance(text, str) or text.strip() == "":
+        return None
+    decoder = json.JSONDecoder()
+    catalog = {}
+    position = 0
+    length = len(text)
+    while position < length:
+        end_of_line = text.find("\n", position)
+        if end_of_line == -1:
+            end_of_line = length
+        model_id = text[position:end_of_line].strip()
+        position = end_of_line + 1
+        if model_id == "" or model_id.startswith(("{", "}", '"')):
+            continue
+        cursor = position
+        while cursor < length and text[cursor] in " \t\r\n":
+            cursor += 1
+        if cursor >= length or text[cursor] != "{":
+            continue
+        try:
+            body, stop = decoder.raw_decode(text, cursor)
+        except ValueError:
+            continue
+        position = stop
+        variants = body.get("variants") if isinstance(body, dict) else None
+        names = []
+        if isinstance(variants, dict):
+            for name in variants:
+                if variant_name_valid(name):
+                    names.append(name)
+                else:
+                    warn("Note: detect-models: catalog variant " + _echo(name)
+                         + " of " + model_id + " is not a valid variant name; omitted")
+        catalog[model_id] = names
+    return catalog or None
+
+
 def read_or_fall_back(verb, host, config_file, fallback):
     """The read both reader verbs make, and the two refusals both of them share.
 
@@ -478,6 +615,67 @@ def op_resolve(argv):
         warn(line)
     for result in results:
         _emit_compact(jq_numbers(result))
+    return 0
+
+
+def op_resolve_efforts(argv):
+    """resolve-efforts: the host's stored efforts, five keys, never failing.
+
+    Efforts never go through read_categories for their own read, so a
+    malformed container cannot reach a model read. On OpenCode a variant needs
+    a model: a category whose stored model is unset, blank, `inherit` or not a
+    string reads `inherit` whatever variant is stored. The verb never lists
+    models, so an invalid stored model that resolve-models would reduce to
+    inherit keeps its variant here; the consumer rule (variant only with a
+    model) covers it.
+    """
+    verb = "resolve-efforts"
+    config_file = _flag(argv, "--config-file") or ""
+    fallback = _flag(argv, "--fallback") or ""
+    host = _flag(argv, "--host") or ""
+
+    try:
+        docs = parse_stream(sys.stdin.read())
+    except ValueError:
+        warn("Warning: " + verb + ": models config file is malformed JSON or "
+             "failed to parse: " + config_file)
+        return emit_fallback(fallback)
+    if not docs:
+        warn("Warning: " + verb + ": empty result from models config: " + config_file)
+        return emit_fallback(fallback)
+
+    doc = docs[0]
+    efforts, warnings = read_efforts(doc, host, verb)
+    if host != "claudeCode":
+        try:
+            models = read_categories(doc, host)
+        except MalformedTasks:
+            models = {}
+        for category in CATEGORIES:
+            model = models.get(category)
+            if (not isinstance(model, str) or normalize(model) in ("", "inherit")):
+                efforts[category] = "inherit"
+    for line in warnings:
+        warn(line)
+    _emit_compact({category: efforts[category] for category in CATEGORIES})
+    return 0
+
+
+def op_effort_options(argv):
+    """effort-options (OpenCode): the variants one model defines, from stdin.
+
+    stdin is the text of `opencode models --verbose` (no document is involved).
+    `null` plus one warning when the catalog cannot be had; `[]` for a model
+    that lists no variants or is absent from the catalog.
+    """
+    model = _flag(argv, "--model") or ""
+    catalog = catalog_variants(sys.stdin.read())
+    if catalog is None:
+        warn("Warning: effort-options: the variant catalog is unavailable "
+             "(opencode models --verbose gave nothing usable); no variants can be offered")
+        _emit_compact(None)
+        return 0
+    _emit_compact(list(catalog.get(model, [])))
     return 0
 
 
@@ -589,6 +787,73 @@ def _emit_pretty(value):
     sys.stdout.write(text.replace("\x7f", "\\u007f") + "\n")
 
 
+def _stored_model(doc, host, category):
+    """The model on disk for one category, trimmed, or None. Never raises."""
+    categories = doc.get("categories") if isinstance(doc, dict) else None
+    table = categories.get(host) if isinstance(categories, dict) else None
+    value = table.get(category) if isinstance(table, dict) else None
+    return value.strip(_SPACE) if isinstance(value, str) else None
+
+
+def _refuse(category, value, why):
+    warn("Error: detect-models: --" + category + "-effort value " + _echo(value)
+         + " " + why + "; nothing was written")
+    return 1
+
+
+def apply_efforts(doc, host_key, categories, given, catalog):
+    """The effort rules for one document: (efforts-to-store, refusal).
+
+    `given` maps category -> trimmed value for the flags actually passed;
+    `catalog` is catalog_variants' answer, or None when it is unavailable.
+    Returns ({category: value} for non-inherit values only, None) or (None, 1)
+    after printing the refusal.
+    """
+    stored, warnings = read_efforts(doc, host_key, "detect-models")
+    for line in warnings:
+        warn(line)
+    claude = host_key == "claudeCode"
+    kept = {}
+    for category in CATEGORIES:
+        model = categories[category]
+        if category in given:
+            value = given[category]
+            if claude:
+                if value not in EFFORT_LEVELS:
+                    return None, _refuse(category, value, "is not one of "
+                                         + ", ".join(EFFORT_LEVELS))
+            elif not variant_name_valid(value):
+                return None, _refuse(category, value, "is not a valid variant name")
+        else:
+            value = stored[category]
+        if claude or value == "inherit":
+            if value != "inherit":
+                kept[category] = value
+            continue
+        # OpenCode, a variant to place.
+        if model == "inherit":
+            warn("Notice: detect-models: category " + category + " has model inherit, "
+                 "so its effort " + _echo(value) + " is written as inherit")
+            continue
+        if catalog is not None:
+            defined = catalog.get(model, [])
+            if value not in defined:
+                if category in given:
+                    return None, _refuse(category, value, "is not a variant of model "
+                                         + model)
+                warn("Notice: detect-models: category " + category + " variant "
+                     + _echo(value) + " is not defined by model " + model
+                     + "; effort dropped to inherit")
+                continue
+        elif category not in given and model != _stored_model(doc, host_key, category):
+            warn("Notice: detect-models: category " + category + " variant "
+                 + _echo(value) + " dropped to inherit: model changed to " + model
+                 + " and the variant catalog was unavailable")
+            continue
+        kept[category] = value
+    return kept, None
+
+
 def op_detect(argv):
     """detect-models: the merged document on stdout, for bash to write.
 
@@ -596,7 +861,9 @@ def op_detect(argv):
     aimi-cli.sh -- flag mode routes each through `_normalize_model_id` and
     `_model_id_valid_for_host`, and default/interactive mode picks them from
     the host's own list -- so nothing here judges an id. This half is the
-    document rule and only that.
+    document rule and only that. The efforts are the exception: they are judged
+    here (apply_efforts), because the rules need the final models, the stored
+    document and the catalog together.
 
     jq READ A STREAM here too, and the two edges that follow from it are both
     pinned. A config holding two concatenated documents is merged twice and
@@ -614,6 +881,20 @@ def op_detect(argv):
     """
     host_key = _flag(argv, "--host-key") or ""
     categories = {name: (_flag(argv, "--" + name) or "") for name in CATEGORIES}
+    # `name in argv`, not truthiness: an empty value differs from an absent flag.
+    given = {}
+    for name in CATEGORIES:
+        if "--" + name + "-effort" in argv:
+            given[name] = (_flag(argv, "--" + name + "-effort") or "").strip(_SPACE)
+
+    catalog = None
+    catalog_file = _flag(argv, "--catalog-file")
+    if catalog_file:
+        try:
+            with open(catalog_file, encoding="utf-8", errors="replace") as handle:
+                catalog = catalog_variants(handle.read())
+        except OSError:
+            catalog = None
 
     text = sys.stdin.read()
     docs = None
@@ -628,7 +909,15 @@ def op_detect(argv):
         docs = [None]
 
     try:
-        merged = [merge_models_document(doc, host_key, categories) for doc in docs]
+        merged = []
+        for doc in docs:
+            kept, refusal = apply_efforts(doc, host_key, categories, given, catalog)
+            if refusal:
+                return refusal
+            table = dict(categories)
+            if kept:
+                table["efforts"] = kept
+            merged.append(merge_models_document(doc, host_key, table))
     except MalformedTasks as exc:
         # jq aborted here with its own message and its own status 5, and the
         # shell's bare assignment carried that 5 out as the verb's exit status.
@@ -674,6 +963,8 @@ _OPS = {
     "current": op_current,
     "detect": op_detect,
     "prompt-check": op_prompt_check,
+    "resolve-efforts": op_resolve_efforts,
+    "effort-options": op_effort_options,
     "list": op_list,
 }
 

@@ -201,3 +201,18 @@ Shows the current values for the active host, then asks five questions — resea
 ```
 
 Use it to change assignments after first run, or to rebuild the config if the file was deleted.
+
+### Effort
+
+After the five model questions the command asks one gate question, `Adjust effort as well?`. Answer yes and it asks five effort questions, one per category, with the current values pre-selected. Answer no and the stored efforts stay as they are.
+
+What an effort is depends on the host:
+
+- **Claude Code**: a reasoning level, one of `low`, `medium`, `high`, `xhigh` or `max`, passed as the `effort` parameter on each spawn of an agent in that category. Requires Claude Code 2.1.292 or newer, the first version with a per-spawn effort parameter.
+- **OpenCode**: a variant of the category's model, forwarded by the `aimi-task` tool as `opencode run --variant <name>`. Only the variants the chosen model defines are offered, read from `opencode models --verbose`. A category whose model is `inherit` has no variant to pick, so its effort is `inherit` too, and changing a category's model drops a stored variant the new model does not define.
+
+Unset means `inherit`: the spawn carries no effort and behaves as before. A `models.json` written before this setting existed changes nothing, and every category starts at `inherit`.
+
+Setting `max` on review or research multiplies cost, because those categories fan out to many agents at once and each one reasons at that level.
+
+If the environment variable `CLAUDE_CODE_EFFORT_LEVEL` is set, Claude Code applies it to every spawn and it overrides every per-category effort; the command prints a line saying so when it is set. Run `aimi-cli resolve-efforts` to see what each category resolves to right now.

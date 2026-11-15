@@ -5095,6 +5095,266 @@ test_detect_models_flag_mode_rejections() {
 }
 
 # ----------------------------------------------------------------------------
+# detect-models efforts: the five --<category>-effort flags.
+#
+# Claude Code stores a level from EFFORT_LEVELS; OpenCode stores a variant name
+# of the category's model, checked against `opencode models --verbose`. The
+# stub opencode below logs every call it receives, so the tests can say WHEN
+# the catalog is and is not fetched.
+# ----------------------------------------------------------------------------
+test_detect_models_effort_claudecode() {
+  echo ""
+  echo "=== Testing detect-models efforts on Claude Code: write, keep, clear, refuse ==="
+
+  local tmpdir err out ec before
+  tmpdir=$(mktemp -d)
+  err="$tmpdir/stderr"
+  local -a models=(--research haiku --review opus --design sonnet --workflow sonnet --executor sonnet)
+
+  # The other host's table, models and efforts, must ride through every write.
+  cat > "$tmpdir/models.json" <<'EOF'
+{"schemaVersion":"2.0","categories":{"opencode":{"research":"a/b","review":"a/b","design":"a/b","workflow":"a/b","executor":"a/b","efforts":{"review":"deep"}}}}
+EOF
+  local oc_before
+  oc_before=$(jq -c '.categories.opencode' "$tmpdir/models.json")
+
+  env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" \
+    bash "$CLI" detect-models "${models[@]}" --review-effort high >/dev/null 2>"$err" </dev/null
+  assert_eq '{"review":"high"}' "$(jq -c '.categories.claudeCode.efforts' "$tmpdir/models.json")" \
+    "detect-models efforts (claude code): --review-effort high is stored"
+  assert_eq "$oc_before" "$(jq -c '.categories.opencode' "$tmpdir/models.json")" \
+    "detect-models efforts (claude code): the other host's table, efforts included, is untouched"
+
+  env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" \
+    bash "$CLI" detect-models "${models[@]}" >/dev/null 2>"$err" </dev/null
+  assert_eq '{"review":"high"}' "$(jq -c '.categories.claudeCode.efforts' "$tmpdir/models.json")" \
+    "detect-models efforts (claude code): an absent flag keeps the stored effort"
+
+  before=$(cat "$tmpdir/models.json")
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" \
+    bash "$CLI" detect-models "${models[@]}" --design-effort High 2>"$err" </dev/null) && ec=0 || ec=$?
+  assert_exit_code "1" "$ec" "detect-models efforts (claude code): a level outside the set exits 1"
+  assert_stderr_contains 'Error: detect-models: --design-effort value "High"' "$(cat "$err")" \
+    "detect-models efforts (claude code): the refusal echoes the value JSON-quoted"
+  assert_eq "" "$out" "detect-models efforts (claude code): a refusal leaves stdout empty"
+  assert_eq "$before" "$(cat "$tmpdir/models.json")" \
+    "detect-models efforts (claude code): a refusal leaves models.json byte-identical"
+
+  env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" \
+    bash "$CLI" detect-models "${models[@]}" --review-effort >/dev/null 2>"$err" </dev/null && ec=0 || ec=$?
+  assert_exit_code "1" "$ec" "detect-models efforts (claude code): a flag with no value exits 1"
+  assert_stderr_contains "Error: detect-models: --review-effort" "$(cat "$err")" \
+    "detect-models efforts (claude code): the missing value names the flag"
+
+  env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" \
+    bash "$CLI" detect-models "${models[@]}" --review-effort inherit >/dev/null 2>"$err" </dev/null
+  assert_eq "false" "$(jq -c '.categories.claudeCode | has("efforts")' "$tmpdir/models.json")" \
+    "detect-models efforts (claude code): inherit clears the effort and drops the empty container"
+
+  rm -rf "$tmpdir"
+}
+
+test_detect_models_effort_opencode_catalog() {
+  echo ""
+  echo "=== Testing detect-models efforts on OpenCode: the variant catalog and when it is fetched ==="
+
+  local tmpdir stub err ec log
+  tmpdir=$(mktemp -d)
+  stub="$tmpdir/bin"
+  err="$tmpdir/stderr"
+  log="$tmpdir/calls.log"
+  mkdir -p "$stub"
+  cat > "$stub/opencode" <<'EOF'
+#!/bin/bash
+echo "$*" >> "$STUB_LOG"
+case "$*" in
+  "models --verbose")
+    cat <<'CAT'
+anthropic/claude-opus-4-7
+{
+  "id": "claude-opus-4-7",
+  "variants": {
+    "high": {},
+    "max": {}
+  }
+}
+anthropic/claude-haiku-4-5
+{
+  "id": "claude-haiku-4-5"
+}
+anthropic/claude-sonnet-4-6
+{
+  "id": "claude-sonnet-4-6",
+  "variants": {
+    "low": {}
+  }
+}
+CAT
+    ;;
+  models)
+    printf 'anthropic/claude-haiku-4-5\nanthropic/claude-opus-4-7\nanthropic/claude-sonnet-4-6\n'
+    ;;
+  "run --help")
+    if [ -z "${STUB_NO_VARIANT:-}" ]; then echo "  --variant  model variant"; else echo "  --model"; fi
+    ;;
+esac
+EOF
+  chmod +x "$stub/opencode"
+  local -a models=(--research anthropic/claude-haiku-4-5 --review anthropic/claude-opus-4-7 --design anthropic/claude-sonnet-4-6 --workflow anthropic/claude-sonnet-4-6 --executor anthropic/claude-sonnet-4-6)
+  _oc_detect() {
+    env -u AIMI_PLUGIN_DIR -u CLAUDECODE PATH="$stub:/usr/bin:/bin" STUB_LOG="$log" AIMI_CONFIG_DIR="$tmpdir" \
+      bash "$CLI" detect-models "$@" 2>"$err" </dev/null
+  }
+
+  : > "$log"
+  _oc_detect "${models[@]}" >/dev/null
+  assert_eq "0" "$(grep -c 'models --verbose' "$log" || true)" \
+    "detect-models efforts (opencode): no effort flag and no stored efforts never fetches the catalog"
+
+  : > "$log"
+  _oc_detect "${models[@]}" --review-effort max >/dev/null
+  assert_eq "1" "$(grep -c 'models --verbose' "$log" || true)" \
+    "detect-models efforts (opencode): an effort flag fetches the catalog once"
+  assert_eq '{"review":"max"}' "$(jq -c '.categories.opencode.efforts' "$tmpdir/models.json")" \
+    "detect-models efforts (opencode): a variant the model defines is stored"
+
+  : > "$log"
+  _oc_detect "${models[@]}" >/dev/null
+  assert_eq "1" "$(grep -c 'models --verbose' "$log" || true)" \
+    "detect-models efforts (opencode): stored efforts fetch the catalog on a run with no effort flag"
+
+  : > "$log"
+  _oc_detect "${models[@]}" --review-effort inherit >/dev/null
+  assert_eq "1" "$(grep -c 'models --verbose' "$log" || true)" \
+    "detect-models efforts (opencode): inherit given over a stored effort still fetches the catalog"
+  : > "$log"
+  _oc_detect "${models[@]}" --review-effort inherit >/dev/null
+  assert_eq "0" "$(grep -c 'models --verbose' "$log" || true)" \
+    "detect-models efforts (opencode): only inherit given and nothing stored does not fetch the catalog"
+  : > "$log"
+  _oc_detect "${models[@]}" --review-effort max >/dev/null
+
+  _oc_detect "${models[@]}" --review-effort nope >/dev/null && ec=0 || ec=$?
+  assert_exit_code "1" "$ec" "detect-models efforts (opencode): a variant the model does not define is refused"
+  assert_stderr_contains "Error: detect-models: --review-effort value \"nope\"" "$(cat "$err")" \
+    "detect-models efforts (opencode): the refusal names the flag and the value"
+
+  _oc_detect "${models[@]}" --review-effort max >/dev/null
+  _oc_detect --research anthropic/claude-haiku-4-5 --review anthropic/claude-sonnet-4-6 --design anthropic/claude-sonnet-4-6 \
+    --workflow anthropic/claude-sonnet-4-6 --executor anthropic/claude-sonnet-4-6 >/dev/null
+  assert_eq "false" "$(jq -c '.categories.opencode | has("efforts")' "$tmpdir/models.json")" \
+    "detect-models efforts (opencode): a kept variant the new model lacks is dropped"
+  assert_contains "max" "$(cat "$err")" "detect-models efforts (opencode): the drop notice names the variant"
+
+  _oc_detect --research inherit --review anthropic/claude-opus-4-7 --design anthropic/claude-sonnet-4-6 \
+    --workflow anthropic/claude-sonnet-4-6 --executor anthropic/claude-sonnet-4-6 --research-effort high >/dev/null
+  assert_eq "false" "$(jq -c '.categories.opencode | has("efforts")' "$tmpdir/models.json")" \
+    "detect-models efforts (opencode): an effort beside model inherit is written as inherit"
+  assert_contains "research" "$(cat "$err")" "detect-models efforts (opencode): the inherit notice names the category"
+
+  : > "$log"
+  STUB_NO_VARIANT=1 _oc_detect "${models[@]}" --review-effort zzz >/dev/null
+  assert_eq "zzz" "$(jq -r '.categories.opencode.efforts.review' "$tmpdir/models.json")" \
+    "detect-models efforts (opencode): without --variant support a new variant is written as given"
+  assert_eq "0" "$(grep -c 'models --verbose' "$log" || true)" \
+    "detect-models efforts (opencode): without --variant support the catalog is not fetched"
+
+  _oc_detect "${models[@]}" --review-effort "bad name" >/dev/null && ec=0 || ec=$?
+  assert_exit_code "1" "$ec" "detect-models efforts (opencode): a name outside the variant pattern is refused"
+
+  unset -f _oc_detect
+  rm -rf "$tmpdir"
+}
+
+# ----------------------------------------------------------------------------
+# resolve-efforts and effort-options: the two effort reader verbs.
+# ----------------------------------------------------------------------------
+test_resolve_efforts_reads_the_host_table() {
+  echo ""
+  echo "=== Testing resolve-efforts: the host's efforts, inherit elsewhere, never failing ==="
+
+  local tmpdir err out ec all
+  tmpdir=$(mktemp -d)
+  err="$tmpdir/stderr"
+  all='{"research":"inherit","review":"inherit","design":"inherit","workflow":"inherit","executor":"inherit"}'
+
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" bash "$CLI" resolve-efforts 2>"$err") && ec=0 || ec=$?
+  assert_eq "$all" "$out" "resolve-efforts: a missing models.json prints all-inherit"
+  assert_eq "" "$(cat "$err")" "resolve-efforts: a missing models.json is silent"
+
+  cat > "$tmpdir/models.json" <<'JSON'
+{"schemaVersion":"2.0","categories":{"claudeCode":{"efforts":{"review":"high"}},"opencode":{"research":"a/b","efforts":{"research":"max"}}}}
+JSON
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" bash "$CLI" resolve-efforts 2>"$err") && ec=0 || ec=$?
+  assert_eq '{"research":"inherit","review":"high","design":"inherit","workflow":"inherit","executor":"inherit"}' "$out" \
+    "resolve-efforts (claude code): review high, the other host's efforts never read"
+  assert_exit_code "0" "$ec" "resolve-efforts (claude code): exits 0"
+
+  out=$(env -u AIMI_PLUGIN_DIR -u CLAUDECODE AIMI_CONFIG_DIR="$tmpdir" bash "$CLI" resolve-efforts 2>"$err") && ec=0 || ec=$?
+  assert_eq '{"research":"max","review":"inherit","design":"inherit","workflow":"inherit","executor":"inherit"}' "$out" \
+    "resolve-efforts (opencode): research max, kept because its model is set"
+
+  cat > "$tmpdir/models.json" <<'JSON'
+{"schemaVersion":"2.0","categories":{"claudeCode":{"efforts":{"review":0,"design":false}}}}
+JSON
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" bash "$CLI" resolve-efforts 2>"$err") && ec=0 || ec=$?
+  assert_eq "$all" "$out" "resolve-efforts: 0 is invalid and false is unset, both read inherit"
+  assert_eq "1" "$(grep -c 'Warning: resolve-efforts:' "$err" || true)" \
+    "resolve-efforts: one warning for the invalid value, none for false"
+
+  printf '{broken' > "$tmpdir/models.json"
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" bash "$CLI" resolve-efforts 2>"$err") && ec=0 || ec=$?
+  assert_eq "$all" "$out" "resolve-efforts: an unparseable file prints all-inherit"
+  assert_stderr_contains "Warning: resolve-efforts:" "$(cat "$err")" "resolve-efforts: an unparseable file warns"
+
+  rm -rf "$tmpdir"
+}
+
+test_effort_options_by_host() {
+  echo ""
+  echo "=== Testing effort-options: the Claude Code constant and the OpenCode catalog ==="
+
+  local tmpdir stub err out ec
+  tmpdir=$(mktemp -d)
+  stub="$tmpdir/bin"
+  err="$tmpdir/stderr"
+  mkdir -p "$stub"
+  cat > "$stub/opencode" <<'STUB'
+#!/bin/bash
+echo "$*" >> "$STUB_LOG"
+case "$*" in
+  "run --help") echo "  --variant  v" ;;
+  "models --verbose") printf 'p/glm\n{"variants":{"high":{},"max":{}}}\np/plain\n{"id":"plain"}\n' ;;
+esac
+STUB
+  chmod +x "$stub/opencode"
+
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" bash "$CLI" effort-options --model x/y 2>"$err") && ec=0 || ec=$?
+  assert_eq '["inherit","low","medium","high","xhigh","max"]' "$out" "effort-options (claude code): the six levels, --model ignored"
+
+  out=$(env -u AIMI_PLUGIN_DIR -u CLAUDECODE STUB_LOG="$tmpdir/calls" PATH="$stub:$PATH" AIMI_CONFIG_DIR="$tmpdir" \
+    bash "$CLI" effort-options --model p/glm 2>"$err") && ec=0 || ec=$?
+  assert_eq '["high","max"]' "$out" "effort-options (opencode): the variants the model defines"
+  out=$(env -u AIMI_PLUGIN_DIR -u CLAUDECODE STUB_LOG="$tmpdir/calls" PATH="$stub:$PATH" AIMI_CONFIG_DIR="$tmpdir" \
+    bash "$CLI" effort-options --model p/plain 2>"$err") && ec=0 || ec=$?
+  assert_eq '[]' "$out" "effort-options (opencode): a model with no variants prints []"
+
+  : > "$tmpdir/calls"
+  out=$(env -u AIMI_PLUGIN_DIR -u CLAUDECODE STUB_LOG="$tmpdir/calls" PATH="$stub:$PATH" AIMI_CONFIG_DIR="$tmpdir" \
+    bash "$CLI" effort-options --model inherit 2>"$err") && ec=0 || ec=$?
+  assert_eq '[]' "$out" "effort-options (opencode): --model inherit prints []"
+  assert_eq "0" "$(wc -l < "$tmpdir/calls" | tr -d ' ')" "effort-options (opencode): --model inherit fetches nothing"
+
+  out=$(env -u AIMI_PLUGIN_DIR -u CLAUDECODE STUB_LOG="$tmpdir/calls" PATH="$stub:$PATH" AIMI_CONFIG_DIR="$tmpdir" \
+    bash "$CLI" effort-options 2>"$err") && ec=0 || ec=$?
+  assert_exit_code "1" "$ec" "effort-options (opencode): a missing --model exits 1"
+  assert_stderr_contains "Error: effort-options:" "$(cat "$err")" "effort-options (opencode): the missing --model is named"
+  assert_eq "" "$out" "effort-options (opencode): a refusal leaves stdout empty"
+
+  rm -rf "$tmpdir"
+}
+
+# ----------------------------------------------------------------------------
 # detect-models flag mode after story 04: it validates, and it says so.
 #
 # The boundary this test draws is deliberate and is stated in story 04's commit:
@@ -9560,6 +9820,10 @@ main() {
   test_detect_models_default_mode_preserves_other_host
   test_detect_models_flag_mode_rejections
   test_detect_models_flag_mode_normalizes_and_warns
+  test_detect_models_effort_claudecode
+  test_detect_models_effort_opencode_catalog
+  test_resolve_efforts_reads_the_host_table
+  test_effort_options_by_host
   test_deps_recipe_record
 
   # model-validity predicate comparison

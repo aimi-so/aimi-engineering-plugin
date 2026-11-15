@@ -15,6 +15,7 @@ Both researchers below are covered by Phase 1 § Confirm Each Research File Land
 ```
 Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
   [model: <AGENT_MODELS.research when not "inherit">]
+  [effort: <AGENT_EFFORTS.research when not "inherit">]
   prompt: "Research current best practices for: [feature description].
            researchDepth: [computed researchDepth from Phase 1.5]
            topicSlug: [topicSlug]
@@ -30,6 +31,7 @@ Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
 ```
 Task subagent_type="aimi-engineering:research:aimi-framework-docs-researcher"
   [model: <AGENT_MODELS.research when not "inherit">]
+  [effort: <AGENT_EFFORTS.research when not "inherit">]
   prompt: "Research framework documentation for: [feature description].
            researchDepth: [computed researchDepth from Phase 1.5]
            topicSlug: [topicSlug]

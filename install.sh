@@ -347,6 +347,8 @@ Before spawning any agent, run once:
 ```bash
 AIMI_CLI="${AIMI_CLI:-${AIMI_PLUGIN_DIR}/scripts/aimi-cli.sh}"
 RESOLVED_MODELS=$($AIMI_CLI resolve-models 2>/dev/null)
+RESOLVED_EFFORTS=$($AIMI_CLI resolve-efforts 2>/dev/null | head -n 1)
+[ "$(printf '\''%s'\'' "$RESOLVED_EFFORTS" | jq -r '\''type'\'' 2>/dev/null)" = "object" ] || RESOLVED_EFFORTS='\''{}'\''
 ```
 
 Extract per-category model values (all five keys are always present; value is a model id or the sentinel "inherit"):
@@ -359,7 +361,17 @@ WORKFLOW_MODEL=$(printf '\''%s'\'' "$RESOLVED_MODELS" | jq -r '\''.workflow'\'')
 EXECUTOR_MODEL=$(printf '\''%s'\'' "$RESOLVED_MODELS" | jq -r '\''.executor'\'')
 ```
 
-If `$AIMI_CLI` is not available or the call fails, set all five variables to the string `inherit`.
+Extract per-category effort values the same way (each value is an effort or variant name, or the sentinel "inherit"; a missing key reads as "inherit"):
+
+```
+RESEARCH_EFFORT=$(printf '\''%s'\'' "$RESOLVED_EFFORTS" | jq -r '\''.research // "inherit"'\'')
+REVIEW_EFFORT=$(printf '\''%s'\'' "$RESOLVED_EFFORTS" | jq -r '\''.review // "inherit"'\'')
+DESIGN_EFFORT=$(printf '\''%s'\'' "$RESOLVED_EFFORTS" | jq -r '\''.design // "inherit"'\'')
+WORKFLOW_EFFORT=$(printf '\''%s'\'' "$RESOLVED_EFFORTS" | jq -r '\''.workflow // "inherit"'\'')
+EXECUTOR_EFFORT=$(printf '\''%s'\'' "$RESOLVED_EFFORTS" | jq -r '\''.executor // "inherit"'\'')
+```
+
+If `$AIMI_CLI` is not available or the call fails, set all ten variables (the five `*_MODEL` and the five `*_EFFORT`) to the string `inherit`.
 
 #### First-run configuration prompt (interactive hosts only)
 
@@ -407,12 +419,20 @@ The command body below uses `aimi-task subagent_type="aimi-engineering:CATEGORY:
 
 **Omit the `model` argument entirely when the resolved value is `inherit`** — do not pass `model="inherit"` literally, the spawned agent must inherit the session model.
 
+Some spawn sites also carry an effort annotation, either bracketed `[effort: <AGENT_EFFORTS.CATEGORY ...>]` or in a parameter list as `effort: <AGENT_EFFORTS.CATEGORY ...>,`. Read it by the same CATEGORY as the model beside it (research → `$RESEARCH_EFFORT`, review → `$REVIEW_EFFORT`, design → `$DESIGN_EFFORT`, workflow → `$WORKFLOW_EFFORT`, executor → `$EXECUTOR_EFFORT`) and pass it as the aimi-task `variant` argument. Rules:
+
+- Pass `variant` only when `model` is passed. A variant needs a model.
+- Omit `variant` entirely when the resolved effort is `inherit`.
+- Never append the variant to the model string and never pass an `effort` argument; aimi-task has only `variant`.
+- If aimi-task reports a variant failure, report it to the user. Do not retry the spawn without the variant.
+
 For `Task(subagent_type="general", model: ...)` spawns (the parallel sub-orchestrators and per-story executor of /aimi:execute), route through **aimi-task** using `$EXECUTOR_MODEL` as the model, since the native `task` tool ignores per-call `model:` arguments:
 
 ```
 aimi-task(
   subagent_type="general",
   model="[$EXECUTOR_MODEL, omit if inherit]",
+  variant="[$EXECUTOR_EFFORT, omit if inherit or when model is omitted]",
   prompt="[original task prompt]"
 )
 ```

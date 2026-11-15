@@ -11,6 +11,7 @@
 ```
 Task subagent_type="aimi-engineering:research:aimi-design-bundle-researcher"
   [model: <AGENT_MODELS.research when not "inherit">]
+  [effort: <AGENT_EFFORTS.research when not "inherit">]
   prompt: "Ingest the Claude Design handoff bundle and produce the
            16-section research doc, including § Open Questions with
            any spec-prototype coverage gaps marked

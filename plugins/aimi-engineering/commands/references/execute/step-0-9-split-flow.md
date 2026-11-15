@@ -171,6 +171,7 @@ For each record in SPLIT_PLAN, all Task( calls in one turn:
 Task(
     subagent_type: "general-purpose",
     model: <AGENT_MODELS.executor when not "inherit">,
+    effort: <AGENT_EFFORTS.executor when not "inherit">,
     description: "Execute split tasks: [that record's file basename]",
     prompt: [
         SPAWNED_SPLIT_TASK=flat-split-child
@@ -184,6 +185,7 @@ Task(
         - VISUAL_FOLLOW = [the value Step 0.7 set]
         - PHASE_SPLIT_MODE = false
         - AGENT_MODELS = [the value Resolve Agent Models echoed]
+        - AGENT_EFFORTS = [the value Resolve Agent Models echoed]
         - BASE_BRANCH = [the value Parse --base Override echoed, or empty when --base was absent]
         - All subsequent steps (reset-orphaned, validate, wave loop, completion)
         - Scoped to that split file only

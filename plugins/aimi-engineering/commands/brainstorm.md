@@ -76,7 +76,7 @@ behavior.
 
 ## Step 0.6: Resolve Agent Models
 
-Read and follow the **Resolve Agent Models** section of `commands/references/cli-path-resolution.md` to populate `AGENT_MODELS`. When resolution fails, treat every category as `"inherit"` and continue.
+Read and follow the **Resolve Agent Models** section of `commands/references/cli-path-resolution.md` to populate `AGENT_MODELS` and `AGENT_EFFORTS`. When resolution fails, treat every category as `"inherit"` and continue.
 
 ## Step 0.7: Detect Claude Design Bundle
 
@@ -328,6 +328,7 @@ Whether accepted or skipped, this gate runs to completion before Step 0.7 Post-P
    ```
    Task subagent_type="aimi-engineering:research:aimi-bundle-prototype-author"
      [model: <AGENT_MODELS.research when not "inherit">]
+     [effort: <AGENT_EFFORTS.research when not "inherit">]
      prompt: "Generate a prototype HTML for the design bundle.
               bundlePath=<bundlePath>
               viewList=<view_list as JSON array of name strings>
@@ -507,6 +508,7 @@ Spawn the selected research agents **in parallel** using the Task tool:
 ```
 Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
   [model: <AGENT_MODELS.research when not "inherit">]
+  [effort: <AGENT_EFFORTS.research when not "inherit">]
   prompt: "Understand existing patterns related to: [feature description].
            Look for: similar features, established patterns, CLAUDE.md guidance,
            relevant file paths, technology choices.
@@ -517,6 +519,7 @@ Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
 
 Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
   [model: <AGENT_MODELS.research when not "inherit">]
+  [effort: <AGENT_EFFORTS.research when not "inherit">]
   prompt: "Research current best practices for: [feature description].
            Look for: industry standards, community conventions, recommended
            patterns, common pitfalls, and authoritative guidance.
@@ -526,6 +529,7 @@ Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
 
 Task subagent_type="aimi-engineering:research:aimi-design-bundle-researcher"
   [model: <AGENT_MODELS.research when not "inherit">]
+  [effort: <AGENT_EFFORTS.research when not "inherit">]
   prompt: "Analyse the Claude Design bundle to extract design intent and chat
            context relevant to: [feature description].
            bundlePath=<bundlePath>
@@ -1501,6 +1505,7 @@ Spawn the deriver with the entity and endpoint names the description mentions as
 ```
 Task subagent_type="aimi-engineering:research:aimi-spec-deriver"
   [model: <AGENT_MODELS.research when not "inherit">]
+  [effort: <AGENT_EFFORTS.research when not "inherit">]
   prompt: "repoRoot: <absolute project root>
            targets: <entity and endpoint names from the feature description>
            context: <one-paragraph summary of the feature>"

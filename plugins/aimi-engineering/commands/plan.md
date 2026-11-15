@@ -87,7 +87,7 @@ Store `INTERACTIVE_MODE` for use by Phase 0.5, Phase 1.8, Phase 1.9, Phase 2.5, 
 
 ### Resolve Agent Models
 
-Read and follow the **Resolve Agent Models** section of `commands/references/cli-path-resolution.md` to populate `AGENT_MODELS`. When resolution fails, treat every category as `"inherit"` and continue.
+Read and follow the **Resolve Agent Models** section of `commands/references/cli-path-resolution.md` to populate `AGENT_MODELS` and `AGENT_EFFORTS`. When resolution fails, treat every category as `"inherit"` and continue.
 
 ## Phase 0: Idea Refinement
 
@@ -247,6 +247,7 @@ Before running this phase, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/plan/p
 ```
 Task subagent_type="aimi-engineering:workflow:aimi-spec-flow-analyzer"
   [model: <AGENT_MODELS.workflow when not "inherit">]
+  [effort: <AGENT_EFFORTS.workflow when not "inherit">]
   prompt: "Analyze this feature specification for flow completeness, gaps, and edge cases:
            Feature: [feature description]
            Context from research: [consolidated research summary]
