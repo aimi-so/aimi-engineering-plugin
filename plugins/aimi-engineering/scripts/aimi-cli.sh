@@ -16711,6 +16711,60 @@ cmd_roadmap_visual_gate_required() {
     --roadmap "$roadmap_path" --phase "$phase_id"
 }
 
+# Whether usage validation is owed for a phase or a flat run, with the surfaces,
+# charters and specs to validate and the kind of skip when it is not. A read:
+# no lock, no write, one crossing into usage_validation.py. It refuses without
+# python3, because a gate that cannot evaluate must not degrade into an answer.
+cmd_usage_validation_required() {
+  local feature="" phase_id="" tasks_file="" have_feature=0 have_phase=0 have_tasks=0
+  local usage="Usage: aimi-cli.sh usage-validation-required (--feature <slug> --phase <id> | [--tasks-file <path>])"
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) have_feature=1; shift; feature="${1:-}" ;;
+      --phase) have_phase=1; shift; phase_id="${1:-}" ;;
+      --tasks-file) have_tasks=1; shift; tasks_file="${1:-}" ;;
+      *)
+        echo "Error: usage-validation-required: unknown flag: $1" >&2
+        echo "$usage" >&2
+        exit 1
+        ;;
+    esac
+    [ $# -gt 0 ] && shift
+  done
+
+  if { [ "$have_feature" -eq 1 ] || [ "$have_phase" -eq 1 ]; } && [ "$have_tasks" -eq 1 ]; then
+    echo "Error: usage-validation-required: --tasks-file cannot be combined with --feature/--phase" >&2
+    echo "$usage" >&2
+    exit 1
+  fi
+  if [ "$have_feature" -ne "$have_phase" ]; then
+    echo "Error: usage-validation-required: --feature and --phase must be given together" >&2
+    echo "$usage" >&2
+    exit 1
+  fi
+
+  if [ "$have_feature" -eq 1 ]; then
+    _roadmap_validate_feature "$feature" usage-validation-required
+    _roadmap_validate_phase_id "$phase_id" "usage-validation-required"
+    local roadmap_path
+    roadmap_path=$(_roadmap_require "usage-validation-required" "$feature")
+    check_python3
+    python3 "$(_aimi_script_py usage_validation.py)" required \
+      --roadmap "$roadmap_path" --phase "$phase_id"
+    return $?
+  fi
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+  check_python3
+  python3 "$(_aimi_script_py usage_validation.py)" files --tasks-file "$tasks_file"
+}
+
 cmd_roadmap_claim() {
   local feature="" session_id="" session_pid="" phase_override=""
 
@@ -18971,6 +19025,15 @@ COMMANDS:
                               or re-verified phase carries one record, never two.
                               A phase id absent from roadmap.json is refused,
                               naming the id and the roadmap path.
+    usage-validation-required --feature <slug> --phase <id> | [--tasks-file <path>]
+                              Read-only. Whether usage validation is owed for a phase
+                              (every member of a split phase) or a flat run (the
+                              session's tasks file when --tasks-file is absent).
+                              Prints {required, skipKind, reason, surfaceSource,
+                              askUndeclared, members, projects, recipeRecorded,
+                              surfaces, charters, specs}. skipKind is
+                              disabled-by-operator (AIMI_USAGE_VALIDATION=off),
+                              unable-to-evaluate, not-applicable or null. Needs python3.
     roadmap-visual-gate-required --feature <slug> --phase <id>
                               Read-only. Derives, from the phase's own tasks
                               file(s) (every member of a split phase), whether a
@@ -19395,6 +19458,7 @@ main() {
     roadmap-write-handoff) shift; cmd_roadmap_write_handoff "$@" ;;
     roadmap-record-visual-gate)   shift; cmd_roadmap_record_visual_gate "$@" ;;
     roadmap-visual-gate-required) shift; cmd_roadmap_visual_gate_required "$@" ;;
+    usage-validation-required) shift; cmd_usage_validation_required "$@" ;;
     write-review)         shift; cmd_write_review "$@" ;;
     validate-contracts)    shift; cmd_validate_contracts "$@" ;;
     verify-creates)        shift; cmd_verify_creates "$@" ;;
