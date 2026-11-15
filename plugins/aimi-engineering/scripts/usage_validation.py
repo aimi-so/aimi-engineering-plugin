@@ -79,6 +79,31 @@ def _clean(value, maxlen):
     return rm_sanitize(value, maxlen) if isinstance(value, str) else ""
 
 
+# Small local equivalents of roadmap.py's private helpers of the same names,
+# kept here so this module depends only on what roadmap.py means to share.
+
+def _num(value):
+    """A JSON number as jq's tostring renders it: 2, not 2.0."""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _flag(argv, name):
+    """The value after <name> in argv, or None."""
+    if name in argv:
+        i = argv.index(name)
+        if i + 1 < len(argv):
+            return argv[i + 1]
+    return None
+
+
+def _emit(value):
+    """One JSON value on stdout, indented as the other usage verbs print it."""
+    json.dump(value, sys.stdout, indent=2, ensure_ascii=False)
+    sys.stdout.write("\n")
+
+
 def _aimi_root(anchor):
     """The directory holding `.aimi/`, found by walking up from <anchor>;
     the current directory when there is none."""
@@ -175,6 +200,8 @@ def _answer(paths, anchor, label):
     read = []  # (path, tasks)
     unreadable = 0
     for path in paths:
+        # Coupled on purpose: the completed gate reads members with this same
+        # reader, so the two agree on which files count as unreadable and why.
         tasks, reason = R._read_tasks_with_reason(path)
         if tasks is None:
             _advise(label + " could not read " + path + " -- " + reason)
@@ -207,6 +234,7 @@ def _answer(paths, anchor, label):
     fallback_used = False
 
     for position, (path, tasks, report) in enumerate(read, start=1):
+        # Coupled on purpose: "completed" must mean what the completed gate means.
         done = set(i for i in R._completed_story_ids(tasks) if isinstance(i, str))
         by_id = {s.get("id"): s for s in _stories(tasks) if isinstance(s.get("id"), str)}
         entries = declared_by_member[position - 1]
@@ -347,8 +375,10 @@ def usage_validation_requirement(roadmap_path, doc, phase):
     The call shape of roadmap._visual_gate_requirement. Members come from
     roadmap._completed_gate_resolve_members; an unreadable one draws an
     advisory and is not counted in `members`."""
+    # Coupled on purpose: a split phase's members are resolved exactly as the
+    # completed gate resolves them, or the two would judge different files.
     members = R._completed_gate_resolve_members(roadmap_path, doc, phase)
-    return _answer(members, roadmap_path, "phase " + R._num(phase.get("id")))
+    return _answer(members, roadmap_path, "phase " + _num(phase.get("id")))
 
 
 def usage_validation_requirement_for_files(paths):
@@ -666,8 +696,8 @@ def usage_validation_verdict(message, planned_ids, evidence_dir, reproduced=(), 
 
 
 def _op_verdict(argv):
-    required = R._flag(argv, "--required-file")
-    evidence_dir = R._flag(argv, "--evidence-dir")
+    required = _flag(argv, "--required-file")
+    evidence_dir = _flag(argv, "--evidence-dir")
     if not required or not evidence_dir:
         sys.stderr.write("Usage: usage_validation.py verdict --required-file <path> --evidence-dir <dir> "
                          "[--reproduced <key>]... [--accepted <key>]...\n")
@@ -700,19 +730,19 @@ def _op_verdict(argv):
         return 1
     planned = [c.get("id") for c in charters if isinstance(c, dict) and isinstance(c.get("id"), str)]
     message = sys.stdin.buffer.read().decode("utf-8", errors="replace")
-    R._emit(usage_validation_verdict(message, planned, evidence_dir, lists["--reproduced"], lists["--accepted"]))
+    _emit(usage_validation_verdict(message, planned, evidence_dir, lists["--reproduced"], lists["--accepted"]))
     return 0
 
 
 def _op_required(argv):
-    path = R._flag(argv, "--roadmap")
-    phase_raw = R._flag(argv, "--phase")
+    path = _flag(argv, "--roadmap")
+    phase_raw = _flag(argv, "--phase")
     if not path or phase_raw is None:
         sys.stderr.write("Usage: usage_validation.py required --roadmap <path> --phase <id>\n")
         return 2
     doc = R.read_doc(path, VERB)
     try:
-        phase_id = R.jq_numbers(R.json.loads(phase_raw))
+        phase_id = R.jq_numbers(json.loads(phase_raw))
     except ValueError:
         sys.stderr.write("Error: " + VERB + ": --phase <id> must be a numeric phase id\n")
         return 1
@@ -720,7 +750,7 @@ def _op_required(argv):
     if phase is None:
         sys.stderr.write("Error: " + VERB + ": phase " + phase_raw + " not found in " + path + "\n")
         return 1
-    R._emit(usage_validation_requirement(path, doc, phase))
+    _emit(usage_validation_requirement(path, doc, phase))
     return 0
 
 
@@ -729,7 +759,7 @@ def _op_files(argv):
     if not paths:
         sys.stderr.write("Usage: usage_validation.py files --tasks-file <path>...\n")
         return 2
-    R._emit(usage_validation_requirement_for_files(paths))
+    _emit(usage_validation_requirement_for_files(paths))
     return 0
 
 
