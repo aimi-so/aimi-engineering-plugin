@@ -462,10 +462,12 @@ while true:
             unresolved_reason = "merge did not start"   # merge-all printed git's own reason, no conflicted file
             while merge_result is non-zero and `git -C [merge_cwd] diff --name-only --diff-filter=U` lists files:
                 conflicted = that list
+                Run bookkeeping-resolve.md's pass now, before any judgment: it resolves declared files, may stop, and leaves
+                judged = conflicted minus its resolved paths.
                 involved = the story merge-all stopped at, plus each story of this wave already merged into
                            [merge_target] whose implementation.files names a file in conflicted
                 Read each involved story with `$AIMI_CLI get-story [id] --tasks-file [WAVE_TASKS_FILE]`.
-                Edit each conflicted file in [merge_cwd] so it keeps what every involved story adds; their
+                Edit each [judged] file in [merge_cwd] so it keeps what every involved story adds; their
                 acceptanceCriteria are what the result must satisfy. Stage nothing yet.
                 Run each involved story's implementation.verify from [merge_cwd] (from the project's
                 subfolder inside it when the project is a subfolder of a larger repository).
@@ -519,7 +521,7 @@ while true:
             # Read wave-reconcile.md; hand it label "wave [wave]", group_key, merge_cwd, merge_target,
             # base_sha[group_key], merged_stories = this group's `stories` with their worktree names
             # (never tasks.json `wave`), WAVE_TASKS_FILE, AIMI_ROOT, PLAN_DISC, result_payload_by_id,
-            # and other_groups (from succeeded_by_project and group_key).
+            # other_groups (from succeeded_by_project and group_key), and machine_resolved.
             # The integration stop STOPs there: none of this group's stories is marked complete.
             status = wave-reconcile.md's procedure
             integrated_checks.append("[group_key]: [status]")

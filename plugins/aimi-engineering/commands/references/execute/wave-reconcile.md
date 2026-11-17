@@ -13,6 +13,7 @@ group_key, merge_cwd, merge_target, base_sha
 merged_stories         # the orchestrator's own list for THIS group: id, title, worktree_name
 WAVE_TASKS_FILE, AIMI_ROOT, PLAN_DISC
 result_payload_by_id   # each story's executor result, with its verify evidence
+machine_resolved       # [{path, rule, changes}] the bookkeeping resolver wrote in this group's merge, all passes
 other_groups           # state of the wave's other groups: already complete, or not yet merged
                        # (derived from succeeded_by_project and the current group_key)
 ```
@@ -111,6 +112,7 @@ for round in 1..2:
             MERGE_DIFF_STAT   = git -C [merge_cwd] diff --stat [base_sha]..HEAD
             MERGE_CWD         = [merge_cwd]
             PREVIOUS_ROUNDS   = summaries so far, oldest first
+            BOOKKEEPING_RESOLVED = machine_resolved: each path, its rule and changes (omit when empty)
     )   # the worker creates no worktree
 ```
 
@@ -123,7 +125,7 @@ changed   = git -C [merge_cwd] diff --name-only [round_start_sha]
 untracked = git -C [merge_cwd] status --porcelain --ignored
 # with the tasks_hash comparison, this covers .aimi/, tasks-file and verify-text edits
 if changed or untracked touches .aimi/, a tasks file (hash differs), any story's
-   implementation.verify text, or .git/:
+   implementation.verify text, .git/, or a path in machine_resolved:
     git -C [merge_cwd] reset --hard [round_start_sha]   # plus deleting only the untracked paths the round created
     stop (integration stop), naming the forbidden edit
 files outside the involved stories' implementation.files and the files the failing output names:
@@ -137,6 +139,7 @@ Round accounting:
 - A round that makes no commit counts as spent.
 - When more commands fail after a round than before it, reconcile ends at once: integration stop.
 - The outcomes `requirements-conflict`, `stale-verify` and `environmental` stop at once: integration stop with the outcome and summary reported.
+- An edit to a `machine_resolved` path is a forbidden edit: reset to `round_start_sha`, integration stop.
 - When the union is green after a round: status `reconciled after [round] rounds`, naming the reconcile commits.
 - When round 2 ends with failures left: integration stop.
 
@@ -153,6 +156,7 @@ Report:
 "To return the branch to the merged state, run: git -C [merge_cwd] reset --hard [PRE_RECONCILE_SHA]"
 "Reconcile commits: [list, or none]"
 "Uncommitted worker edits: [list, or none]"
+"Bookkeeping resolved by rule: [path (rule) for each machine_resolved, or none]"
 "Other groups of this wave: [already complete | not yet merged], per other_groups"
 "Stories not re-verified: [ids, or none]"
 if the wave's diff ([base_sha]..HEAD) touches none of the failing area:

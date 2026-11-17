@@ -91,6 +91,7 @@ TABLE = {
     "step-3-3-guidelines-and-dev-server.md": NOT_SPLIT | SPLIT_CHILD,
     "step-3-3-open-visual-follow.md": set(),
     "step-4-wave-execution-loop.md": NOT_SPLIT | SPLIT_CHILD,
+    "bookkeeping-resolve.md": NOT_SPLIT | SPLIT_CHILD,
     "wave-reconcile.md": NOT_SPLIT | SPLIT_CHILD,
     "step-4-post-loop-cleanup.md": NOT_SPLIT | SPLIT_CHILD,
     "step-4-finalize.md": NOT_SPLIT,
