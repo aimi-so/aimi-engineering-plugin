@@ -1393,7 +1393,7 @@ def _contention_story(story_id, depends_on, files, wave="omit"):
     return story
 
 
-def _run_validate_wave_contention(tmp_path, stories):
+def _run_validate_wave_contention(tmp_path, stories, config=None, track=False):
     """One live validate-wave-contention over a document written for the
     occasion. Mirrors _run_validate_waves; unlike that verb this one really
     does carry an exit status, so a caller reads proc.returncode too."""
@@ -1404,10 +1404,17 @@ def _run_validate_wave_contention(tmp_path, stories):
         os.path.join(tasks_dir, "2020-01-01-contention-tasks.json"), "w", encoding="utf-8"
     ) as fh:
         fh.write(_waves_doc(stories))
+    if config is not None:
+        cfg = os.path.join(root, ".aimi", "config.json")
+        with open(cfg, "w", encoding="utf-8") as fh:
+            fh.write(config if isinstance(config, str) else json.dumps(config))
+        if track:
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "add", "-f", ".aimi/config.json"], cwd=root, check=True)
     proc = subprocess.run(
         ["bash", CLI, "validate-wave-contention"], cwd=root, capture_output=True, text=True, timeout=120
     )
-    return proc, json.loads(proc.stdout)
+    return proc, (json.loads(proc.stdout) if proc.stdout.strip() else None)
 
 
 def test_wave_contention_is_reported_with_the_exact_message(tmp_path):
@@ -1453,6 +1460,106 @@ def test_a_story_with_no_implementation_key_is_skipped_not_crashed(tmp_path):
     assert "implementation" not in stories[0]
     proc, verdict = _run_validate_wave_contention(tmp_path, stories)
     assert verdict == {"valid": True, "errors": []} and proc.returncode == 0
+
+
+def _decl(**by_project):
+    return {"bookkeeping": {k: {p: {"rule": "union-lines"} for p in v} for k, v in by_project.items()}}
+
+
+def _declared_project(story, project):
+    if project is not None:
+        story["project"] = project
+    return story
+
+
+def test_wave_contention_declared_only_overlap_passes(tmp_path):
+    stories = [
+        _contention_story("US-001", [], ["CHANGELOG.md", "a.sh"]),
+        _contention_story("US-002", [], ["CHANGELOG.md", "b.sh"]),
+    ]
+    proc, verdict = _run_validate_wave_contention(tmp_path, stories, _decl(**{".": ["CHANGELOG.md"]}))
+    assert verdict == {"valid": True, "errors": []} and proc.returncode == 0
+
+
+def test_wave_contention_declared_mixed_reports_undeclared_only(tmp_path):
+    stories = [
+        _contention_story("US-001", [], ["CHANGELOG.md", "a.sh"]),
+        _contention_story("US-002", [], ["CHANGELOG.md", "a.sh"]),
+    ]
+    proc, verdict = _run_validate_wave_contention(tmp_path, stories, _decl(**{".": ["CHANGELOG.md"]}))
+    assert verdict == {
+        "valid": False,
+        "errors": ["Wave contention: wave 1 path a.sh claimed by US-001, US-002"],
+    }
+    assert proc.returncode == 1 and "CHANGELOG.md" not in proc.stdout
+
+
+def test_wave_contention_declared_needs_every_claimant_project(tmp_path):
+    stories = [
+        _declared_project(_contention_story("US-001", [], ["VERSION"]), "api"),
+        _declared_project(_contention_story("US-002", [], ["VERSION"]), "web"),
+    ]
+    proc, verdict = _run_validate_wave_contention(tmp_path, stories, _decl(api=["VERSION"]))
+    assert verdict == {
+        "valid": False,
+        "errors": ["Wave contention: wave 1 path VERSION claimed by US-001, US-002"],
+    }
+    assert proc.returncode == 1
+    proc, verdict = _run_validate_wave_contention(
+        tmp_path / "both", stories, _decl(api=["VERSION"], web=["VERSION"])
+    )
+    assert verdict == {"valid": True, "errors": []} and proc.returncode == 0
+
+
+def test_wave_contention_declared_absent_declaration_is_unchanged(tmp_path):
+    stories = [
+        _contention_story("US-001", [], ["CHANGELOG.md"]),
+        _contention_story("US-002", [], ["CHANGELOG.md"]),
+    ]
+    expected = {
+        "valid": False,
+        "errors": ["Wave contention: wave 1 path CHANGELOG.md claimed by US-001, US-002"],
+    }
+    for n, config in enumerate([None, {}, {"bookkeeping": {}}, {"bookkeeping": {"other": {}}}, _decl(**{".": []})]):
+        proc, verdict = _run_validate_wave_contention(tmp_path / str(n), stories, config)
+        assert verdict == expected and proc.returncode == 1, config
+
+
+def test_wave_contention_declared_tracked_or_malformed_config_is_refused(tmp_path):
+    stories = [
+        _contention_story("US-001", [], ["CHANGELOG.md"]),
+        _contention_story("US-002", [], ["CHANGELOG.md"]),
+    ]
+    proc, verdict = _run_validate_wave_contention(
+        tmp_path / "tracked", stories, _decl(**{".": ["CHANGELOG.md"]}), track=True
+    )
+    assert proc.returncode == 1 and verdict is None and "config.json" in proc.stderr
+    proc, verdict = _run_validate_wave_contention(
+        tmp_path / "bad", stories, {"bookkeeping": {".": {"CHANGELOG.md": {"rule": "nope"}}}}
+    )
+    assert proc.returncode == 1 and verdict is None and "config.json" in proc.stderr
+    assert '"valid": true' not in proc.stdout
+
+
+def test_wave_contention_declared_tracked_config_without_key_is_not_refused(tmp_path):
+    stories = [
+        _contention_story("US-001", [], ["a.sh"]),
+        _contention_story("US-002", [], ["a.sh"]),
+    ]
+    proc, verdict = _run_validate_wave_contention(tmp_path, stories, {"other": 1}, track=True)
+    assert verdict == {
+        "valid": False,
+        "errors": ["Wave contention: wave 1 path a.sh claimed by US-001, US-002"],
+    }
+    assert proc.returncode == 1
+
+
+def test_wave_contention_declared_default_parameter_matches_none():
+    doc = json.loads(_waves_doc([
+        _contention_story("US-001", [], ["a.sh"]),
+        _contention_story("US-002", [], ["a.sh"]),
+    ]))
+    assert T.wave_contention(doc) == T.wave_contention(doc, None) == T.wave_contention(doc, {})
 
 
 # ---------------------------------------------------------------------------

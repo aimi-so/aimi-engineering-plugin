@@ -3709,10 +3709,13 @@ EOF
   # audit_patches.py (the staged-idx helper its audit gate shares with the
   # apply-audit-patches verb), so that is provisioned too. tasks.py and
   # roadmap.py both import usage_record.py (the one usage-validation record
-  # rule both writers share), so it is provisioned as well.
+  # rule both writers share), so it is provisioned as well. tasks.py also
+  # imports bookkeeping.py (validate-wave-contention's declaration reader),
+  # which imports deps_recipe.py for its tracked-config check.
   cp "$SCRIPT_DIR/tasks.py" "$SCRIPT_DIR/roadmap.py" "$SCRIPT_DIR/sanitize.py" \
     "$SCRIPT_DIR/story_merge.py" "$SCRIPT_DIR/audit_patches.py" \
-    "$SCRIPT_DIR/usage_record.py" \
+    "$SCRIPT_DIR/usage_record.py" "$SCRIPT_DIR/bookkeeping.py" \
+    "$SCRIPT_DIR/deps_recipe.py" \
     "$real_dir/plugins/aimi-engineering/scripts/"
   chmod +x "$real_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
 

@@ -13976,7 +13976,8 @@ cmd_validate_wave_contention() {
   # file, one crossing, and the exit status IS the crossing's own -- unlike
   # validate-waves, this verb's invalid verdict really does exit non-zero.
   check_python3
-  python3 "$(_aimi_tasks_py)" validate-wave-contention --tasks-file "$tasks_file"
+  python3 "$(_aimi_tasks_py)" validate-wave-contention \
+    --tasks-file "$tasks_file" --project-root "$PROJECT_ROOT"
 }
 
 # List the deduplicated implementation.verify commands of the stories a wave

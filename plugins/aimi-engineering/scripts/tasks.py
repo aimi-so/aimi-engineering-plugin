@@ -189,6 +189,9 @@ from sanitize import rm_sanitize, SUSPICIOUS
 # roadmap.py's phase writer and owned by neither: usage_record.py holds it.
 import usage_record
 
+# The bookkeeping declaration reader: wave_contention's optional exemption.
+import bookkeeping
+
 # The paragraph separator the cross-story audit already writes `notes` with.
 # story_merge imports it from the same place, so this adds no new edge to the
 # import graph: audit_patches is loaded by the line above either way.
@@ -1818,7 +1821,13 @@ def validate_waves(doc):
     return _verdict(errors)
 
 
-def wave_contention(doc):
+def _story_project_key(story):
+    """A story's project key: its own `project` when a non-empty string, else '.'."""
+    project = story.get("project") if isinstance(story, dict) else None
+    return project if isinstance(project, str) and project else "."
+
+
+def wave_contention(doc, declared=None):
     """One error per `implementation.files` path two or more stories in the
     SAME wave both claim -- the check that catches two executors racing each
     other for one literal, which `validate_waves` never asked about at all.
@@ -1849,10 +1858,16 @@ def wave_contention(doc):
     byte for byte by tests: waves ascending, paths in first-appearance document
     order within a wave, ids in document order -- which plain dict insertion
     order already gives, since stories are walked in document order throughout.
+
+    `declared` is optional: a map of project key to the set of paths that
+    project declared as bookkeeping. A path with several claimants is exempt
+    only when EVERY claimant's own project key declares it, so one undeclared
+    claimant keeps the refusal. None or empty takes the original code path.
     """
     stories = _stories(doc)
     assigned = computed_waves(stories)
     by_wave = {}
+    project_of = {}
     for story in stories:
         story_id = jq_index(story, "id", STORY)
         wave = assigned.get(story_id)
@@ -1864,6 +1879,8 @@ def wave_contention(doc):
         files = jq_index(implementation, "files", STORY + ".implementation")
         if not isinstance(files, list):
             continue
+        if declared:
+            project_of[story_id] = _story_project_key(story)
         claims = by_wave.setdefault(wave, {})
         seen = set()
         for entry in files:
@@ -1876,6 +1893,8 @@ def wave_contention(doc):
     for wave in sorted(by_wave):
         for path, ids in by_wave[wave].items():
             if len(ids) > 1:
+                if declared and all(path in declared.get(project_of.get(i), ()) for i in ids):
+                    continue
                 errors.append(
                     "Wave contention: wave " + str(wave)
                     + " path " + path
@@ -5317,7 +5336,20 @@ def op_validate_wave_contention(argv):
     path = _flag(argv, "--tasks-file")
     if not path:
         die("Usage: tasks.py validate-wave-contention --tasks-file <path>")
-    verdicts = [wave_contention(doc) for doc in read_docs(path, "validate-wave-contention")]
+    project_root = _flag(argv, "--project-root")
+    docs = read_docs(path, "validate-wave-contention")
+    verdicts = []
+    for doc in docs:
+        declared = None
+        if project_root:
+            config = os.path.join(project_root, ".aimi", "config.json")
+            declared = {}
+            for key in sorted({_story_project_key(s) for s in _stories(doc)}):
+                try:
+                    declared[key] = set(bookkeeping.load_declaration(config, key))
+                except bookkeeping.BookkeepingError as exc:
+                    die(str(exc))
+        verdicts.append(wave_contention(doc, declared))
     for verdict in verdicts:
         _emit(verdict)
     return 0 if all(v["valid"] for v in verdicts) else 1
