@@ -5323,6 +5323,60 @@ def op_validate_wave_contention(argv):
     return 0 if all(v["valid"] for v in verdicts) else 1
 
 
+def op_wave_verify_commands(argv):
+    """The deduplicated verify commands of the stories a wave merged.
+
+    Read-only: it never reads `wave`, runs nothing and compares against no
+    evidence. Ids come after `--`; repeats count once, at their first place.
+    Entries are keyed on (project, exact command text) in first-seen order, so
+    two owners of one command collapse into one entry and a failure names them
+    all. A story with no non-blank string `implementation.verify` adds no entry
+    and is named on one stderr line. An id absent from the file refuses, so a
+    mistyped id never shrinks the union quietly.
+    """
+    path = _flag(argv, "--tasks-file")
+    if not path:
+        die("Usage: tasks.py wave-verify-commands --tasks-file <path> -- <id>...")
+    ids = []
+    if "--" in argv:
+        for story_id in argv[argv.index("--") + 1 :]:
+            if story_id not in ids:
+                ids.append(story_id)
+    docs = read_docs(path, "wave-verify-commands")
+    groups = {}
+    missing = []
+    for story_id in ids:
+        found = None
+        for doc in docs:
+            matches = stories_with_id(doc, story_id)
+            if matches:
+                found = matches[0]
+                break
+        if found is None:
+            die(
+                "Error: wave-verify-commands: story "
+                + story_id
+                + " not found in tasks file "
+                + path
+            )
+        implementation = jq_index(found, "implementation", STORY)
+        command = jq_index(implementation, "verify", STORY) if isinstance(implementation, dict) else None
+        if not isinstance(command, str) or not command.strip():
+            missing.append(story_id)
+            continue
+        key = (_report_project(found) or ".", command)
+        groups.setdefault(key, []).append(story_id)
+    if missing:
+        sys.stderr.write("No implementation.verify: " + " ".join(missing) + "\n")
+    _emit(
+        [
+            {"command": command, "project": project, "stories": owners}
+            for (project, command), owners in groups.items()
+        ]
+    )
+    return 0
+
+
 def op_validate_tasks(argv):
     """The fifteen rules, one crossing, no lock -- and the errors array built
     the way bash built it.
@@ -9906,6 +9960,7 @@ _OPS = {
     "validate-ids": op_validate_ids,
     "validate-waves": op_validate_waves,
     "validate-wave-contention": op_validate_wave_contention,
+    "wave-verify-commands": op_wave_verify_commands,
     "validate-tasks": op_validate_tasks,
     "validate-story-exists": op_validate_story_exists,
     "mark-complete": _mark_op("mark-complete"),

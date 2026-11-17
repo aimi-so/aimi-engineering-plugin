@@ -1456,6 +1456,84 @@ def test_a_story_with_no_implementation_key_is_skipped_not_crashed(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# wave-verify-commands: a brand-new verb, so hand-written cases against the
+# live CLI rather than a golden replay.
+# ---------------------------------------------------------------------------
+
+
+def _wvc_story(story_id, verify="omit", project=None):
+    story = {"id": story_id}
+    if project is not None:
+        story["project"] = project
+    if verify != "omit":
+        story["implementation"] = {"verify": verify}
+    else:
+        story["implementation"] = {"files": ["a"]}
+    return story
+
+
+def _run_wave_verify_commands(tmp_path, stories, ids, tasks_arg=None):
+    root = os.path.realpath(str(tmp_path))
+    tasks_dir = os.path.join(root, ".aimi", "tasks")
+    os.makedirs(tasks_dir, exist_ok=True)
+    tasks = os.path.join(tasks_dir, "2020-01-01-verify-tasks.json")
+    with open(tasks, "w", encoding="utf-8") as fh:
+        fh.write(_waves_doc(stories))
+    return subprocess.run(
+        ["bash", CLI, "wave-verify-commands", *ids, "--tasks-file", tasks_arg or tasks],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+def test_wave_verify_commands_groups_by_project_and_exact_text(tmp_path):
+    stories = [
+        _wvc_story("US-001", "make test", "apps/web"),
+        _wvc_story("US-002", "make test"),
+        _wvc_story("US-003", "make test", "apps/web"),
+        _wvc_story("US-004", "make test "),
+        _wvc_story("US-005"),
+    ]
+    proc = _run_wave_verify_commands(
+        tmp_path, stories, ["US-003", "US-001", "US-002", "US-004", "US-005", "US-001"]
+    )
+    assert proc.returncode == 0
+    assert json.loads(proc.stdout) == [
+        {"command": "make test", "project": "apps/web", "stories": ["US-003", "US-001"]},
+        {"command": "make test", "project": ".", "stories": ["US-002"]},
+        {"command": "make test ", "project": ".", "stories": ["US-004"]},
+    ]
+    assert "No implementation.verify: US-005" in proc.stderr
+
+
+def test_wave_verify_commands_blank_and_empty_union(tmp_path):
+    stories = [_wvc_story("US-001", "   "), _wvc_story("US-002", 7)]
+    proc = _run_wave_verify_commands(tmp_path, stories, ["US-001", "US-002"])
+    assert proc.returncode == 0 and json.loads(proc.stdout) == []
+    assert "No implementation.verify: US-001 US-002" in proc.stderr
+    proc = _run_wave_verify_commands(tmp_path, stories, [])
+    assert proc.returncode == 0 and json.loads(proc.stdout) == []
+
+
+def test_wave_verify_commands_refuses_unknown_malformed_and_outside_ids(tmp_path):
+    stories = [_wvc_story("US-001", "true")]
+    proc = _run_wave_verify_commands(tmp_path, stories, ["US-099"])
+    assert proc.returncode == 1
+    assert "Error: wave-verify-commands: story US-099 not found in tasks file" in proc.stderr
+    proc = _run_wave_verify_commands(tmp_path, stories, ["US-1"])
+    assert proc.returncode == 1 and "Invalid story ID format" in proc.stderr
+    proc = _run_wave_verify_commands(tmp_path, stories, ["US-001"], tasks_arg="/etc/passwd")
+    assert proc.returncode != 0 and "escapes project root" in proc.stderr
+
+
+def test_wave_verify_commands_is_listed_in_help():
+    proc = subprocess.run(["bash", CLI, "help"], capture_output=True, text=True, timeout=120)
+    assert "    wave-verify-commands <id>... [--tasks-file <path>]" in proc.stdout
+
+
+# ---------------------------------------------------------------------------
 # normalize-waves: a brand-new verb, so these are hand-written rather than a
 # golden replay -- there is no jq implementation it ports and none to compare
 # against. The rule itself is asserted only by import (compute_waves lives in
@@ -7121,6 +7199,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "validate-ids",
         "validate-waves",
         "validate-wave-contention",
+        "wave-verify-commands",
         "validate-tasks",
         "validate-story-exists",
         "mark-complete",

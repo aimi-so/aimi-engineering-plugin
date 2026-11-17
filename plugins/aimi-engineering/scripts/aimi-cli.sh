@@ -13945,6 +13945,32 @@ cmd_validate_wave_contention() {
   python3 "$(_aimi_tasks_py)" validate-wave-contention --tasks-file "$tasks_file"
 }
 
+# List the deduplicated implementation.verify commands of the stories a wave
+# merged, keyed on (project, exact command) with the owning story ids.
+# Usage: wave-verify-commands <id>... [--tasks-file <path>]
+cmd_wave_verify_commands() {
+  local tasks_file=""
+  local -a positional=()
+  _parse_positional_tasks_file tasks_file positional "$@"
+
+  local id
+  for id in "${positional[@]+"${positional[@]}"}"; do
+    validate_story_id "$id"
+  done
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+
+  # A pure reader: no lock, no temp file, one crossing. The op checks that
+  # every id exists itself, so there is no per-id validate_story_exists.
+  check_python3
+  python3 "$(_aimi_tasks_py)" wave-verify-commands --tasks-file "$tasks_file" -- "${positional[@]+"${positional[@]}"}"
+}
+
 # Validate tasks file citation fields
 # For schemaVersion >= 3.3: validates DesignSpec verbatim citations for visual
 # stories and BusinessSpec field citations for a frontend-only file's endpoints,
@@ -18047,6 +18073,9 @@ COMMANDS:
                               Compute waves from dependsOn, compare to stored wave, report mismatches
     validate-wave-contention [--tasks-file <path>]
                               Refuse a wave whose stories claim the same path in implementation.files
+    wave-verify-commands <id>... [--tasks-file <path>]
+                              List a wave's deduplicated implementation.verify commands as
+                              {command, project, stories} JSON. Read-only, no lock.
     validate-tasks [--tasks-file <path>]
                               Validate tasks file citation fields (schemaVersion guard, no checks yet)
     cascade-skip <id> [--tasks-file <path>]
@@ -19744,6 +19773,7 @@ main() {
     triage-verify) shift; cmd_triage_verify "$@" ;;
     validate-waves)    shift; cmd_validate_waves "$@" ;;
     validate-wave-contention) shift; cmd_validate_wave_contention "$@" ;;
+    wave-verify-commands) shift; cmd_wave_verify_commands "$@" ;;
     validate-tasks)    shift; cmd_validate_tasks "$@" ;;
     cascade-skip)      shift; cmd_cascade_skip "$@" ;;
     reset-orphaned)    shift; cmd_reset_orphaned "$@" ;;
