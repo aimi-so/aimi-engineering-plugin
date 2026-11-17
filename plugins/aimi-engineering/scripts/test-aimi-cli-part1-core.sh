@@ -52,6 +52,34 @@ CLI="$SCRIPT_DIR/aimi-cli.sh"
 # General Tests
 # ============================================================================
 
+# Prints, space-separated, every verb main() dispatches that has no entry line
+# in the help text. Verbs come from the case arms of main() only (4-space
+# indent), a|b alternations split, help/--help/-h dropped. Prints
+# EXTRACTION-EMPTY when fewer than 50 verbs were read, so an empty extraction
+# can never pass vacuously. Keeps no exemption list.
+_verbs_missing_from_help() {
+  local cli_file="$1" help_file="$2"
+  local verbs verb missing="" count=0
+  verbs=$(sed -n '/^main() {/,/^}$/p' "$cli_file" 2>/dev/null \
+    | grep -E '^    [-a-z0-9|]+\)' \
+    | sed -E 's/^    ([-a-z0-9|]+)\).*/\1/' \
+    | tr '|' '\n' \
+    | grep -v -E '^(help|--help|-h)$' \
+    | sort -u || true)
+  while IFS= read -r verb; do
+    [ -n "$verb" ] || continue
+    count=$((count + 1))
+    if ! grep -q -E "^    ${verb}( |\$)" "$help_file"; then
+      missing="${missing:+$missing }$verb"
+    fi
+  done <<< "$verbs"
+  if [ "$count" -lt 50 ]; then
+    echo "EXTRACTION-EMPTY"
+    return 0
+  fi
+  echo "$missing"
+}
+
 test_help() {
   echo ""
   echo "=== Testing help command ==="
@@ -62,6 +90,19 @@ test_help() {
   assert_contains "aimi-cli.sh" "$output" "help shows script name"
   assert_contains "init-session" "$output" "help shows init-session"
   assert_contains "mark-complete" "$output" "help shows mark-complete"
+}
+
+test_help_lists_every_dispatched_verb() {
+  echo ""
+  echo "=== Testing help lists every dispatched verb ==="
+
+  local help_file missing
+  help_file=$(mktemp)
+  "$CLI" help > "$help_file" 2>&1 || true
+  missing=$(_verbs_missing_from_help "$CLI" "$help_file")
+  rm -f "$help_file"
+
+  assert_eq "" "$missing" "help has an entry line for every dispatched verb (missing: ${missing:-none})"
 }
 
 test_find_tasks() {
@@ -11842,6 +11883,7 @@ main() {
   echo ""
   echo "--- General Tests ---"
   test_help
+  test_help_lists_every_dispatched_verb
   test_find_tasks
   test_init_session
   test_metadata

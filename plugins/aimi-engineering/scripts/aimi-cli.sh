@@ -17874,6 +17874,8 @@ USAGE:
 COMMANDS:
     init-session              Initialize execution session, save state
     find-tasks                Find most recent tasks file
+    find-tasks-all            List every tasks file under .aimi/tasks (depth 1-3) as
+                              absolute paths, one per line; exits 1 when none exist
     status [--counts-only] [--tasks-file <path>]
                               Get status summary as JSON
                               --counts-only  Return aggregate counts without userStories array
@@ -17897,7 +17899,7 @@ COMMANDS:
                               --brief  Return only {id, title, priority, dependsOn} per story
     mark-in-progress <id> [--tasks-file <path>]
                               Mark story as in_progress (returns {id, status} JSON)
-    mark-complete <id> [--tasks-file <path>]
+    mark-complete <id> [--evidence <json>] [--tasks-file <path>]
                               Mark story as completed (returns {id, status} JSON)
     mark-failed <id> [notes] [--tasks-file <path>]
                               Mark story as failed (returns {id, status, notes} JSON)
@@ -18621,6 +18623,10 @@ COMMANDS:
                                        also heals a stale or foreign-root GLOBAL cli-path
                                        pointer, reported as globalCli in the JSON
     cleanup-versions          Remove old cached plugin versions, keep latest only
+    prime-cache               Write this script's path into the host's cli-path cache
+                              when none is recorded yet; prints {status, path, host,
+                              version, message}. Exits 0 for ok, already_current and
+                              not_found, 1 for error
     list-archivable           List task files where all stories are completed/skipped (JSON array)
     archive-task <path>       Move completed task file (and linked brainstorm) to .aimi/archive/
     research-lookup [--ignore-missing-cited-paths] <path>
@@ -19405,6 +19411,43 @@ COMMANDS:
                               completed; any failed -> verification_failed; else
                               in_progress) and corrects any divergent phase status.
                               Prints {corrections:[{id,from,to}...]}.
+    validate-contracts <feature> [--phase <id>] [--agent-mode]
+                              Read-only. Cross-checks creates[]/needs[] contracts.
+                              Artifact identity is the entry's own identity field.
+                              Always sanitizes creates/needs entries first; any hit
+                              names the phase id and field (never the raw string)
+                              and exits 1, regardless of --agent-mode. Then checks
+                              duplicate creates (same identity declared by 2+
+                              phases, regardless of status): blocks with exit 1 by
+                              default, naming both phase ids and the identity;
+                              --agent-mode demotes this one finding to a stderr
+                              warning and continues. Then resolves every needs
+                              entry in scope (--phase <id> only, or every phase
+                              when omitted) against creates identities reachable
+                              through the needing phase's dependsOn closure.
+                              Without --phase, identity resolution alone satisfies
+                              a need. With --phase, the resolved provider phase must
+                              also have status completed AND list the identity
+                              under its phase-<dir>/handoff.md "Artifacts Created"
+                              section, else the need is missing with reason
+                              not-delivered; this delivery check always blocks.
+                              Emits {valid, missing:[{phase,need,reason}],
+                              providers:{<need>: <providerPhaseId>}} (plus
+                              duplicateWarnings when --agent-mode demoted a
+                              collision). Exit 0 when valid, 1 otherwise.
+    roadmap-sweep <feature>   Read-only, advisory-only residual sweep.
+                              NEVER exits non-zero. Reports every creates identity
+                              that no needs entry anywhere in the roadmap
+                              references, as orphanCreates:[{phase,creates}].
+                              Reports every needs
+                              entry that resolves (by identity, anywhere in the
+                              roadmap) to a creates entry from a not-yet-completed
+                              phase, as deferredNeeds:[{phase,need,deferred:
+                              <providerPhaseId>}]. Suspicious creates/needs content
+                              is dropped before either check runs and surfaced
+                              instead as warnings:[{phase,field,message}], naming
+                              only the phase id and field, never the raw string.
+                              Emits {orphanCreates, deferredNeeds, warnings}.
     phase-overlap <feature> <phase-a> <phase-b>
                               Deterministic stage-2 check for the sibling-phase
                               overlap guard. Loads both phases' already-expanded
