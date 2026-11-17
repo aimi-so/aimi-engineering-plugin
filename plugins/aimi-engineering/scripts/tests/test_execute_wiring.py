@@ -392,6 +392,21 @@ def test_shipped_no_arguments_read_in_execute_references(corpus):
     _assert_clean(check_no_arguments_read_in_execute_references(corpus))
 
 
+def test_paired_split_reaches_wave_reconcile_without_a_second_read(corpus):
+    """The split merge step names wave-reconcile.md by path; only Step 4 reads it."""
+    key = REFERENCES_PREFIX + "paired-split-merge-and-continue.md"
+    assert key in corpus and ROUTER_KEY in corpus
+    text = corpus[key]
+    heads = ("### Merge Split Branches Into the Phase Branch", "### Integrated Split Check", "### Clean Up Split Worktrees")
+    at = [text.find(h + "\n") for h in heads]
+    assert all(i >= 0 for i in at), "missing heading among %s" % (heads,)
+    assert at[0] < at[1] < at[2], "Integrated Split Check is outside the span between merge and cleanup"
+    section = text[at[1]:at[2]]
+    assert "`commands/references/execute/wave-reconcile.md`" in section
+    readers = [e["heading"] for e in router_entries(corpus[ROUTER_KEY]) if any(b == "wave-reconcile.md" for _i, b in e["reads"])]
+    assert len(readers) == 1, "wave-reconcile.md is read by %d router entries: %s" % (len(readers), readers)
+
+
 # ---------------------------------------------------------------------------
 # The checks must be able to fail: ten damaged copies, one targeted check each
 # ---------------------------------------------------------------------------
