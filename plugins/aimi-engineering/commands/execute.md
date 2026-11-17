@@ -341,6 +341,7 @@ Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute
 
 Applies when: `PHASE_SPLIT_MODE=false`, Step 3 did not report its Re-verify block and the pending count was above zero. Otherwise skip this file (default: Step 3 did not fire the re-verify branch).
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/step-4-wave-execution-loop.md in full.
+Before the integrated check after each group's merge, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/wave-reconcile.md in full.
 
 
 ### Post-Loop Cleanup
