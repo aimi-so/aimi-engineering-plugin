@@ -5539,7 +5539,15 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     # reaches the disk only through confined_spec_path, and the read goes
     # through _read_json_object, so no open() arrived with them. No new root,
     # and the verb writes nothing.
-    assert code.count("os.path.") == 68
+    #
+    # The last ONE is op_validate_wave_contention's join of --project-root
+    # with .aimi/config.json, the fixed location of the bookkeeping
+    # declaration. --project-root is PROJECT_ROOT, which the wrapper passes
+    # itself and never takes from a caller, and the join composes a string
+    # only: the read happens in bookkeeping.load_declaration, which owns the
+    # declaration's refusals (a tracked or malformed config), so no open()
+    # arrived with it. The verb still writes nothing.
+    assert code.count("os.path.") == 69
     assert code.count("os.path.isfile(") == 11  # 9 + acknowledge-evidence's two
     assert code.count("os.path.isdir(") == 4  # 3 + R23's verify_grep_directory_findings
     confinement = code.split("def confined_spec_path", 1)[1].split("\ndef ", 1)[0]
