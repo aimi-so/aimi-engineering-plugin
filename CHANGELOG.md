@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.163.0] - 2026-11-17
+
+A clean merge of a wave is now checked as a whole before any of its stories is marked complete, so two stories that merge without a conflict but break each other are caught at the wave that caused it.
+
+### Added
+- The integrated wave check: after each project group's merge, `/aimi:execute` runs the union of the merged stories' verify commands on the merged tree, in Step 4, after a paired split merge, and on resume.
+- `wave-verify-commands`, which prints the deduplicated verify commands of a set of stories with the stories that own each.
+- The INTEGRATION CHECK FAILED stop, which prints `PRE_RECONCILE_SHA` and its reset command, keeps the group's worktrees and branches, and leaves the stories `in_progress`.
+- Up to 2 reconcile rounds with a flaky-command filter, and a re-verify on resume for stories an integration stop left merged but unchecked.
+- `docs/dev/execute-wave-loop.md` gains an Integrated wave verification section.
+
+### Changed
+- A story merged in a wave is marked complete only after the integrated check passes or is skipped for a lone verified story.
+
 ## [1.162.0] - 2026-11-15
 
 A run that delivered a usable surface is now judged by using it. After a phase's Phase Visual Gate, or after a flat run's Finalize, a validator brings the product up from a recorded recipe and walks each acceptance criterion through it with proof for what it reports.

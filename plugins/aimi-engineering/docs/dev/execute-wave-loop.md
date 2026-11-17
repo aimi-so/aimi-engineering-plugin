@@ -222,6 +222,8 @@ The step used to stop at every conflict and hand it to a person. In practice the
 - A merge that never started (an untracked file in the way, which `merge-all` reports as "Merge did not start") has no conflicted file and is not a conflict to resolve, so it still stops.
 - After a resolution, `merge-all` runs again over the stories not yet reachable from the target, found with the same `merge-base --is-ancestor` test the cleanup below uses, so a second conflict in the same group goes through the same loop.
 
+A merge that ends clean, or is resolved this way, is still checked afterwards as a whole; that check is described in "Integrated wave verification" below.
+
 ## Conflict cleanup keeps unmerged branches
 
 Cleanup this wave's worktrees -- but ONLY the ones whose work
@@ -240,6 +242,18 @@ of "Wave merge conflicts are resolved in place" above, and stops only
 when that fails. Its verifies run from the merge directory, never from
 a `SPLIT_PLAN` record's `.root`, which in a multi-repo layout is the
 repository's main checkout and not where the merge is in progress.
+
+## Integrated wave verification
+
+The wiring lives in three places: step-4-wave-execution-loop.md § Integrated Wave Check, paired-split-merge-and-continue.md § Integrated Split Check and step-1-execution-mode.md § Integrated Re-verify on Resume. The procedure they share is `commands/references/execute/wave-reconcile.md`. This section records why it reads as it does.
+
+**Why a clean merge is checked.** Stories of one wave are verified each in its own worktree, against a base that does not hold their siblings' work. Two merges can both apply without a textual conflict and still contradict each other: one story renames what the other calls, or both add an entry the same registry refuses to hold twice. `scripts/tests/test_wave_integration_fixture.py` is the executable proof: it builds two stories in a real git repository whose merges are clean and whose merged tree fails. A break left on the integration branch becomes the base of the next wave, so every later story would be verified on top of it and the failure would surface far from its cause. And a story marked complete before the check would carry a false status. So the check runs per project group, right after that group's merge and before that group's `mark-complete` loop. It is not left to the end of the run, because by then the break has been built on and cannot be attributed to a wave.
+
+**What runs, and how.** `wave-verify-commands` prints the deduplicated union of the `implementation.verify` commands of the merged stories, each with the stories that own it. The orchestrator runs them one at a time, each in its own Bash call, with the full output in a log under `.aimi/wave-verify` and only the tail in its own context. Only stories whose executor recorded verify evidence enter the union; the rest are reported as not re-verified. A lone merged story whose merged tree equals its verified commit is skipped, since the tree was already verified as it stands. The in-place conflict loop's own verifies do not replace the check: they cover the stories involved in one conflict, not the whole wave.
+
+**The reconcile design.** A failing union gets at most 2 reconcile rounds. Each round is a fresh worker, and the orchestrator never trusts its report: it re-runs the whole union itself. Before the first round each failing command is re-run once, unchanged, so a flaky command is reported and not reconciled. A round may not touch `.aimi/`, a tasks file, any story's verify text or `.git/`; such an edit is undone and ends the check. A round that makes no commit counts as spent, and a round after which more commands fail than before ends reconciliation at once. The stop is headed INTEGRATION CHECK FAILED, distinct from the merge conflict stop. It prints PRE_RECONCILE_SHA with the `git reset --hard` command that returns the branch to the merged state, keeps the group's worktrees and branches, and leaves the stories `in_progress`.
+
+**Why a later run re-verifies instead of re-executing.** After the stop, the stories are merged but unchecked. `reset-orphaned` would mark every `in_progress` story failed, and a failed story stays failed, so a plain resume would lose work that is already on the branch. The re-verify therefore runs first, recognizes a story only when it is `in_progress`, has exactly one matching branch with a commit of its own and that branch is an ancestor of the integration branch, and hands those stories back to the same procedure. On a pass they are completed; on another stop they stay as they were.
 
 ## knownGaps extraction
 
