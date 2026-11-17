@@ -102,6 +102,8 @@ Dependency validation failed:
 Fix the dependency graph in the tasks file and re-run /aimi:execute.
 ```
 
+When Step 1 echoed a non-empty INTEGRATED_UNCHECKED, run the Integrated Re-verify on Resume section of `commands/references/execute/step-1-execution-mode.md` here, resolving `$WORKTREE_MGR` as Step 3.1 does. It runs here because it needs the claim, the branches Step 2 set up and `$WORKTREE_MGR`, and it must end before Step 4's first `list-ready`: that verb skips an `in_progress` story that `count-pending` still counts, so the wave loop would read it as a deadlock. Use the re-read `count-pending` for the start report below.
+
 Report start:
 ```
 Starting autonomous execution...
