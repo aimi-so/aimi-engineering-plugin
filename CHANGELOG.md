@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.164.0] - 2026-11-17
+
+Files that every story touches by design, such as a changelog or a version manifest, no longer serialize a wave or stop its merge when the project declares them and a rule can reconcile them.
+
+### Added
+- `bookkeeping-declared`, a read-only verb that prints a project's declared bookkeeping paths and rules from the untracked `.aimi/config.json`.
+- `bookkeeping-resolve`, a writer that resolves declared, conflicted files mid-merge by rule (`union-lines`, `max-version`, `sum-delta`, `size-step`), writing all resolved files in one pass or none and leaving unclaimed files conflicted.
+- `commands/references/execute/bookkeeping-resolve.md`, the step that runs the resolver before the judgment loop of the wave merge and reports each resolution.
+- `docs/dev/bookkeeping.md`, and a section in `docs/dev/execute-wave-loop.md` on the loop ordering.
+
+### Changed
+- `wave_contention` and the cross-story auditor ignore declared bookkeeping paths when deciding which stories share a file.
+- The reconcile loop is told which files were machine-resolved and does not hand-edit them.
+
 ## [1.163.0] - 2026-11-17
 
 A clean merge of a wave is now checked as a whole before any of its stories is marked complete, so two stories that merge without a conflict but break each other are caught at the wave that caused it.

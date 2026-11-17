@@ -224,6 +224,20 @@ The step used to stop at every conflict and hand it to a person. In practice the
 
 A merge that ends clean, or is resolved this way, is still checked afterwards as a whole; that check is described in "Integrated wave verification" below.
 
+## Bookkeeping files are resolved by declared rule
+
+This extends "Wave merge conflicts are resolved in place" above and does not repeat it. The procedure is `commands/references/execute/bookkeeping-resolve.md`; the declaration, the rules and the safety rules are in `docs/dev/bookkeeping.md`.
+
+**The order.** The resolver runs after `merge-all` stops and before the judgment loop. Only the conflicted files the resolver did not resolve, the unclaimed and the undeclared ones, are judged. A file a rule wrote is no longer a conflict anyone reasons about, so spending the loop on it would only invite a hand edit of a value a rule already computed.
+
+**Why the order matters, and what stays the same.**
+
+- `verify` still runs when every conflicted file is declared. Involved stories are taken over every conflicted file, resolved and judged alike, because a rule's output is a computed guess and the stories that wrote the file are the ones that can tell whether it holds.
+- Both sets are staged together, with one `git add` and one commit after the verifies pass, and restored together with `git checkout --merge` on failure. Staging the resolved set early would leave git unable to put its own conflict back, which is the property the in-place loop keeps.
+- The integrated wave check runs after resolution, as it does after any merge. It is what catches a computed number that is wrong.
+- A refusal of kind `unproducible` stops before any judgment, with the existing MERGE CONFLICT report. The verb wrote nothing, so no restore is needed and a re-run starts from the same conflict.
+- The reconcile loop is told which files were machine-resolved and must not hand-edit them; a failure that traces to one is reported, not patched around.
+
 ## Conflict cleanup keeps unmerged branches
 
 Cleanup this wave's worktrees -- but ONLY the ones whose work
