@@ -306,6 +306,19 @@ def test_get_story_context_is_approved(line):
     assert run_hook(line), f"a get-story-context shape was not auto-approved:\n  {line}"
 
 
+BOOKKEEPING_DECLARED_SHAPES = [
+    "$AIMI_CLI bookkeeping-declared",
+    "$AIMI_CLI bookkeeping-declared --project .",
+    "${AIMI_CLI} bookkeeping-declared --project web",
+]
+
+
+@pytest.mark.parametrize("line", BOOKKEEPING_DECLARED_SHAPES)
+def test_bookkeeping_declared_is_approved(line):
+    """The reader verb is approved with and without flags."""
+    assert run_hook(line), f"a bookkeeping-declared shape was not auto-approved:\n  {line}"
+
+
 # The read-only usage-validation verbs are approved bare; the ones that run a
 # recipe command or write state are not (see ADVERSARIAL below).
 USAGE_READ_VERBS = [

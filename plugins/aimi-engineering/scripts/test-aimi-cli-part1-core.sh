@@ -1538,7 +1538,7 @@ test_validators_moved_to_tasks_py() {
   # no jq left, and — unlike the eleven writers — no lock, because there is
   # nothing to serialize against a verb that only reads.
   local fn body
-  for fn in cmd_validate_deps cmd_validate_stories cmd_validate_ids cmd_validate_waves cmd_validate_wave_contention; do
+  for fn in cmd_validate_deps cmd_validate_stories cmd_validate_ids cmd_validate_waves cmd_validate_wave_contention cmd_bookkeeping_declared; do
     body=$(_cmd_body "$fn")
     assert_eq "1" "$(printf '%s\n' "$body" | grep -c 'python3 ' || true)" \
       "validators: $fn makes exactly one python3 call"

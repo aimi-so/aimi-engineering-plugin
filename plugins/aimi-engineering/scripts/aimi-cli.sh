@@ -12063,6 +12063,40 @@ cmd_deps_recipe_record() {
   return "$rc"
 }
 
+# bookkeeping-declared [--project <key>]
+#
+# Prints one project key's effective bookkeeping declaration from
+# <AIMI_ROOT>/.aimi/config.json as one JSON line. A pure reader: no lock, one
+# crossing into scripts/bookkeeping_declared.py, which owns the document rules.
+# It refuses without the interpreter rather than answering an empty declaration,
+# because an empty answer would read as "nothing is declared". --project is a
+# value, not a path, and stays out of _PATH_ARG_FLAGS.
+cmd_bookkeeping_declared() {
+  local project="."
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project)
+        if [ $# -lt 2 ]; then
+          echo "Error: bookkeeping-declared: --project requires a value" >&2
+          echo "Usage: aimi-cli.sh bookkeeping-declared [--project <key>]" >&2
+          exit 1
+        fi
+        project="$2"; shift 2 ;;
+      *)
+        echo "Error: bookkeeping-declared: unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh bookkeeping-declared [--project <key>]" >&2
+        exit 1 ;;
+    esac
+  done
+
+  check_python3
+
+  local config="$AIMI_DIR/config.json"
+  validate_path_in_project "$config"
+
+  python3 "$(_aimi_script_py bookkeeping_declared.py)" declared --config "$config" --project "$project"
+}
+
 # usage-recipe-record --project <key> (--serve <cmd> | --cli <cmd>) [flags]
 # usage-recipe-get --project <key>
 #
@@ -18549,6 +18583,12 @@ COMMANDS:
                               (research=fast/haiku, review=powerful/opus,
                               design+workflow+executor=balanced/sonnet).
                               Emits the written JSON on stdout.
+    bookkeeping-declared [--project <key>]
+                              Print one project key's bookkeeping declaration from
+                              .aimi/config.json as one JSON line {project, paths}; paths
+                              maps each declared shared file to its rule. Absence prints
+                              an empty paths; a malformed or git-tracked declaration
+                              exits 1. Read-only (key defaults to ".").
     deps-recipe-record --project <key> --command <cmd>
                               Record the install command a person confirmed for one
                               project key at dependencies.install[<key>] of
@@ -19813,6 +19853,7 @@ main() {
     apply-audit-patches) shift; cmd_apply_audit_patches "$@" ;;
     validate-outline) shift; cmd_validate_outline "$@" ;;
     validate-staging) shift; cmd_validate_staging "$@" ;;
+    bookkeeping-declared) shift; cmd_bookkeeping_declared "$@" ;;
     deps-recipe-record) shift; cmd_deps_recipe_record "$@" ;;
     usage-recipe-record) shift; cmd_usage_recipe_record "$@" ;;
     usage-recipe-get) shift; cmd_usage_recipe_get "$@" ;;
