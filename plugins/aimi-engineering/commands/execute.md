@@ -288,7 +288,7 @@ Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute
 ### Aggregated Completion Report (Phase-Mode Paired Split)
 
 Applies when: `PHASE_MODE=true` and `PHASE_SPLIT_MODE=true`, once the spawned split sub-orchestrators have finished. Otherwise skip it (default `PHASE_SPLIT_MODE=false`).
-Covers: `### Merge Split Branches Into the Phase Branch`, `### Clean Up Split Worktrees`, `### Continue to Phase Completion`.
+Covers: `### Merge Split Branches Into the Phase Branch`, `### Integrated Split Check`, `### Clean Up Split Worktrees`, `### Continue to Phase Completion`.
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/paired-split-merge-and-continue.md in full.
 
 

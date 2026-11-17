@@ -53,7 +53,7 @@ references/execute/phase-completion-handoff-and-mark.md	24576
 references/execute/phase-completion-offer-pull-request.md	28672
 references/execute/step-4-wave-execution-loop.md	53248
 references/execute/step-5-completion.md	36864
-references/execute/paired-split-merge-and-continue.md	24576
+references/execute/paired-split-merge-and-continue.md	28672
 references/execute/step-1-7-claim-the-phase.md	20480
 references/execute/step-0-9-split-flow.md	20480
 references/execute/usage-validation-loop.md	20480
