@@ -12097,6 +12097,57 @@ cmd_bookkeeping_declared() {
   python3 "$(_aimi_script_py bookkeeping_declared.py)" declared --config "$config" --project "$project"
 }
 
+# bookkeeping-resolve [--project <key>] [--root <dir>]
+#
+# In a repository mid-merge, resolves the declared bookkeeping files of one
+# project key by their declared rule and rewrites them in the working tree,
+# printing {resolved, unclaimed, refused}. One crossing into
+# scripts/bookkeeping_resolve.py, which owns the rules. A writer with no honest
+# degrade, so a missing interpreter refuses before anything is read or written.
+# It writes only inside --root and no .aimi/ state, so it takes no lock, and it
+# stages nothing. --project is a value; --root is a path, rebased onto the
+# caller by main() and confined here with the config path.
+cmd_bookkeeping_resolve() {
+  local project="." root=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project)
+        if [ $# -lt 2 ]; then
+          echo "Error: bookkeeping-resolve: --project requires a value" >&2
+          echo "Usage: aimi-cli.sh bookkeeping-resolve [--project <key>] [--root <dir>]" >&2
+          exit 1
+        fi
+        project="$2"; shift 2 ;;
+      --root)
+        if [ $# -lt 2 ]; then
+          echo "Error: bookkeeping-resolve: --root requires a value" >&2
+          echo "Usage: aimi-cli.sh bookkeeping-resolve [--project <key>] [--root <dir>]" >&2
+          exit 1
+        fi
+        root="$2"; shift 2 ;;
+      *)
+        echo "Error: bookkeeping-resolve: unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh bookkeeping-resolve [--project <key>] [--root <dir>]" >&2
+        exit 1 ;;
+    esac
+  done
+
+  if [ -z "$root" ]; then
+    root=$(_caller_project_dir)
+    [ -n "$root" ] || root="$PWD"
+  fi
+  root=$(resolve_path "$root")
+  validate_path_in_project "$root"
+
+  check_python3
+
+  local config="$AIMI_DIR/config.json"
+  validate_path_in_project "$config"
+
+  python3 "$(_aimi_script_py bookkeeping_resolve.py)" resolve \
+    --config "$config" --root "$root" --project "$project"
+}
+
 # usage-recipe-record --project <key> (--serve <cmd> | --cli <cmd>) [flags]
 # usage-recipe-get --project <key>
 #
@@ -18590,6 +18641,15 @@ COMMANDS:
                               maps each declared shared file to its rule. Absence prints
                               an empty paths; a malformed or git-tracked declaration
                               exits 1. Read-only (key defaults to ".").
+    bookkeeping-resolve [--project <key>] [--root <dir>]
+                              In a repository mid-merge, resolve the project key's
+                              declared bookkeeping files (key defaults to ".", root to
+                              the caller's directory, which must be a repository top
+                              level) by their rule, read from the index stages, and
+                              rewrite them in the working tree without staging them.
+                              Prints {resolved, unclaimed, refused}; an unclaimed file
+                              stays conflicted for judgment, a refused one exits 1 and
+                              nothing is written. Needs python3.
     deps-recipe-record --project <key> --command <cmd>
                               Record the install command a person confirmed for one
                               project key at dependencies.install[<key>] of
@@ -19855,6 +19915,7 @@ main() {
     validate-outline) shift; cmd_validate_outline "$@" ;;
     validate-staging) shift; cmd_validate_staging "$@" ;;
     bookkeeping-declared) shift; cmd_bookkeeping_declared "$@" ;;
+    bookkeeping-resolve) shift; cmd_bookkeeping_resolve "$@" ;;
     deps-recipe-record) shift; cmd_deps_recipe_record "$@" ;;
     usage-recipe-record) shift; cmd_usage_recipe_record "$@" ;;
     usage-recipe-get) shift; cmd_usage_recipe_get "$@" ;;
