@@ -433,6 +433,7 @@ while true:
     # Merge successful worktrees grouped by project.
     # Each project group merges independently into its own repo's branch.
 
+    integrated_checks = []
     if len(succeeded_stories) > 0:
         # Group succeeded stories by project
         succeeded_by_project = {}
@@ -513,6 +514,15 @@ while true:
                     $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
 
                 STOP execution.
+
+            # Integrated Wave Check
+            # Read wave-reconcile.md; hand it label "wave [wave]", group_key, merge_cwd, merge_target,
+            # base_sha[group_key], merged_stories = this group's `stories` with their worktree names
+            # (never tasks.json `wave`), WAVE_TASKS_FILE, AIMI_ROOT, PLAN_DISC, result_payload_by_id,
+            # and other_groups (from succeeded_by_project and group_key).
+            # The integration stop STOPs there: none of this group's stories is marked complete.
+            status = wave-reconcile.md's procedure
+            integrated_checks.append("[group_key]: [status]")
 
             # Merges succeeded for this project group — mark stories complete
             for full_story in stories:
@@ -765,7 +775,13 @@ Output your full structured review under the heading '## Design Implementation R
         wave_summary += ", [len(action_gates)] action gate(s) pending"
     if len(verify_gates) > 0:
         wave_summary += ", [len(verify_gates)] verify gate(s) pending"
+    if len(integrated_checks) > 0:
+        wave_summary += "; integrated check: " + "; ".join(integrated_checks)
     Report: wave_summary
     wave += 1
 ```
 
+
+### Integrated Wave Check
+
+The check runs per project group, right after that group's merge and before that group's `mark-complete` loop, because a stop leaves the group's stories `in_progress` for the re-verify. `wave-verify-commands` lists the commands and `commands/references/execute/wave-reconcile.md` holds the skip rule, the union, the rounds and the stop. The in-place conflict loop's own verifies do not replace it.
