@@ -57,7 +57,8 @@ references/execute/paired-split-merge-and-continue.md	28672
 references/execute/step-1-7-claim-the-phase.md	20480
 references/execute/step-0-9-split-flow.md	20480
 references/execute/usage-validation-loop.md	20480
-brainstorm.md	122880
+brainstorm.md	49152
+references/brainstorm/phase-2-visual-variant-rendering.md	24576
 open-pr.md	94208
 references/forge-contract.md	45056
 references/container-execution.md	36864

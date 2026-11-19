@@ -68,6 +68,43 @@ STEP_07_FILES = (
     "step-0-7-bundle-prototype-gate.md",
 )
 PHASE_FILES = ("phase-0-assess-clarity.md", "phase-1-research.md")
+# Phase 1.7 to Phase 3.9, in router order: (file, router heading, what its Applies when line must hold).
+# None means the line must open with `every run`; a string must appear in the line.
+LATE_PHASE_ENTRIES = (
+    ("phase-1-7-ui-detection.md", "Phase 1.7: UI Feature Detection", None),
+    ("phase-1-8-foundation-detection.md", "Phase 1.8: Greenfield Foundation Detection", None),
+    ("phase-2-questions.md", "Phase 2: Batched Questions", None),
+    ("phase-2-visual-variant-rendering.md", "Phase 2 Visual Variant Rendering", ("Aesthetic Direction", "Differentiation", "visualOverridePending = true", "skip the file")),
+    ("phase-2-present-questions.md", "Phase 2 Present Questions", None),
+    ("phase-3-resolve-approach.md", "Phase 3: Resolve Approach (Fallback)", None),
+    ("phase-3-5-roadmap-gate.md", "Phase 3.5: Roadmap Definition Gate", None),
+    ("phase-3-6-prototype-offer.md", "Phase 3.6: Prototype Offer Gate", None),
+    ("phase-3-7-fire-check.md", "Phase 3.7: Foundation Synthesis", None),
+    ("phase-3-7-foundation-synthesis.md", "Phase 3.7 Foundation Synthesis Steps", ("phase37Verdict", "`fired`", "skip the file")),
+    ("phase-3-8-classification-summary.md", "Phase 3.8: Classification Summary Line", None),
+    ("phase-3-9-business-contract.md", "Phase 3.9: Business Contract Authoring", None),
+)
+LATE_PHASE_FILES = tuple(f for f, _h, _c in LATE_PHASE_ENTRIES)
+# Headings that moved out of brainstorm.md: none may remain there, each is in exactly one reference file.
+MOVED_HEADINGS = (
+    "### Question Generation Rules",
+    "#### Approach Questions",
+    "#### Visual Variant Rendering (Aesthetic Direction and Differentiation only)",
+    "### Present Questions",
+    "### Adaptive Rounds",
+    "### Quality Gate: Topic Coverage",
+    "### Step 1: Scope-Context Trigger Check",
+    "### Step 2: Propose the Phase Cut",
+    "### Cross-Reference: Prototype Persistence",
+    "### Step 2: Reuse Check",
+    "### Step 5: Validation Gate",
+    "### Step 2: Derive Repository Facts",
+)
+# Router-level phase headings: each stays in the router once and is repeated in its file.
+PHASE_ORDER_BEFORE_PHASE_4 = (
+    "## Phase 1.7:", "## Phase 1.8:", "## Phase 2:", "## Phase 3:", "## Phase 3.5:",
+    "## Phase 3.6:", "## Phase 3.7:", "## Phase 3.8:", "## Phase 3.9:",
+)
 FIRST_RESEARCH_TASK = 'Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"'
 # Two fences that must stay in the command body, each told apart by a marker it carries.
 ARGUMENT_FENCES = (
@@ -307,6 +344,77 @@ def check_detection_precedes_the_first_research_task(corpus):
     return problems
 
 
+def check_late_phases_are_router_entries_in_order(corpus):
+    """The twelve Phase 1.7 to 3.9 files exist, each has one Read line, in phase order after Phase 1 and before Phase 4, with the stated Applies when line."""
+    if ROUTER_KEY not in corpus:
+        return NO_ROUTER
+    router = corpus[ROUTER_KEY]
+    problems = []
+    reads = read_lines(router)
+    for f in LATE_PHASE_FILES:
+        if REFERENCES_PREFIX + f not in corpus:
+            problems.append("%s: the file does not exist" % f)
+        n = sum(1 for _i, b in reads if b == f)
+        if n != 1:
+            problems.append("%s: %d router Read lines, expected exactly 1" % (f, n))
+    order = [b for _i, b in reads]
+    if all(f in order for f in LATE_PHASE_FILES):
+        positions = [order.index(f) for f in LATE_PHASE_FILES]
+        if positions != sorted(positions):
+            problems.append("the Phase 1.7 to 3.9 entries are not in phase order")
+        if min(positions) < order.index(PHASE_FILES[1]):
+            problems.append("a Phase 1.7 to 3.9 entry sits above the Phase 1 entry")
+    by_read = {entry["reads"][0][1]: entry for entry in router_entries(router)}
+    for f, heading, cond in LATE_PHASE_ENTRIES:
+        entry = by_read.get(f)
+        if entry is None:
+            continue
+        if entry["heading"] != heading:
+            problems.append("%s: its entry heading is %r, expected %r" % (f, entry["heading"], heading))
+        read_idx = {i for i, _ in entry["reads"]}
+        applies = [l for i, l in entry["lines"] if l.startswith(APPLIES_WHEN) and i not in read_idx]
+        if not applies:
+            continue
+        line = applies[0]
+        if cond is None:
+            if not line[len(APPLIES_WHEN):].strip().startswith("every run"):
+                problems.append("%s: its Applies when line does not open with 'every run'" % f)
+        else:
+            missing = [c for c in cond if c not in line]
+            if missing:
+                problems.append("%s: its Applies when line lacks %s" % (f, ", ".join(missing)))
+    return problems
+
+
+def check_moved_headings_left_the_router(corpus):
+    """No moved heading is in brainstorm.md; each is in exactly one reference file; the assembled text orders Phase 1.7 to 3.9 before Phase 4."""
+    if ROUTER_KEY not in corpus:
+        return NO_ROUTER
+    router_lines = [l for l, in_fence in scan_lines(corpus[ROUTER_KEY]) if not in_fence]
+    problems = []
+    for h in MOVED_HEADINGS:
+        if h in router_lines:
+            problems.append("%r is still in brainstorm.md" % h)
+        holders = [
+            k[len(REFERENCES_PREFIX):] for k in _reference_names(corpus)
+            if h in [l for l, in_fence in scan_lines(corpus[k]) if not in_fence]
+        ]
+        if len(holders) != 1:
+            problems.append("%r is in %d reference files, expected exactly 1" % (h, len(holders)))
+    text = assemble(corpus)
+    phase4 = _first(text, "\n## Phase 4: Capture the Design")
+    if phase4 < 0:
+        problems.append("no Phase 4 heading in the assembled text")
+        phase4 = len(text)
+    for prefix in PHASE_ORDER_BEFORE_PHASE_4:
+        at = _first(text, "\n" + prefix)
+        if at < 0:
+            problems.append("no %r heading in the assembled text" % prefix)
+        elif at > phase4:
+            problems.append("%r follows Phase 4 in the assembled text" % prefix)
+    return problems
+
+
 def check_the_two_arguments_fences_stay_in_the_command_body(corpus):
     if ROUTER_KEY not in corpus:
         return NO_ROUTER
@@ -357,6 +465,8 @@ CHECKS = {
     "failed_read": check_router_carries_the_failed_read_sentence,
     "header": check_every_reference_file_keeps_its_header,
     "ordering": check_detection_precedes_the_first_research_task,
+    "late_entries": check_late_phases_are_router_entries_in_order,
+    "moved_headings": check_moved_headings_left_the_router,
     "arguments": check_the_two_arguments_fences_stay_in_the_command_body,
 }
 
@@ -380,15 +490,15 @@ def test_shipped_tree_passes_every_check(name, corpus):
     _assert_clean(CHECKS[name](corpus))
 
 
-def test_shipped_router_reaches_the_five_files_through_five_entries(corpus):
+def test_shipped_router_reaches_its_files_through_one_entry_each(corpus):
     reads = [b for _i, b in read_lines(corpus[ROUTER_KEY])]
-    assert reads == list(STEP_07_FILES + PHASE_FILES)
+    assert reads == list(STEP_07_FILES + PHASE_FILES + LATE_PHASE_FILES)
 
 
-def test_shipped_router_keeps_one_task_spawn_and_the_files_hold_four(corpus):
+def test_shipped_router_holds_no_task_spawn_and_the_files_hold_five(corpus):
     spawn = re.compile(r"Task subagent_type=")
-    assert len(spawn.findall(corpus[ROUTER_KEY])) == 1
-    assert sum(len(spawn.findall(corpus[k])) for k in _reference_names(corpus)) == 4
+    assert len(spawn.findall(corpus[ROUTER_KEY])) == 0
+    assert sum(len(spawn.findall(corpus[k])) for k in _reference_names(corpus)) == 5
 
 
 # ---------------------------------------------------------------------------
@@ -456,6 +566,34 @@ def _mutate_applies_when_renamed(root):
     _edit_router_lines(root, edit)
 
 
+def _mutate_visual_variant_condition_dropped(root):
+    def edit(lines, entries):
+        entry = next(e for e in entries if e["reads"][0][1] == "phase-2-visual-variant-rendering.md")
+        read_idx = {i for i, _ in entry["reads"]}
+        i = next(i for i, l in entry["lines"] if l.startswith(APPLIES_WHEN) and i not in read_idx)
+        lines[i] = "Applies when: every run."
+
+    _edit_router_lines(root, edit)
+
+
+def _mutate_late_entries_swapped(root):
+    def edit(lines, entries):
+        a = next(e for e in entries if e["reads"][0][1] == "phase-3-5-roadmap-gate.md")
+        b = next(e for e in entries if e["reads"][0][1] == "phase-3-6-prototype-offer.md")
+        ia, ib = a["reads"][0][0], b["reads"][0][0]
+        lines[ia], lines[ib] = lines[ib], lines[ia]
+
+    _edit_router_lines(root, edit)
+
+
+def _mutate_moved_heading_restored_in_router(root):
+    def edit(lines, entries):
+        entry = next(e for e in entries if e["reads"][0][1] == "phase-2-questions.md")
+        lines.insert(entry["reads"][0][0] + 1, "### Question Generation Rules")
+
+    _edit_router_lines(root, edit)
+
+
 def _mutate_second_entry_reads_a_shared_file(root):
     def edit(lines, entries):
         shared = entries[0]["reads"][0][1]
@@ -517,6 +655,9 @@ MUTATIONS = {
     "read-line-deleted": (_mutate_read_line_deleted, "file_to_router"),
     "read-line-to-missing-file-added": (_mutate_read_of_missing_file, "router_to_file"),
     "first-applies-when-renamed": (_mutate_applies_when_renamed, "applies_when"),
+    "visual-variant-condition-dropped": (_mutate_visual_variant_condition_dropped, "late_entries"),
+    "late-entries-swapped": (_mutate_late_entries_swapped, "late_entries"),
+    "moved-heading-restored-in-router": (_mutate_moved_heading_restored_in_router, "moved_headings"),
     "second-entry-reads-a-shared-file": (_mutate_second_entry_reads_a_shared_file, "shared_file"),
     "compaction-sentence-dropped": (_mutate_compaction_dropped, "compaction"),
     "failed-read-sentence-dropped": (_mutate_failed_read_dropped, "failed_read"),
