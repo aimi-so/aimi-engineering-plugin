@@ -98,6 +98,30 @@ message (2000-character sanity cap) and the labelled batch reason; with
 message alone.
 Annotate mode is not idempotent by design: the orchestrator calls it once per
 Defer decision.
+
+`--resolve <resolutions.json>` reads {"resolutions": [{message, stories,
+criterion}]} and prints {resolvedStories, openFindings, duplicates, refused,
+oqDecisions}:
+
+  resolvedStories  sorted, unique staged idx strings whose acceptanceCriteria
+                   gained at least one criterion this run
+  openFindings     one {message, stories, reason} per entry left open, in input
+                   order; `stories` is the entry's own list verbatim and reason
+                   is `no-criterion`, `refused` or `no-staged-story`
+  duplicates       one {storyIdx, criterion} per criterion skipped because an
+                   identical one was already in that story
+  refused          one {message, stories, trigger} per entry the sanitizer
+                   refused (the matcher's rule name, never the refused text);
+                   each also appears in openFindings with reason `refused`
+  oqDecisions      one {anchor, source, text, resolution} per entry: anchor
+                   `auditUnresolved:<first story or _audit>`, source
+                   `auditGate`, resolution `resolved` or `deferred`
+
+A confirmed criterion is appended as the LAST acceptanceCriteria element of each
+staged story the entry names, with one `[audit-deferred: resolved at plan
+review]` note paragraph; an open entry adds one unresolved-marker paragraph and
+no criterion. A repeat run with the same file changes no byte. audit-result.json
+is never touched.
 """
 
 import copy
@@ -876,6 +900,135 @@ def run_annotate(staging_dir, result_path, reason, agent_deferral=False):
     return {"annotated": annotated, "oqDecisions": decisions}
 
 
+def _load_resolutions(path):
+    """Validate the whole resolutions file before anything is decided."""
+    try:
+        data = _read_json(path)
+    except FileNotFoundError:
+        raise AuditRefusal("resolutions file does not exist: " + path)
+    except (OSError, ValueError, RecursionError):
+        raise AuditRefusal("resolutions file is not valid JSON: " + path)
+    if not isinstance(data, dict):
+        raise AuditRefusal("resolutions file is not a JSON object: " + path)
+    entries = data.get("resolutions")
+    if not isinstance(entries, list):
+        raise AuditRefusal("resolutions file: 'resolutions' is not an array")
+    for number, entry in enumerate(entries):
+        where = "resolutions[" + str(number) + "]"
+        if not isinstance(entry, dict):
+            raise AuditRefusal(where + " is not an object")
+        if not isinstance(entry.get("message"), str):
+            raise AuditRefusal(where + ": 'message' is not a string")
+        stories = entry.get("stories")
+        if not (isinstance(stories, list) and all(isinstance(e, str) for e in stories)):
+            raise AuditRefusal(where + ": 'stories' is not an array of strings")
+        criterion = entry.get("criterion")
+        if criterion is not None and not isinstance(criterion, str):
+            raise AuditRefusal(where + ": 'criterion' is neither a string nor null")
+    return entries
+
+
+def run_resolve(staging_dir, resolutions_path):
+    idx_map = staged_idx_map(staging_dir)
+    docs = _load_staged(idx_map)
+    entries = _load_resolutions(resolutions_path)
+
+    work = {}  # idx -> deep copy, made on first touch
+    changed = set()
+    resolved_stories = set()
+    open_findings = []
+    refused = []
+    duplicates = []
+    decisions = []
+
+    def doc_of(idx):
+        if idx not in work:
+            work[idx] = copy.deepcopy(_need_doc(idx_map, docs, idx))
+        return work[idx]
+
+    def notes_of(doc, idx):
+        existing = doc.get("notes")
+        if existing is not None and not isinstance(existing, str):
+            raise AuditRefusal(os.path.basename(idx_map[idx]) + " has non-string notes")
+        return existing
+
+    for entry in entries:
+        message, stories = entry["message"], entry["stories"]
+        criterion = entry.get("criterion")
+        anchor = "auditUnresolved:" + (stories[0] if stories else AUDIT_SENTINEL)
+        decision = {
+            "anchor": anchor,
+            "source": "auditGate",
+            "text": sanitize_message(message),
+            "resolution": "deferred",
+        }
+        decisions.append(decision)
+        staged = []
+        for name in stories:
+            if name in idx_map and name not in staged:
+                staged.append(name)
+
+        reason = None
+        clean = None
+        trigger = None
+        if not staged:
+            reason = "no-staged-story"
+        elif criterion is None or criterion.strip() == "":
+            reason = "no-criterion"
+        else:
+            clean, trigger = sanitize_patch_value(criterion.strip(), "acceptanceCriteria")
+            if trigger is not None:
+                reason = "refused"
+            elif clean.strip() == "":
+                reason = "no-criterion"
+
+        if reason is not None:
+            open_findings.append({"message": message, "stories": stories, "reason": reason})
+            if reason == "refused":
+                refused.append(
+                    {"message": message, "stories": stories, "trigger": _trigger_name(trigger)}
+                )
+            if staged:
+                paragraph = DEFER_MARKER + " " + sanitize_note_message(message)
+                for idx in staged:
+                    doc = doc_of(idx)
+                    existing = notes_of(doc, idx)
+                    if isinstance(existing, str) and paragraph in existing.split(NOTES_SEPARATOR):
+                        continue
+                    doc["notes"] = _paragraph_append(existing, paragraph)
+                    changed.add(idx)
+            continue
+
+        decision["resolution"] = "resolved"
+        paragraph = DEFER_MARKER_RESOLVED + " " + sanitize_note_message(message)
+        for idx in staged:
+            doc = doc_of(idx)
+            criteria = doc.get("acceptanceCriteria")
+            if not isinstance(criteria, list):
+                raise AuditRefusal(
+                    os.path.basename(idx_map[idx]) + " has no acceptanceCriteria array"
+                )
+            if clean in criteria:
+                duplicates.append({"storyIdx": idx, "criterion": clean})
+                continue
+            existing = notes_of(doc, idx)
+            criteria.append(clean)
+            doc["notes"] = _paragraph_append(existing, paragraph)
+            changed.add(idx)
+            resolved_stories.add(idx)
+
+    writes = [(idx_map[idx], work[idx]) for idx in sorted(changed)]
+    if writes:
+        commit_writes(writes)
+    return {
+        "resolvedStories": sorted(resolved_stories),
+        "openFindings": open_findings,
+        "duplicates": duplicates,
+        "refused": refused,
+        "oqDecisions": decisions,
+    }
+
+
 # --- Entry point ----------------------------------------------------------
 
 
@@ -893,6 +1046,18 @@ def main(argv):
     result_path = _flag(args, "--result") or os.path.join(staging_dir, "audit-result.json")
     annotate = "--annotate-deferred" in args
     try:
+        if "--resolve" in args:
+            for flag in ("--annotate-deferred", "--reason", "--agent-deferral", "--result"):
+                if flag in args:
+                    raise AuditRefusal("--resolve cannot be combined with " + flag)
+            resolutions = _flag(args, "--resolve")
+            if not resolutions:
+                raise AuditRefusal("--resolve needs a resolutions file")
+            if not staging_dir or not os.path.isdir(staging_dir):
+                raise AuditRefusal("staging directory does not exist: " + staging_dir)
+            report = run_resolve(staging_dir, resolutions)
+            sys.stdout.write(json.dumps(report, ensure_ascii=False) + "\n")
+            return 0
         if not staging_dir or not os.path.isdir(staging_dir):
             raise AuditRefusal("staging directory does not exist: " + staging_dir)
         if annotate:

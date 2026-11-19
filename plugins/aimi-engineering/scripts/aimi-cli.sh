@@ -114,7 +114,7 @@ find_aimi_root() {
 # Only the values of the flags in _PATH_ARG_FLAGS are candidates, plus the
 # bare positional arguments of the verbs in _PATH_ARG_POSITIONAL_VERBS (never
 # the value of a flag); a story id, a reason or a branch name is never touched.
-_PATH_ARG_FLAGS=" --tasks-file --file --staging-dir --outline --result --output --old --new --input --tasks --spec --prototype --phase-dir --root --bundle --from --to --previous-file --review --dir --brainstorm-path --required-file --evidence-dir "
+_PATH_ARG_FLAGS=" --tasks-file --file --staging-dir --outline --result --output --old --new --input --tasks --spec --prototype --phase-dir --root --bundle --from --to --previous-file --review --dir --brainstorm-path --required-file --evidence-dir --resolve "
 _PATH_ARG_POSITIONAL_VERBS=" archive-task research-lookup extract-sections extract-prototype-sections measure-command-file "
 _rebase_invocation_relative_args() {
   local verb="$1"; shift
@@ -15420,6 +15420,7 @@ cmd_story_merge() {
 # apply-audit-patches: validate and apply the cross-story auditor's patches
 # Usage: aimi-cli.sh apply-audit-patches --staging-dir <dir> [--result <path>]
 #           [--annotate-deferred --reason <text> [--agent-deferral]]
+#        or: aimi-cli.sh apply-audit-patches --staging-dir <dir> --resolve <resolutions.json>
 # ============================================================================
 #
 # Modelled on cmd_story_merge rather than on the tasks.json verbs: there is no
@@ -15430,12 +15431,12 @@ cmd_story_merge() {
 # (the idx lookup, every patch rule, the writes) is audit_patches.py's, behind
 # one crossing.
 cmd_apply_audit_patches() {
-  local usage="usage: aimi-cli.sh apply-audit-patches --staging-dir <dir> [--result <path>] [--annotate-deferred --reason <text> [--agent-deferral]]"
-  local staging_dir="" result_path="" annotate=false reason="" reason_given=false agent_deferral=false
+  local usage="usage: aimi-cli.sh apply-audit-patches --staging-dir <dir> [--result <path>] [--annotate-deferred --reason <text> [--agent-deferral]] | --resolve <resolutions.json>"
+  local staging_dir="" result_path="" annotate=false reason="" reason_given=false agent_deferral=false resolve_path="" resolve_given=false
 
   while [ $# -gt 0 ]; do
     case "$1" in
-      --staging-dir|--result|--reason)
+      --staging-dir|--result|--reason|--resolve)
         if [ $# -lt 2 ]; then
           echo "Error: apply-audit-patches: $1 needs a value ($usage)" >&2
           exit 1
@@ -15444,6 +15445,7 @@ cmd_apply_audit_patches() {
           --staging-dir) staging_dir="$2" ;;
           --result) result_path="$2" ;;
           --reason) reason="$2"; reason_given=true ;;
+          --resolve) resolve_path="$2"; resolve_given=true ;;
         esac
         shift 2
         ;;
@@ -15466,6 +15468,16 @@ cmd_apply_audit_patches() {
     echo "Error: apply-audit-patches: --staging-dir <dir> is required ($usage)" >&2
     exit 1
   fi
+  if [ "$resolve_given" = true ]; then
+    if [ "$annotate" = true ] || [ "$reason_given" = true ] || [ "$agent_deferral" = true ] || [ -n "$result_path" ]; then
+      echo "Error: apply-audit-patches: --resolve cannot be combined with --annotate-deferred, --reason, --agent-deferral or --result ($usage)" >&2
+      exit 1
+    fi
+    if [ -z "$resolve_path" ]; then
+      echo "Error: apply-audit-patches: --resolve needs a non-empty path ($usage)" >&2
+      exit 1
+    fi
+  fi
   if [ "$annotate" = true ] && [ -z "$reason" ]; then
     echo "Error: apply-audit-patches: --annotate-deferred requires a non-empty --reason ($usage)" >&2
     exit 1
@@ -15484,6 +15496,9 @@ cmd_apply_audit_patches() {
   if [ -n "$result_path" ]; then
     validate_path_in_project "$result_path"
   fi
+  if [ -n "$resolve_path" ]; then
+    validate_path_in_project "$resolve_path"
+  fi
 
   if [ ! -d "$staging_dir" ]; then
     echo "Error: apply-audit-patches: staging directory does not exist: $staging_dir" >&2
@@ -15494,6 +15509,9 @@ cmd_apply_audit_patches() {
   local aa_args=(--staging-dir "$staging_dir")
   if [ -n "$result_path" ]; then
     aa_args+=(--result "$result_path")
+  fi
+  if [ -n "$resolve_path" ]; then
+    aa_args+=(--resolve "$resolve_path")
   fi
   if [ "$annotate" = true ]; then
     aa_args+=(--annotate-deferred --reason "$reason")
@@ -17955,7 +17973,7 @@ COMMANDS:
                               prints the entry. Refuses (writes nothing) in agent
                               mode, on a malformed id, with no matching entry, or with
                               an empty --reason. Idempotent: a repeat call is a no-op.
-    apply-audit-patches --staging-dir <dir> [--result <path>] [--annotate-deferred --reason <text> [--agent-deferral]]
+    apply-audit-patches --staging-dir <dir> [--result <path>] [--annotate-deferred --reason <text> [--agent-deferral]] | --resolve <resolutions.json>
                               Validate and apply the cross-story auditor's patches to the
                               staged NN-*.json story files in one crossing: one read and one
                               atomic write per affected file, every refusal decided before
@@ -17970,6 +17988,12 @@ COMMANDS:
                               {annotated, oqDecisions}. --agent-deferral (only with
                               --annotate-deferred) keeps the unresolved marker and adds no
                               reason text.
+                              --resolve <resolutions.json> (alone) appends each confirmed
+                              criterion of {"resolutions": [{message, stories, criterion}]}
+                              to the acceptanceCriteria of the staged stories it names, with
+                              a resolved note; an entry without a usable criterion adds the
+                              unresolved marker only. Prints {resolvedStories, openFindings,
+                              duplicates, refused, oqDecisions}; a repeat run changes nothing.
     validate-outline --outline <path>
                               Check an outline.json array's produces/consumes contract
                               ([ext:]<kind>:<name>, kind sym|path|cli|http; ext: only in
