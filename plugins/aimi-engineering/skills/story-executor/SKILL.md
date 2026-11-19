@@ -192,8 +192,9 @@ over sentences, no filler, safety escapes preserved.
 
 Read `story.notes` before you start. It holds what the plan found that no other field carries:
 measurements, research findings, file paths and gotchas, and the cross-story audit's own
-paragraphs, separated by `---`. A paragraph opening with `[audit-deferred:` records an audit
-finding the plan left open, with the reason given. An older paragraph can describe a sibling
+paragraphs, separated by `---`. A paragraph opening with `[audit-deferred: resolved at plan review]` is a decision
+already taken: its acceptance criterion is the contract. A paragraph opening with
+`[audit-deferred: unresolved — review before execution]` is a finding left open. An older paragraph can describe a sibling
 story as it stood before the audit. A last paragraph opening with `[execution:` is what the
 previous attempt at this story recorded (`failed`, `skipped` or `reset`, then the cause): the
 newest word on it, after the plan's own notes. It is context, not the contract: where it

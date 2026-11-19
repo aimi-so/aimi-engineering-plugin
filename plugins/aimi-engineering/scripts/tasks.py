@@ -3512,6 +3512,44 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
                     + ": " + finding
                 )
 
+    # R28 -- metadata.auditOpen's shape. Appended AFTER R27 for R17's reason: a
+    # rule below the last one can only add lines after everything already
+    # recorded. SHAPE ONLY, and an ERROR: the key has one writer (/aimi:plan
+    # Phase 4), so a malformed value is the plugin having written a record its
+    # reader cannot parse. Absent does nothing; present it must be a non-empty
+    # array of {message, stories} objects, `stories` holding staged idx strings
+    # (two digits, or the `_audit` sentinel) and never US-NNN ids.
+    audit_open = jq_index(doc0_metadata, "auditOpen", ".metadata")
+    if audit_open is not None or (
+        isinstance(doc0_metadata, dict) and "auditOpen" in doc0_metadata
+    ):
+        where = tasks_file + ": metadata.auditOpen"
+        if not isinstance(audit_open, list) or not audit_open:
+            errors.append(where + " must be a non-empty array")
+        else:
+            for index, entry in enumerate(audit_open):
+                at = where + "[" + str(index) + "]"
+                if not isinstance(entry, dict):
+                    errors.append(at + " must be an object")
+                    continue
+                message = entry.get("message")
+                if not isinstance(message, str) or not message:
+                    errors.append(at + ".message must be a non-empty string")
+                stories = entry.get("stories")
+                if (
+                    not isinstance(stories, list)
+                    or not stories
+                    or not all(
+                        isinstance(item, str)
+                        and (item == "_audit" or re.fullmatch(r"[0-9]{2}", item))
+                        for item in stories
+                    )
+                ):
+                    errors.append(
+                        at + ".stories must be a non-empty array of staged idx"
+                        " strings (NN or _audit)"
+                    )
+
     return errors
 
 

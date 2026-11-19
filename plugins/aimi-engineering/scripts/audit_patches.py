@@ -92,10 +92,10 @@ distinct field names an applied patch changed}, with an entry only for an idx
 that received at least one applied patch.
 
 `--annotate-deferred --reason <text>` prints `{annotated, oqDecisions}` instead.
-Each annotated note holds `[audit-deferred: resolved at plan review]`, the finding
-message (2000-character sanity cap) and the labelled batch reason; with
-`--agent-deferral`, or an empty reason, it keeps the unresolved marker and the
-message alone.
+Each annotated note holds `[audit-deferred: unresolved — review before execution]`
+and the finding message; the reason reaches `oqDecisions` only. `--agent-deferral`
+is accepted and changes nothing in the notes. `--resolve` is the only writer of
+`[audit-deferred: resolved at plan review]`.
 Annotate mode is not idempotent by design: the orchestrator calls it once per
 Defer decision.
 
@@ -833,7 +833,9 @@ def run_annotate(staging_dir, result_path, reason, agent_deferral=False):
     docs = _load_staged(idx_map)
     result = load_result(result_path)
     reason_text = sanitize_reason(reason)
-    resolved = bool(reason_text) and not agent_deferral
+    # run_resolve is the only writer of the resolved marker; a deferral only
+    # ever records the unresolved one, so agent_deferral no longer changes a note.
+    del agent_deferral
 
     stub = result.get("status") == AUDIT_FAILED_STATUS
     entries = [_normalise_unresolved(e) for e in result.get("unresolved", [])]
@@ -854,32 +856,10 @@ def run_annotate(staging_dir, result_path, reason, agent_deferral=False):
             # The Failure Fallback stub: no story was audited, so every staged
             # story carries the notice. The decision above stays a single entry.
             for staged in idx_map:
-                if resolved:
-                    addition = (
-                        DEFER_MARKER_RESOLVED
-                        + " "
-                        + AUDIT_DID_NOT_RUN_MESSAGE
-                        + "\n"
-                        + REASON_LABEL
-                        + " "
-                        + reason_text
-                    )
-                else:
-                    addition = DEFER_MARKER + " " + AUDIT_DID_NOT_RUN_MESSAGE
+                addition = DEFER_MARKER + " " + AUDIT_DID_NOT_RUN_MESSAGE
                 additions.setdefault(staged, []).append(addition)
         elif idx != AUDIT_SENTINEL and idx in idx_map:
-            if resolved:
-                addition = (
-                    DEFER_MARKER_RESOLVED
-                    + " "
-                    + sanitize_note_message(entry["message"])
-                    + "\n"
-                    + REASON_LABEL
-                    + " "
-                    + reason_text
-                )
-            else:
-                addition = DEFER_MARKER + " " + message
+            addition = DEFER_MARKER + " " + sanitize_note_message(entry["message"])
             additions.setdefault(idx, []).append(addition)
 
     writes = []

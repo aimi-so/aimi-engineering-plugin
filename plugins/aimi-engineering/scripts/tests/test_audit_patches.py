@@ -1403,8 +1403,8 @@ def test_annotate_appends_the_marker_to_each_resolved_story_and_lists_all_decisi
     code, report, _ = annotate(stg)
     assert code == 0
     assert report["annotated"] == ["01", "02"]
-    marker = "[audit-deferred: resolved at plan review]"
-    label = "\nReason recorded for the deferred findings of this batch: needs a human"
+    marker = "[audit-deferred: unresolved — review before execution]"
+    label = ""
     assert get(stg / "01-alpha.json")["notes"] == (
         marker + " first finding" + label + "\n\n---\n\n" + marker + " second finding" + label
     )
@@ -1449,16 +1449,36 @@ def test_annotate_sanitises_reason_and_message(stg):
     assert len(reason) == 1000
     assert second["text"].startswith("m" * 200 + "… — reason:")
     note = get(stg / "02-beta.json")["notes"]
-    assert note.startswith("[audit-deferred: resolved at plan review] " + "m" * 250 + "\n")
-    assert "…" not in note.split("\n")[0]
+    assert note == "[audit-deferred: unresolved — review before execution] " + "m" * 250
+    assert "…" not in note
 
 
 def test_annotate_note_message_is_capped_at_2000_with_a_visible_suffix(stg):
     write_result(stg, [], [{"storyIdx": "01", "message": "m" * 2500}])
     annotate(stg)
-    first = get(stg / "01-alpha.json")["notes"].split("\n")[0]
+    first = get(stg / "01-alpha.json")["notes"]
     assert first.endswith("m" * 2000 + "… [truncated]")
     assert "m" * 2001 not in first
+
+
+def test_annotate_never_writes_resolved_marker(stg):
+    write_result(stg, [], [{"storyIdx": "01", "message": "a"}, {"storyIdx": "_audit", "message": "b"}])
+    for args in (("--reason", "a human reason"), ("--reason", "auto", "--agent-deferral")):
+        run(stg, "--annotate-deferred", *args)
+    notes = get(stg / "01-alpha.json")["notes"]
+    assert "resolved at plan review" not in notes
+    assert notes.count("[audit-deferred: unresolved — review before execution]") == 2
+    assert "Reason recorded" not in notes
+
+
+def test_annotate_never_writes_resolved_marker_on_the_audit_failed_stub(stg):
+    write_result(stg, [], [{"storyIdx": "_audit", "message": "audit failed - no patches applied"}])
+    data = get(stg / "audit-result.json")
+    data["status"] = "audit-failed"
+    put(stg / "audit-result.json", data)
+    annotate(stg)
+    for name in ("01-alpha.json", "02-beta.json", "03-gamma.json"):
+        assert "resolved at plan review" not in get(stg / name).get("notes", "")
 
 
 def test_annotate_agent_deferral_keeps_the_unresolved_marker_and_no_reason(stg):

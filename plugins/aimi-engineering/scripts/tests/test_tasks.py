@@ -12120,3 +12120,86 @@ def test_usage_validation_status_md_carries_the_line_and_the_notice():
     assert "Usage validation:" in text and "FAILING" in text
     assert "/aimi:open-pr" in text and "re-validates" in text
     assert len(text.encode("utf-8")) <= 16384
+
+
+def _replay_audit_open(audit_open, tmp_path):
+    """R28's replay, built like _replay_prototype_superseded: bash never ran it."""
+    story = {
+        "id": "US-001",
+        "title": "Story US-001",
+        "description": "As a user, I want US-001.",
+        "acceptanceCriteria": ["um criterio sem ancora nenhuma"],
+        "status": "pending",
+        "priority": 1,
+        "dependsOn": [],
+        "wave": 0,
+    }
+    metadata = {"branchName": "ref/corpus", "maxConcurrency": 1}
+    if audit_open is not _ABSENT:
+        metadata["auditOpen"] = audit_open
+    document = {"schemaVersion": "3.3", "metadata": metadata, "userStories": [story]}
+    case = {
+        "args": ["validate-tasks"],
+        "input": {
+            "tasks_file": "2020-01-01-corpus-tasks.json",
+            "tasks": json.dumps(document, ensure_ascii=False) + "\n",
+            "files": {},
+            "outside": {},
+            "state": {},
+        },
+    }
+    return _replay_validate(case, tmp_path)
+
+
+def _audit_open_errors(actual):
+    return [e for e in json.loads(actual["stdout"])["errors"] if "metadata.auditOpen" in e]
+
+
+def test_validate_tasks_audit_open_absent_passes(tmp_path):
+    actual = _replay_audit_open(_ABSENT, tmp_path)
+    assert actual["exit"] == 0
+    assert _audit_open_errors(actual) == []
+
+
+def test_validate_tasks_audit_open_valid_passes(tmp_path):
+    actual = _replay_audit_open(
+        [{"message": "m", "stories": ["01", "_audit"]}, {"message": "n", "stories": ["12"]}],
+        tmp_path,
+    )
+    assert actual["exit"] == 0
+    assert _audit_open_errors(actual) == []
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        [],
+        {},
+        "x",
+        None,
+        ["x"],
+        [{"stories": ["01"]}],
+        [{"message": "", "stories": ["01"]}],
+        [{"message": 3, "stories": ["01"]}],
+        [{"message": "m"}],
+        [{"message": "m", "stories": []}],
+        [{"message": "m", "stories": "01"}],
+        [{"message": "m", "stories": ["US-001"]}],
+        [{"message": "m", "stories": ["1"]}],
+        [{"message": "m", "stories": [1]}],
+        [{"message": "m", "stories": ["001"]}],
+    ],
+)
+def test_validate_tasks_audit_open_malformed_is_an_error(tmp_path, value):
+    actual = _replay_audit_open(value, tmp_path)
+    assert actual["exit"] == 1
+    found = _audit_open_errors(actual)
+    assert found and all("2020-01-01-corpus-tasks.json" in e for e in found)
+
+
+def test_validate_tasks_audit_open_error_names_the_index(tmp_path):
+    actual = _replay_audit_open(
+        [{"message": "m", "stories": ["01"]}, {"message": "m", "stories": ["x"]}], tmp_path
+    )
+    found = _audit_open_errors(actual)
+    assert len(found) == 1 and "metadata.auditOpen[1]" in found[0]
