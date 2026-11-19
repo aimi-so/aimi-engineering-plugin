@@ -17004,6 +17004,37 @@ cmd_usage_validation_get() {
   python3 "$(_aimi_tasks_py)" usage-validation-get "${op_args[@]}"
 }
 
+# The audit findings a plan left open (metadata.auditOpen), for /aimi:execute's
+# Open Audit Findings step. A read: no lock, nothing written, one crossing into
+# tasks.py. It refuses without python3 and exits 1 naming the file when the key
+# is present but not an array, because an unreadable list read as "nothing
+# open" would start a run the operator never got to decide on.
+cmd_audit_open() {
+  local tasks_file="" usage="Usage: aimi-cli.sh audit-open [--tasks-file <path>]"
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks-file) shift; tasks_file="${1:-}" ;;
+      *)
+        echo "Error: audit-open: unknown flag: $1" >&2
+        echo "$usage" >&2
+        exit 1
+        ;;
+    esac
+    [ $# -gt 0 ] && shift
+  done
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+
+  check_python3
+  python3 "$(_aimi_tasks_py)" audit-open --tasks-file "$tasks_file"
+}
+
 # The gate outcome of one usage validation, computed from the validator's last
 # usage_validation_verdict block (stdin), the required answer and the evidence
 # directory. A read: no lock, nothing written, one crossing into
@@ -19371,6 +19402,12 @@ COMMANDS:
                               surfaces, charters, specs}. skipKind is
                               disabled-by-operator (AIMI_USAGE_VALIDATION=off),
                               unable-to-evaluate, not-applicable or null. Needs python3.
+    audit-open [--tasks-file <path>]
+                              Read-only. The audit findings a plan left open
+                              (metadata.auditOpen). Prints {count, findings:
+                              [{message, stories[]}]}; count 0 and an empty list
+                              when the key is absent. Exits 1 naming the file when
+                              the key is present but not an array.
     usage-validation-get --feature <slug> --phase <id> | [--tasks-file <path>]
                               Read-only. Where a run's usage-validation record lives
                               and the record: a phase-scoped tasks file (the
@@ -19860,6 +19897,7 @@ main() {
     roadmap-record-usage-validation) shift; cmd_roadmap_record_usage_validation "$@" ;;
     usage-validation-required) shift; cmd_usage_validation_required "$@" ;;
     usage-validation-get) shift; cmd_usage_validation_get "$@" ;;
+    audit-open) shift; cmd_audit_open "$@" ;;
     usage-validation-verdict) shift; cmd_usage_validation_verdict "$@" ;;
     write-review)         shift; cmd_write_review "$@" ;;
     validate-contracts)    shift; cmd_validate_contracts "$@" ;;

@@ -7187,6 +7187,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "project-groups",
         "get-story",
         "get-story-context",
+        "audit-open",
         "triage-verify",
         "current-story",
         "get-state",

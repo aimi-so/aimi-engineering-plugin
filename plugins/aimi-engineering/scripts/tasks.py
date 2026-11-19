@@ -6510,6 +6510,44 @@ def op_usage_validation_get(argv):
     return 0
 
 
+def op_audit_findings(argv):
+    """audit-open: the audit findings a plan left open, from metadata.auditOpen.
+
+    A read: nothing is written and no lock is taken. Prints
+    {"count": N, "findings": [{"message": str, "stories": [str]}]}, and answers
+    count 0 with an empty list when the key is absent. A value that is present
+    but not an array of {message, stories} objects dies naming the file: an
+    unreadable list must never be read as nothing open.
+    """
+    prefix = "Error: audit-open: "
+    path = _flag(argv, "--tasks-file")
+    if not path:
+        die("Usage: tasks.py audit-open --tasks-file <path>")
+    docs = read_docs(path, "audit-open")
+    first = docs[0] if docs else None
+    metadata = first.get("metadata") if isinstance(first, dict) else None
+    raw = metadata.get("auditOpen") if isinstance(metadata, dict) else None
+    if raw is None and not (isinstance(metadata, dict) and "auditOpen" in metadata):
+        _emit({"count": 0, "findings": []})
+        return 0
+    where = prefix + "metadata.auditOpen in " + path
+    if not isinstance(raw, list):
+        die(where + " is not an array")
+    findings = []
+    for index, entry in enumerate(raw):
+        message = entry.get("message") if isinstance(entry, dict) else None
+        stories = entry.get("stories") if isinstance(entry, dict) else None
+        if (
+            not isinstance(message, str)
+            or not isinstance(stories, list)
+            or not all(isinstance(item, str) for item in stories)
+        ):
+            die(where + "[" + str(index) + "] is not a {message, stories} object")
+        findings.append({"message": message, "stories": stories})
+    _emit({"count": len(findings), "findings": findings})
+    return 0
+
+
 def op_usage_validation_record(argv):
     """usage-validation-record: write metadata.usageValidation, the run-level
     verdict of the real-usage validation gate, replacing any earlier record.
@@ -10195,6 +10233,7 @@ _OPS = {
     "acknowledge-evidence": op_acknowledge_evidence,
     "usage-validation-record": op_usage_validation_record,
     "usage-validation-get": op_usage_validation_get,
+    "audit-open": op_audit_findings,
     "judge-verification": op_judge_verification,
     "reset-orphaned": op_reset_orphaned,
     "gate-pass": _gate_op("gate-pass", "passed"),

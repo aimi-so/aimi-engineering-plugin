@@ -316,6 +316,8 @@ USAGE_READ_VERBS = [
     "usage-validation-get --tasks-file .aimi/tasks.json",
     "usage-validation-get --feature f --phase 1",
     "usage-validation-get",
+    "audit-open --tasks-file .aimi/tasks.json",
+    "audit-open",
 ]
 
 

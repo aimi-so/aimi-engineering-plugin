@@ -30,6 +30,8 @@ No tasks file found. Run /aimi:plan to create a task list first.
 ```
 STOP execution.
 
+Right after `init-session`, with its `tasks` path, run the **Open Audit Findings** router entry of `commands/execute.md` unless it already ran at the split flow (once per top-level run).
+
 ### Phase Mode Detection
 
 Determine whether the tasks file `init-session` discovered belongs to a phase/milestone roadmap (the nested `.aimi/tasks/<feature>/phase-N[.M]-<slug>/<feature>-phase-N-tasks.json` layout from outline 04) or is a flat v3.3 file (`.aimi/tasks/<date>-<feature>-tasks.json`), and store the result as `PHASE_MODE`:
