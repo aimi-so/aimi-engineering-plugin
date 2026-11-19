@@ -12065,6 +12065,7 @@ cmd_deps_recipe_record() {
 
 # usage-recipe-record --project <key> (--serve <cmd> | --cli <cmd>) [flags]
 # usage-recipe-get --project <key>
+# usage-recipe-sources --project <key> [--project <key>]...
 #
 # The usage recipe is how a person confirmed the whole product comes up for
 # real-usage validation, stored at usage.recipe[<key>] of
@@ -12128,6 +12129,47 @@ cmd_usage_recipe_get() {
 
   python3 "$(_aimi_script_py usage_recipe.py)" get --config "$config" \
     ${_USAGE_RECIPE_ARGS[@]+"${_USAGE_RECIPE_ARGS[@]}"}
+}
+
+# usage-recipe-sources lists each repository's own files that may state how it
+# comes up. Read-only and decides nothing: no lock, no write, no file content
+# printed. Each <aimi_root>/<key> is confined here before python3 starts (the
+# usage-env-up shape); usage_recipe.py confines again and owns every other rule.
+# Refuses without python3, like usage-recipe-get.
+cmd_usage_recipe_sources() {
+  local -a keys=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project)
+        if [ $# -lt 2 ]; then
+          echo "Error: usage-recipe-sources: --project requires a value" >&2
+          exit 1
+        fi
+        keys+=("$2")
+        shift 2 ;;
+      *)
+        echo "Error: usage-recipe-sources: unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh usage-recipe-sources --project <key> [--project <key>]..." >&2
+        exit 1 ;;
+    esac
+  done
+  if [ "${#keys[@]}" -eq 0 ]; then
+    echo "Error: usage-recipe-sources: at least one --project <key> is required" >&2
+    exit 1
+  fi
+  local aimi_root="${AIMI_DIR%/.aimi}" k k_dir
+  local -a project_args=()
+  for k in "${keys[@]}"; do
+    case "$k" in
+      /*) k_dir="$k" ;;
+      *) k_dir="$aimi_root/$k" ;;
+    esac
+    validate_path_in_project "$k_dir"
+    project_args+=(--project "$k")
+  done
+  check_python3
+  python3 "$(_aimi_script_py usage_recipe.py)" sources --aimi-root "$aimi_root" \
+    "${project_args[@]}"
 }
 
 # usage-env-up --run <key> --repo <project>[=<branch>]... [--restart]
@@ -18630,6 +18672,15 @@ COMMANDS:
                               {status:"absent", recipe:null} for none, and
                               {status:"untrusted", recipe:null} for a config tracked by git.
                               Refuses a stored entry that fails validation; needs python3.
+    usage-recipe-sources --project <key> [--project <key>]...
+                              Print {repositories:[{project, sources:[{kind, path}]}]}: the
+                              files of each repository that may state how it comes up (readme,
+                              contributing, claude-md, agents-md, makefile, justfile,
+                              package-scripts, compose, devcontainer, workflow), in that kind
+                              order, paths sorted. Reads no file content (package.json only
+                              for its scripts/workspaces keys); writes nothing. Refuses a
+                              missing, repeated or invalid key and a key outside the layout;
+                              needs python3.
     usage-env-up --run <key> --repo <project>[=<branch>]... [--restart]
                               Bring the product up from the recorded usage recipe
                               (usage-recipe-get), detached, one repository after
@@ -19877,6 +19928,7 @@ main() {
     deps-recipe-record) shift; cmd_deps_recipe_record "$@" ;;
     usage-recipe-record) shift; cmd_usage_recipe_record "$@" ;;
     usage-recipe-get) shift; cmd_usage_recipe_get "$@" ;;
+    usage-recipe-sources) shift; cmd_usage_recipe_sources "$@" ;;
     usage-env-up) shift; cmd_usage_env_up "$@" ;;
     usage-env-status) shift; cmd_usage_env_status "$@" ;;
     usage-env-down) shift; cmd_usage_env_down "$@" ;;

@@ -145,3 +145,15 @@ def test_usage_surfaces_router_wiring():
     assert "Read ${CLAUDE_PLUGIN_ROOT}/commands/references/plan/phase-4-usage-surfaces.md in full" in seg
     assert "usageSurfaces" in CONTEXT.read_text(encoding="utf-8")
     assert "usageSurfaces" in CHECKLIST.read_text(encoding="utf-8")
+
+
+def test_usage_surfaces_reads_sources_before_asking():
+    assert TEXT.index("usage-recipe-sources") < TEXT.index("### Ask")
+    line = [l for l in TEXT.splitlines() if l.startswith("$AIMI_CLI usage-recipe-sources")]
+    assert len(line) == 1 and "--project" in line[0]
+    assert "sources unknown" in TEXT and "never \"no file answers\"" in TEXT
+    assert "A file's absence is never an answer" in TEXT
+    assert "both" in TEXT and "disagree" in TEXT
+    cli = CLI.read_text(encoding="utf-8")
+    assert re.search(r"^    usage-recipe-sources --project", cli, re.M)
+    assert "usage-recipe-sources) shift; cmd_usage_recipe_sources" in cli
