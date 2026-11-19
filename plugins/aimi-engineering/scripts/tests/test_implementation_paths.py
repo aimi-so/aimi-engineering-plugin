@@ -483,3 +483,207 @@ def test_the_golden_corpus_carries_no_outputs_key():
         total += sum(_count_outputs_keys(document) for document in documents)
     assert parsed > 100, "most recorded documents must actually parse for the count to mean anything"
     assert total == 0
+
+
+# ---------------------------------------------------------------------------
+# cross_repository_file_findings: an `implementation.files` entry of another
+# repository in a multi-repo layout
+# ---------------------------------------------------------------------------
+
+
+def _xstory(files, project=None, number=1):
+    story = {
+        "id": "US-%03d" % number,
+        "title": "Story %d" % number,
+        "description": "As a user, I want %d." % number,
+        "acceptanceCriteria": ["um criterio sem ancora nenhuma"],
+        "status": "pending",
+        "priority": number,
+        "dependsOn": [],
+        "wave": 0,
+        "implementation": {"files": files, "approach": "a", "verify": "true"},
+    }
+    if project is not None:
+        story["project"] = project
+    return story
+
+
+def test_cross_repository_function_reads_no_filesystem_and_has_one_definition():
+    source = inspect.getsource(T.cross_repository_file_findings)
+    entries_source = inspect.getsource(T.cross_repository_file_entries)
+    for body in (source, entries_source):
+        for forbidden in ("os.path", "subprocess", "open(", "os.listdir"):
+            assert forbidden not in body
+
+
+@pytest.mark.parametrize(
+    "entry, other_keys, hit",
+    [
+        ("api/src/x.py", {"api", "web"}, True),
+        ("api", {"api", "web"}, True),
+        ("api/", {"api", "web"}, True),
+        ("api-gateway/x.py", {"api", "web"}, False),
+        ("apis/x.py", {"api", "web"}, False),
+        ("API/x.py", {"api", "web"}, False),
+        ("src/api/x.py", {"api", "web"}, False),
+        ("apps/web/x.py", {"apps/web", "api"}, True),
+        ("apps/webby/x.py", {"apps/web", "api"}, False),
+        ("apps/x.py", {"apps/web", "api"}, False),
+        ("$AIMI_ROOT/web/x.py", {"api", "web"}, True),
+        ("${AIMI_ROOT}/.aimi/x.md", {"api", "web"}, True),
+        ("$AIMI_ROOTX/x.py", {"api", "web"}, False),
+        ("web/src/x.py", {"api", "web"}, False),  # the story's own project is "web"
+    ],
+)
+def test_cross_repository_matches_whole_segments_case_sensitively(entry, other_keys, hit):
+    story = _xstory([entry], project="web")
+    findings = T.cross_repository_file_findings(story, other_keys | {"web"}, True)
+    assert bool(findings) is hit
+    if hit:
+        assert "implementation.files[0]" in findings[0]
+        assert entry.replace("`", "") in findings[0]
+
+
+def test_cross_repository_is_silent_in_a_git_root_and_below_two_keys():
+    story = _xstory(["api/src/x.py"], project="web")
+    assert T.cross_repository_file_findings(story, {"api", "web"}, False) == []
+    # The story's own project counts as a key in play: web plus api is two.
+    assert len(T.cross_repository_file_findings(story, {"api"}, True)) == 1
+    assert T.cross_repository_file_findings(_xstory(["api/x.py"]), {"api"}, True) == []
+    assert T.cross_repository_file_findings(_xstory(["web/x.py"], project="web"), {"web"}, True) == []
+    assert T.cross_repository_file_findings(_xstory(["api/x.py"]), set(), True) == []
+
+
+def test_cross_repository_leaves_other_escapes_to_the_path_rule():
+    story = _xstory(["../api/x.py", "/api/x.py", "~/api"], project="web")
+    assert T.cross_repository_file_findings(story, {"api", "web"}, True) == []
+    assert len(T.implementation_path_findings(story)) == 3
+
+
+def test_cross_repository_skips_non_string_entries_and_non_stories():
+    assert T.cross_repository_file_findings(_xstory([7, None], project="web"), {"api", "web"}, True) == []
+    assert T.cross_repository_file_findings("nope", {"api", "web"}, True) == []
+    assert T.cross_repository_file_findings({}, {"api", "web"}, True) == []
+
+
+def test_cross_repository_layout_helper_asks_git_about_the_root(tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert T.is_multi_repo_root(str(plain)) is True
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    assert T.is_multi_repo_root(str(repo)) is False
+    assert T.is_multi_repo_root("") is False
+    (plain / "api").mkdir()
+    (plain / "web").mkdir()
+    (plain / "notes").mkdir()
+    subprocess.run(["git", "init", "-q", str(plain / "api")], check=True)
+    subprocess.run(["git", "init", "-q", str(plain / "web")], check=True)
+    assert T.child_repository_keys(str(plain)) == {"api", "web"}
+
+
+def _multi_repo_layout(tmp_path):
+    """A .aimi root that is not a git repository, with two child repositories."""
+    root = os.path.join(os.path.realpath(str(tmp_path)), "layout")
+    os.makedirs(os.path.join(root, ".aimi", "tasks"))
+    for child in ("api", "web"):
+        os.makedirs(os.path.join(root, child, "src"))
+        subprocess.run(["git", "init", "-q", os.path.join(root, child)], check=True)
+    return root
+
+
+def _write_tasks(root, stories, name="2020-01-01-cross-tasks.json"):
+    path = os.path.join(root, ".aimi", "tasks", name)
+    document = {
+        "schemaVersion": "3.3",
+        "metadata": {"branchName": "ref/cross", "maxConcurrency": 1},
+        "userStories": stories,
+    }
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(document) + "\n")
+    return path
+
+
+def _cli(root, verb, *args, cwd=None):
+    return subprocess.run(
+        ["bash", CLI, verb, *args], cwd=cwd or root, capture_output=True, text=True, timeout=120
+    )
+
+
+def test_cross_repository_validate_tasks_errors_in_a_multi_repo_layout(tmp_path):
+    root = _multi_repo_layout(tmp_path)
+    path = _write_tasks(
+        root,
+        [_xstory(["api/src/x.py", "src/ok.py"], project="web"), _xstory(["src/y.py"], project="api", number=2)],
+    )
+    proc = _cli(root, "validate-tasks", "--tasks-file", path)
+    assert proc.returncode == 1, proc.stderr
+    verdict = json.loads(proc.stdout)
+    assert verdict["valid"] is False
+    assert len(verdict["errors"]) == 1
+    assert "US-001" in verdict["errors"][0]
+    assert "api/src/x.py" in verdict["errors"][0]
+    # R17 does not also warn the entry as a directory that does not exist.
+    assert "names a directory that does not exist: api/src/x.py" not in proc.stderr
+
+
+def test_cross_repository_validate_tasks_names_an_aimi_root_entry(tmp_path):
+    root = _multi_repo_layout(tmp_path)
+    path = _write_tasks(
+        root,
+        [_xstory(["$AIMI_ROOT/api/src/x.py"], project="web"), _xstory(["${AIMI_ROOT}/web/a"], project="api", number=2)],
+    )
+    proc = _cli(root, "validate-tasks", "--tasks-file", path)
+    assert proc.returncode == 1
+    errors = json.loads(proc.stdout)["errors"]
+    assert len(errors) == 2
+    assert "US-001" in errors[0] and "$AIMI_ROOT/api/src/x.py" in errors[0]
+    assert "US-002" in errors[1]
+
+
+def test_cross_repository_validate_tasks_is_silent_in_a_git_root(tmp_path):
+    root = _multi_repo_layout(tmp_path)
+    subprocess.run(["git", "init", "-q", root], check=True)
+    path = _write_tasks(
+        root,
+        [_xstory(["api/src/x.py"], project="web"), _xstory(["src/y.py"], project="api", number=2)],
+    )
+    proc = _cli(root, "validate-tasks", "--tasks-file", path)
+    assert proc.returncode == 0, proc.stdout
+    assert json.loads(proc.stdout)["valid"] is True
+
+
+def test_cross_repository_validate_stories_fails_so_execute_stops(tmp_path):
+    root = _multi_repo_layout(tmp_path)
+    path = _write_tasks(
+        root,
+        [_xstory(["api/src/x.py"], project="web"), _xstory(["src/y.py"], project="api", number=2)],
+    )
+    proc = _cli(root, "validate-stories", "--tasks-file", path)
+    assert proc.returncode == 1, proc.stdout
+    verdict = json.loads(proc.stdout)
+    assert verdict["valid"] is False
+    assert any("US-001" in e and "api/src/x.py" in e for e in verdict["errors"])
+
+
+def test_cross_repository_validate_stories_is_clean_for_owned_files_and_a_git_root(tmp_path):
+    root = _multi_repo_layout(tmp_path)
+    path = _write_tasks(
+        root,
+        [_xstory(["src/x.py"], project="web"), _xstory(["src/y.py"], project="api", number=2)],
+    )
+    assert _cli(root, "validate-stories", "--tasks-file", path).returncode == 0
+    path = _write_tasks(
+        root,
+        [_xstory(["api/src/x.py"], project="web"), _xstory(["src/y.py"], project="api", number=2)],
+    )
+    subprocess.run(["git", "init", "-q", root], check=True)
+    assert _cli(root, "validate-stories", "--tasks-file", path).returncode == 0
+
+
+def test_cross_repository_rule_is_one_definition_called_by_the_validators():
+    with open(os.path.join(SCRIPTS, "tasks.py"), encoding="utf-8") as handle:
+        source = handle.read()
+    assert source.count("def cross_repository_file_findings") == 1
+    assert "R27" in source

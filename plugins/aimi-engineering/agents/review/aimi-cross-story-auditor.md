@@ -74,13 +74,15 @@ One row per field, listing exactly the ops that field accepts:
 | `implementation.approach` | `replace` | Overwrites the whole string with `value`. |
 | `implementation.verify` | `replace` | `matchValue` is a substring of `verify` that occurs exactly once; `value` replaces only that substring, and the same substitution is applied to every `guardRails` entry containing it. |
 | `implementation.guardRails` | `replace` | `matchValue` equals one whole `guardRails` entry; `value` overwrites it. |
-| `implementation.files` | `replace, remove` | `matchValue` equals one whole entry; a `replace` `value` MUST be a plain relative path inside the story's repository. |
+| `implementation.files` | `add, replace, remove` | `add` appends `value`; `replace` and `remove` need a `matchValue` equal to one whole entry. A `value` MUST be a plain relative path inside the story's repository. |
 | `implementation.outputs` | `add, replace, remove` | `add` appends `value`; `replace` and `remove` need a `matchValue` equal to one whole entry. A `value` MUST be a path starting with `.aimi/`, relative to the AIMI root. |
 | `gate.prompt` | `replace` | Overwrites the whole string, only when the story already has a `gate` with a non-null `prompt`. Never emit it for a story with no gate. |
 
 For `tasks`, `acceptanceCriteria`, `guardRails` and `notes` the `matchValue` must equal one whole element or paragraph and match exactly one; quote the existing text exactly or do not emit the patch. `verify` and `guardRails` values are stored verbatim, never rewritten. A `verify` or `guardRails` patch is dropped as `guardRails-out-of-sync`, carrying `rails` (the indices it broke), only when it breaks a rail that equalled a `verify` segment before it; a rail already broken causes no drop. It is dropped as `verify-composition` when the new `verify` can swallow a failing line, and a `files` or `outputs` value the shared path rule refuses is dropped as `bad-path`.
 
 An `implementation.files` entry that leaves the repository is moved with a `files` `remove` plus an `outputs` `add`, and named in `verify` and criteria as the quoted path `"${AIMI_ROOT}/.aimi/..."`.
+
+When the `.aimi` root is not a git repository, an `implementation.files` entry can instead name another repository of the layout: it starts with another project's key (a whole path segment, case-sensitive), or with `$AIMI_ROOT` or `${AIMI_ROOT}`. Move it to the story whose `project` owns it: a `files` `remove` on the wrong story plus a `files` `add` on the owning story, with the project-key prefix dropped (`api/src/x.py` becomes `src/x.py`). When no story owns that project, emit an `unresolved[]` entry naming the story and the path. Never move such an entry into `implementation.outputs`: that field holds `.aimi/` paths only.
 
 A `value` or `matchValue` that trips the injection matcher is refused whole and reported by trigger name, never by value. Any other pairing, a field outside the table, a `matchValue` that matches zero or several elements and a patch beyond the budget below are dropped: each is listed in the orchestrator's apply report (storyIdx, field, op, reason). A dropped patch adds no `unresolved[]` entry, so emit a patch only when you can quote its target; put a finding you cannot patch in `unresolved[]`.
 

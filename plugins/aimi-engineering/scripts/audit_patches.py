@@ -144,7 +144,7 @@ OPS_FOR_FIELD = {
     "implementation.approach": frozenset({"replace"}),
     "implementation.verify": frozenset({"replace"}),
     "implementation.guardRails": frozenset({"replace"}),
-    "implementation.files": frozenset({"replace", "remove"}),
+    "implementation.files": frozenset({"add", "replace", "remove"}),
     "implementation.outputs": frozenset({"add", "replace", "remove"}),
     "gate.prompt": frozenset({"replace"}),
 }

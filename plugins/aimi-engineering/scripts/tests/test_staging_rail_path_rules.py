@@ -359,7 +359,11 @@ def test_the_helper_imports_tasks_lazily_and_restates_no_rule():
         if isinstance(node, ast.ImportFrom) and node.module == "tasks"
         for alias in node.names
     ]
-    assert sorted(imported) == ["guard_rail_findings", "implementation_path_findings"]
+    assert sorted(imported) == [
+        "cross_repository_file_findings",
+        "guard_rail_findings",
+        "implementation_path_findings",
+    ]
     for restated in ("PATH_REASON_", "_GUARD_RAIL_REMEDY", "FILES_ESCAPE_REMEDY"):
         assert restated not in source
 
@@ -438,3 +442,100 @@ def test_the_golden_counter_detects_a_planted_bad_rail_and_file():
     rails, refused = _count_flagged(entries)
     assert rails >= 1
     assert refused >= planted
+
+
+# ---------------------------------------------------------------------------
+# cross_repository_file_findings through validate-staging and story-merge
+# ---------------------------------------------------------------------------
+
+
+def multi_repo_layout(tmp_path, children=("api", "web")):
+    """A .aimi root that is not a git repository, holding one git repository per child."""
+    for child in children:
+        os.makedirs(os.path.join(str(tmp_path), child), exist_ok=True)
+        subprocess.run(["git", "init", "-q", os.path.join(str(tmp_path), child)], check=True)
+
+
+def tagged(title, project, files):
+    out = story(title, files=files)
+    out["project"] = project
+    return out
+
+
+def test_cross_repository_validate_staging_reports_by_idx_with_child_repositories(tmp_path):
+    multi_repo_layout(tmp_path)
+    stage(
+        tmp_path,
+        {
+            "01-a.json": tagged("A", "web", ["api/src/x.py", "src/ok.ts"]),
+            "02-b.json": tagged("B", "api", ["src/y.py"]),
+        },
+    )
+    proc = validate_staging(tmp_path)
+    assert proc.returncode == 1, proc.stderr
+    report = json.loads(proc.stdout)
+    assert list(report) == ["01"]
+    assert "implementation.files[0]" in report["01"][0]
+    assert "api/src/x.py" in report["01"][0]
+
+
+def test_cross_repository_validate_staging_catches_an_untagged_story_naming_a_child(tmp_path):
+    multi_repo_layout(tmp_path)
+    stage(tmp_path, {"01-a.json": story("A", files=["web/src/x.ts"])})
+    proc = validate_staging(tmp_path)
+    assert proc.returncode == 1, proc.stderr
+    assert list(json.loads(proc.stdout)) == ["01"]
+
+
+def test_cross_repository_validate_staging_is_silent_in_a_git_root(tmp_path):
+    multi_repo_layout(tmp_path)
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    stage(tmp_path, {"01-a.json": tagged("A", "web", ["api/src/x.py"])})
+    proc = validate_staging(tmp_path)
+    assert proc.returncode == 0, proc.stdout
+    assert json.loads(proc.stdout) == {}
+
+
+def test_cross_repository_validate_staging_matches_whole_segments_only(tmp_path):
+    multi_repo_layout(tmp_path, children=("api", "api-gateway", "web"))
+    stage(tmp_path, {"01-a.json": tagged("A", "api", ["src/x.py", "api-gateway-notes/x.md"])})
+    proc = validate_staging(tmp_path)
+    assert proc.returncode == 0, proc.stdout
+
+
+def test_cross_repository_story_merge_refuses_naming_story_and_path(tmp_path):
+    stage(
+        tmp_path,
+        {
+            "01-a.json": tagged("A", "web", ["api/src/x.py"]),
+            "02-b.json": tagged("B", "api", ["src/y.py"]),
+        },
+        audit=True,
+    )
+    proc = merge(tmp_path)
+    assert proc.returncode == 1, proc.stderr
+    assert "Story US-001" in proc.stderr
+    assert "api/src/x.py" in proc.stderr
+    assert not os.path.exists(os.path.join(str(tmp_path), ".aimi", "tasks", "out-tasks.json"))
+
+
+def test_cross_repository_story_merge_accepts_owned_files_and_a_git_root(tmp_path):
+    stage(
+        tmp_path,
+        {
+            "01-a.json": tagged("A", "web", ["src/x.ts"]),
+            "02-b.json": tagged("B", "api", ["src/y.py"]),
+        },
+        audit=True,
+    )
+    assert merge(tmp_path).returncode == 0
+    stage(
+        tmp_path,
+        {
+            "01-a.json": tagged("A", "web", ["api/src/x.py"]),
+            "02-b.json": tagged("B", "api", ["src/y.py"]),
+        },
+        audit=True,
+    )
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    assert merge(tmp_path).returncode == 0

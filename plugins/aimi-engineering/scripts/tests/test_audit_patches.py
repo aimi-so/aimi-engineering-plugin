@@ -1091,14 +1091,16 @@ def test_path_ops_an_escaping_outputs_add_drops_as_bad_path_and_leaves_the_story
 
 
 def test_path_ops_the_op_tables_agree_with_each_other():
-    assert AP.OPS_FOR_FIELD["implementation.files"] == {"replace", "remove"}
+    assert AP.OPS_FOR_FIELD["implementation.files"] == {"add", "replace", "remove"}
     assert AP.OPS_FOR_FIELD["implementation.outputs"] == {"add", "replace", "remove"}
     assert set(AP.OPS_FOR_FIELD) == set(AP.ALLOWED_FIELDS)
     for field in ("implementation.files", "implementation.outputs"):
         assert (field, "replace") in AP.NEEDS_MATCH_VALUE
         assert (field, "remove") in AP.NEEDS_MATCH_VALUE
     assert ("implementation.outputs", "add") not in AP.NEEDS_MATCH_VALUE
-    assert "add" not in AP.OPS_FOR_FIELD["implementation.files"]
+    # `add` is what moves a cross-repository entry onto the story that owns it.
+    assert "add" in AP.OPS_FOR_FIELD["implementation.files"]
+    assert ("implementation.files", "add") not in AP.NEEDS_MATCH_VALUE
 
 
 def test_path_ops_files_replace_swaps_exactly_one_whole_entry(stg):
@@ -1578,3 +1580,39 @@ def test_help_lists_the_verb_beside_acknowledge_smell():
     text = proc.stdout + proc.stderr
     assert text.count("apply-audit-patches") >= 1
     assert text.index("acknowledge-smell") < text.index("apply-audit-patches")
+
+
+def test_cross_repository_files_add_appends_the_prefix_dropped_entry_to_the_owner(stg):
+    with_paths(stg, files=("api/src/x.py", "src/a.py"), idx="01")
+    with_paths(stg, files=("src/b.py",), idx="02")
+    write_result(
+        stg,
+        [
+            path_patch("implementation.files", "remove", match="api/src/x.py", idx="01"),
+            path_patch("implementation.files", "add", "src/x.py", idx="02"),
+        ],
+    )
+    _, report, _ = run(stg)
+    assert report["applied"] == 2
+    assert impl_of(stg, "01-alpha.json")["files"] == ["src/a.py"]
+    assert impl_of(stg, "02-beta.json")["files"] == ["src/b.py", "src/x.py"]
+
+
+def test_cross_repository_files_add_with_a_refused_path_is_dropped_as_bad_path(stg):
+    with_paths(stg, files=("src/b.py",), idx="02")
+    before = impl_of(stg, "02-beta.json")["files"]
+    write_result(stg, [path_patch("implementation.files", "add", "../api/src/x.py", idx="02")])
+    _, report, _ = run(stg)
+    assert report["applied"] == 0
+    assert report["dropped"] == [
+        {"storyIdx": "02", "field": "implementation.files", "op": "add", "reason": "bad-path"}
+    ]
+    assert impl_of(stg, "02-beta.json")["files"] == before
+
+
+def test_cross_repository_files_add_of_an_entry_already_listed_is_dropped(stg):
+    with_paths(stg, files=("src/b.py",), idx="02")
+    write_result(stg, [path_patch("implementation.files", "add", "src/b.py", idx="02")])
+    _, report, _ = run(stg)
+    assert report["applied"] == 0
+    assert impl_of(stg, "02-beta.json")["files"] == ["src/b.py"]
