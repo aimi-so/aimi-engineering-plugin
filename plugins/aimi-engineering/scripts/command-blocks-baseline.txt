@@ -247,6 +247,7 @@ unassigned	skills/story-executor/SKILL.md	WORKTREE_PATH	# inside the worker prom
 # why they are recorded here rather than blanket-patched.
 argument-gate	brainstorm.md	Step 0.5: Resolve Interactivity Mode (block 1)	# parses $ARGUMENTS for a flag and hands it to aimi-cli.sh, which validates it again
 argument-gate	brainstorm.md	Step 0.7: Detect Claude Design Bundle (block 1)	# parses $ARGUMENTS for a flag and hands it to aimi-cli.sh, which validates it again
+argument-gate	brainstorm.md	Step 0.8: Detect a Named Prototype Kit (block 1)	# tests each token with -f/-d, then hands the path to inspect-prototype-kit, which confines it again
 argument-gate	design/polish.md	Extract --non-interactive Flag (block 1)	# parses $ARGUMENTS for a flag and hands it to aimi-cli.sh, which validates it again
 argument-gate	design/polish.md	Extract --non-interactive Flag (block 2)	# parses $ARGUMENTS for a flag and hands it to aimi-cli.sh, which validates it again
 argument-gate	execute.md	Parse --phase Override (block 1)	# parses $ARGUMENTS for a phase id and hands it to aimi-cli.sh, which validates it again

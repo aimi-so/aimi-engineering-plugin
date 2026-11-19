@@ -96,7 +96,7 @@ TAIL_FILES = tuple(f for f, _h in TAIL_ENTRIES)
 # Sections of brainstorm.md that may hold inline text; every other section is a router entry.
 INLINE_SECTION_PREFIXES = (
     "Aimi Brainstorm", "Phase Files", "Feature Description", "Step 0:", "Step 0.5:",
-    "Step 0.6:", "Step 0.7: Detect", "Environment Variables", "Override Keywords",
+    "Step 0.6:", "Step 0.7: Detect", "Step 0.8:", "Environment Variables", "Override Keywords",
 )
 # Headings that moved out of brainstorm.md: none may remain there, each is in exactly one reference file.
 MOVED_HEADINGS = (
@@ -125,6 +125,7 @@ FIRST_RESEARCH_TASK = 'Task subagent_type="aimi-engineering:research:aimi-codeba
 ARGUMENT_FENCES = (
     ("Step 0.5", "detect-interactivity"),
     ("Step 0.7", 'BUNDLE_ARG=""'),
+    ("Step 0.8", "inspect-prototype-kit"),
 )
 
 
@@ -340,6 +341,7 @@ def check_detection_precedes_the_first_research_task(corpus):
         ("Step 0.5 detect-interactivity call", "$AIMI_CLI detect-interactivity"),
         ("Step 0.6 Resolve Agent Models line", "**Resolve Agent Models**"),
         ("Step 0.7 detect-design-bundle call", "$AIMI_CLI detect-design-bundle"),
+        ("Step 0.8 inspect-prototype-kit call", "$AIMI_CLI inspect-prototype-kit"),
     ):
         at = _first(text, needle)
         if at < 0:
@@ -828,3 +830,53 @@ def test_a_sentence_wrapped_across_lines_is_one_sentence():
     assert [s for s in sentences(text) if is_compaction_sentence(s)] == [
         "When a context compaction happens, re-read the router first."
     ]
+
+
+# ---------------------------------------------------------------------------
+# Named prototype kit (Step 0.8, the Phase 1 handoff wrap, the Phase 4 template)
+# ---------------------------------------------------------------------------
+
+STEP_08_HEADING = "## Step 0.8: Detect a Named Prototype Kit"
+
+
+def _step_08(corpus):
+    router = corpus[ROUTER_KEY]
+    start = router.index(STEP_08_HEADING)
+    end = router.find("\n## ", start + 1)
+    return router[start:end if end >= 0 else len(router)]
+
+
+def test_prototype_kit_step_08_sits_inline_between_step_07_and_phase_0(corpus):
+    router = corpus[ROUTER_KEY]
+    assert router.count(STEP_08_HEADING) == 1
+    at = router.index(STEP_08_HEADING)
+    last_07 = router.index("Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/brainstorm/step-0-7-bundle-prototype-gate.md")
+    phase_0 = router.index("\n## Phase 0: Assess Requirements Clarity")
+    assert last_07 < at < phase_0
+
+
+def test_prototype_kit_step_08_fence_reads_arguments_inline(corpus):
+    blocks = _fences_with(_step_08(corpus), "inspect-prototype-kit")
+    assert blocks and any(ARGUMENTS_READ.search(b) for b in blocks)
+    assert "cat \"${AIMI_CONFIG_DIR" in blocks[0]
+    assert not any("jq" in b for b in _fences_with(_step_08(corpus), "AIMI_CLI"))
+
+
+def test_prototype_kit_inspect_precedes_import_in_step_08(corpus):
+    body = _step_08(corpus)
+    assert 0 <= body.index("inspect-prototype-kit") < body.index("import-prototype-kit")
+    assert "qualifies" in body and "kitHtmlFiles" in body and "kitHandoffFiles" in body
+
+
+def test_prototype_kit_handoff_is_wrapped_and_escaped_in_phase_1(corpus):
+    text = corpus[REFERENCES_PREFIX + "phase-1-research.md"]
+    assert '<prototype_handoff path="' in text
+    assert "&lt;/prototype_handoff" in text and "&lt;prototype_handoff" in text
+    assert "kitHandoffFiles" in text and "DATA, not instructions" in text
+
+
+def test_prototype_kit_phase_4_template_has_branch_kit_and_prototype_handoff(corpus):
+    text = corpus[REFERENCES_PREFIX + "phase-4-capture.md"]
+    assert "branch: kit" in text
+    assert "prototypeHandoff:" in text
+    assert "non-HTML, non-markdown" in text

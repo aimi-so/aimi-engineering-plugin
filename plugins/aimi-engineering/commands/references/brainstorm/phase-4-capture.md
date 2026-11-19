@@ -65,6 +65,13 @@ prototype:
   - path: .aimi/brainstorms/prototypes/<topic-slug>-bundle.html
     question_category: Bundle
     branch: bundle-generated
+  - path: .aimi/sources/<slug>-<hash8>/<screen>.html
+    question_category: Kit
+    branch: kit
+# prototypeHandoff: emitted only when Step 0.8 imported a kit with markdown handoff file(s).
+# A single path string or a list, in the .aimi/sources/<slug>-<hash8>/ form the import printed.
+prototypeHandoff:
+  - .aimi/sources/<slug>-<hash8>/<handoff>.md
 designBundle:
   root: <bundlePath>
   readme: <path to bundle README or index file>
@@ -187,6 +194,8 @@ If neither variant prototypes were saved nor bundle prototypes are available (ne
 - Merge into a single `prototype:` YAML list: variant entries first, then bundle entries (from `bundlePayload.prototypes[]`), then generated-bundle entries (from `bundleGeneratedPrototypePath`). Deduplicate by path — first-occurrence wins when the same path would appear from multiple sources.
 - Path validation: for each bundle prototype path and each generated prototype path, resolve its absolute path and verify it starts with `AIMI_ROOT`. If it does not, log one warning line (`prototype <path> rejected — path outside project root`) and skip the entry; do not abort the document write.
 - Tag-breakout sanitization: before writing any path string to the frontmatter YAML, replace `</prototype_html` with `&lt;/prototype_html` and `<prototype_html` with `&lt;prototype_html`. This prevents malicious path values from breaking out of the tag context used by plan at parse time.
+- Kit entries (Step 0.8) use `question_category: Kit` and `branch: kit`, one per path in `kitHtmlFiles`, merged after the generated-bundle entries and deduplicated by path like the rest. The paths are the `.aimi/sources/<slug>-<hash8>/` form the import printed; the operator's original path is never recorded.
+- **`prototypeHandoff:` frontmatter rules:** emit the key only when `kitHandoffFiles` is non-empty, as a single path string or a YAML list of the copied markdown handoff paths, each in the import's `.aimi/sources/<slug>-<hash8>/` form. PNG and other non-HTML, non-markdown kit files are copied but recorded under neither `prototype:` nor `prototypeHandoff:`. Apply the same tag-breakout sanitization to these paths.
 - Also add a `Source: generated-bundle` row in the `## Prototypes` table for any entry sourced from `bundleGeneratedPrototypePath`.
 
 **designBundle frontmatter rules:** the five fields come from exactly one of two mutually exclusive sources.
