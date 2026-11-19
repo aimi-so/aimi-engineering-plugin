@@ -110,6 +110,33 @@ def test_the_shipped_tree_has_an_effort_beside_every_model():
     assert findings(corpus()) == []
 
 
+def test_split_sub_orchestrators_run_on_workflow_and_workers_on_executor():
+    base = "commands/references/execute/"
+    expected = {
+        base + "step-0-9-split-flow.md": "workflow",
+        base + "paired-split-dev-server-and-spawn.md": "workflow",
+        base + "step-4-wave-execution-loop.md": "executor",
+        base + "step-4-finalize.md": "executor",
+        base + "wave-reconcile.md": "executor",
+        base + "usage-validation-loop.md": "executor",
+    }
+    problems = []
+    for name, want in expected.items():
+        text = (ROOT / name).read_text(encoding="utf-8")
+        seen = set()
+        for line in text.split("\n"):
+            for rx in (PL_MODEL, PL_EFFORT):
+                m = rx.match(line)
+                if m:
+                    seen.add(m.group(2))
+            seen.update(BR_MODEL.findall(line))
+            seen.update(BR_EFFORT.findall(line))
+        other = "executor" if want == "workflow" else "workflow"
+        if want not in seen or other in seen:
+            problems.append(f"{name}: reads {sorted(seen)}, expected {want} and not {other}")
+    assert problems == []
+
+
 def test_the_scan_reaches_all_five_categories_in_both_syntaxes():
     seen_br, seen_pl = set(), set()
     for text in corpus().values():

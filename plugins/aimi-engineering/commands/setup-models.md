@@ -90,8 +90,8 @@ Question text (one per category, exactly as shown):
 - "Model for research/reading tasks (research)?"
 - "Model for review and analysis (review)?"
 - "Model for design tasks (design)?"
-- "Model for workflow tasks (workflow)?"
-- "Model for execution sub-orchestrators (executor)?"
+- "Model for workflow tasks, including execution sub-orchestrators (workflow)?"
+- "Model for story workers that edit code (executor)?"
 
 Cap each question at four options (the top-4 most likely picks). The picker's auto-appended "Other" lets the user type any model id from `AVAILABLE_MODELS_JSON` that did not make the top-4 — accept any string the user provides without further validation (the CLI's `detect-models` will validate against the available-model list before writing).
 
@@ -117,8 +117,8 @@ Ask one question per category, worded exactly:
 - "Effort for research/reading tasks (research)?"
 - "Effort for review and analysis (review)?"
 - "Effort for design tasks (design)?"
-- "Effort for workflow tasks (workflow)?"
-- "Effort for execution sub-orchestrators (executor)?"
+- "Effort for workflow tasks, including execution sub-orchestrators (workflow)?"
+- "Effort for story workers that edit code (executor)?"
 
 Use **AskUserQuestion** in two calls, because one call holds at most four questions: research, review and design first; workflow and executor in a second call. Put the current effort (from `CURRENT_EFFORTS_JSON`) first, labelled `(current)`, at most four options per question.
 

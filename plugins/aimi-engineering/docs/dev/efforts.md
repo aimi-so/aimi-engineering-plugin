@@ -25,6 +25,8 @@ The reader/writer asymmetry of `check_python3` is the same as for the model verb
 
 **OpenCode.** The effort is passed to `aimi-task` as its own `variant` argument and forwarded as `opencode run --variant <name>`. The model string and `SAFE_MODEL_PATTERN` do not change. `SAFE_VARIANT_PATTERN` in `tools/aimi-task.ts` (`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`) is the defense-in-depth check on the value, the same literal as the one in `models.py`; `test_aimi_task.py` runs the tool under `bun` and compares the two. The OpenCode preamble written by `install.sh` tells the agent to pass the variant.
 
+**Which category a general-purpose spawn of `/aimi:execute` reads.** The split sub-orchestrators (`step-0-9-split-flow.md`, SPAWNED_SPLIT_TASK=flat-split-child, and `paired-split-dev-server-and-spawn.md`, SPAWNED_SPLIT_TASK=phase-split-sub-orchestrator) read `workflow`. The story workers (story in `step-4-wave-execution-loop.md`, finalize in `step-4-finalize.md`, reconcile in `wave-reconcile.md`, usage fix in `usage-validation-loop.md`) read `executor`, so the executor category means the workers that edit code. A split child still receives `AGENT_MODELS` and `AGENT_EFFORTS` whole and hands `AGENT_MODELS.executor` to the story workers it spawns. `test_split_sub_orchestrators_run_on_workflow_and_workers_on_executor` pins the six sites.
+
 ## What overrides it
 
 `CLAUDE_CODE_EFFORT_LEVEL`, set in the environment, is applied by Claude Code to every spawn and overrides every per-category effort. `/aimi:setup-models` prints a line when it is set. The per-spawn `effort` parameter needs Claude Code 2.1.292 or newer. A level the chosen model does not support falls back to the highest supported level at or below it; this is the host's behaviour and is not validated here.
