@@ -9,6 +9,14 @@ allowed-tools: Read, Glob, Grep, AskUserQuestion, Task, Write, Bash($AIMI_CLI:*)
 
 Clarify **WHAT** to build through collaborative dialogue before planning **HOW** to build it.
 
+## Phase Files
+
+Most phases below are routers: a heading, an `Applies when:` condition evaluable from state this file already holds, and a `Read` line naming the phase's file under `${CLAUDE_PLUGIN_ROOT}/commands/references/brainstorm/`. When the condition holds, Read that file in full before running the phase, and follow it as written. When it does not, skip the file and apply the default stated beside the condition, so every variable a later phase reads is still set. If a Read of a listed file fails, STOP and report the path; never treat a failed Read as the condition being false. **When the conversation resumes after a context compaction, re-read this router and the current phase's file before continuing.** Its text does not survive compaction; this router does.
+
+Steps 0.5, 0.6 and the detection part of Step 0.7 stay in this file, above the first `Read`, so interactivity, models and bundle detection always run before research; the blocks that read `$ARGUMENTS` stay here too, because `$ARGUMENTS` is substituted only in a command body.
+
+Artifacts written under `.aimi/` follow the Artifact Language Rule in `${CLAUDE_PLUGIN_ROOT}/commands/references/user-communication.md`.
+
 ## Feature Description
 
 <feature_description> $ARGUMENTS </feature_description>
@@ -123,257 +131,20 @@ error, no warning, no change to existing behavior.
 
 ### Step 0.7 Ambiguous Bundle Resolution
 
-Branches on `BUNDLE_STATUS` from the detection call above. When `BUNDLE_STATUS`
-is `0` (whether `bundleDetected` ended up `true`, or `false` from a literal
-`null`), this section does not fire at all — proceed straight to Step 0.7
-Design Handoff Offer below exactly as if this section did not exist. The three
-subsections below are mutually exclusive on `BUNDLE_STATUS` and
-`INTERACTIVE_MODE`, and brainstorm never aborts over a bundle in any of them
-(D9).
-
-#### Interactive Picker (status 3)
-
-Fires when `BUNDLE_STATUS=3` and `INTERACTIVE_MODE=picker`. `BUNDLE_RESULT`
-parses as `{"ambiguous":true,"tier":"...","candidates":[...]}`; each entry in
-`.candidates[]` carries `.path`, `.businessSpec` and `.designSpec` (`null`
-when that spec is absent).
-
-Present exactly one AskUserQuestion, naming the count and listing the first 4
-entries of `.candidates[]` in their own path order, escape hatch last per
-`commands/references/interactivity.md`'s Option Format. Compose the question
-and option text in the same language `$FEATURE_DESCRIPTION` is written in,
-per the Adaptive Language Rule (`commands/references/user-communication.md`
-§ Adaptive Language Rule) — the English wording below is an illustration for
-a reader of this file, not a fixed string to emit verbatim:
-
-```
-Design Bundle Detection found <N> bundles and none was named. Which one should this brainstorm use?
-A — <candidates[0].path> (<"BusinessSpec, DesignSpec" | "BusinessSpec only" | "DesignSpec only" | "no specs", from that candidate's own businessSpec/designSpec>)
-B — <candidates[1].path> (...)
-...
-None — proceed without a bundle
-```
-
-- **[None, the escape option]:** `bundleDetected` stays `false`
-  (already derived above). Proceed to Step 0.7 Design Handoff Offer below.
-- **[A pick]:** set `CHOSEN_BUNDLE_PATH` to the selected candidate's own
-  `.path`, then re-detect directly against it — a candidate the CLI's own scan
-  already returned is already inside `AIMI_ROOT`, so no realpath/import
-  resolution is needed:
-
-  ```bash
-  AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
-  : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-  BUNDLE_ERR_FILE=$(mktemp)
-  BUNDLE_RESULT=$($AIMI_CLI detect-design-bundle --bundle "$CHOSEN_BUNDLE_PATH" 2>"$BUNDLE_ERR_FILE")
-  BUNDLE_STATUS=$?
-  BUNDLE_STDERR=$(cat "$BUNDLE_ERR_FILE" 2>/dev/null)
-  rm -f "$BUNDLE_ERR_FILE"
-  ```
-
-  Re-derive `bundleDetected`, `bundlePayload` and `bundlePath` from this fresh
-  result using the exact same rule stated above (`BUNDLE_STATUS=0` and
-  non-null is required for `bundleDetected=true`) — no second test is written
-  here. A second ambiguity is structurally impossible: `--bundle` names
-  exactly one directory. Proceed to Step 0.7 Design Handoff Offer below.
-
-#### Agent Mode (status 3)
-
-Fires when `BUNDLE_STATUS=3` and `INTERACTIVE_MODE=agent`. There is no user to
-ask, so do not guess: log exactly one line to the brainstorm document's
-working memory naming every candidate, leave `bundleDetected` as `false`
-(already derived above), and proceed:
-
-```
-agent-mode: design-bundle-ambiguous — <N> bundles found and none was named (<candidates[0].path>, <candidates[1].path>, ...); re-run with --bundle <path> to choose one.
-```
-
-#### Other Detection Failure (status neither 0 nor 3)
-
-Fires when `BUNDLE_STATUS` is neither `0` nor `3`, in either picker or agent
-mode. Log one warning line carrying the CLI's own stderr and proceed without a
-bundle:
-
-```
-bundle detection failed (exit <BUNDLE_STATUS>): <BUNDLE_STDERR>
-```
-
-Leave `bundleDetected` as `false` (already derived above) and continue to
-Step 0.7 Design Handoff Offer below.
+Applies when: `BUNDLE_STATUS` from the detection call above is not `0`. When it is `0`, skip the file: `bundleDetected` stays as derived above and the run goes straight to the next entry.
+Covers: `#### Interactive Picker (status 3)`, `#### Agent Mode (status 3)`, `#### Other Detection Failure (status neither 0 nor 3)`.
+Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/brainstorm/step-0-7-ambiguous-bundle-resolution.md in full.
 
 ### Step 0.7 Design Handoff Offer
 
-Offers to generate a BusinessSpec/DesignSpec bundle now, for a UI-bearing
-feature with no bundle on hand, and re-enters bundle detection on
-acceptance — so the bundle-aware branches below (the Post-Processing
-prototype-generation gate immediately following, and every other
-`bundleDetected`-gated branch downstream) run against the bundle just
-written, in this same brainstorm invocation, instead of the session ending
-with `bundleDetected` permanently `false`.
-
-#### Step 1: Fire-Condition Check
-
-The gate fires only when **both** of the following hold:
-
-1. **`bundleDetected` is `false`** — the result derived above.
-2. **The feature description matches a UI signal.** Scan `$FEATURE_DESCRIPTION` against the "Keyword Signals" section of `${CLAUDE_PLUGIN_ROOT}/commands/references/ui-signals.md` — read that file and apply its keyword list, its case-insensitive whole-word matching rule (regex word boundaries `\b`), and its "design" co-occurrence rule, as written; do not restate them here. **Structural Signals do not apply here** — no `creates`/`areas`/`phases[]` array exists yet at this point in the flow, since Phase 3.5 has not run. This matches ui-signals.md's own "How to Combine" section, which names exactly this case as valid: the keyword signal "can flag a plain-text feature description ... as UI-relevant before a structural artifact list exists."
-
-Phase 1.7 (UI Feature Detection) applies the identical keyword scan to the identical `$FEATURE_DESCRIPTION` text later in this same session. The two calls necessarily agree — this is expected redundancy, not a second, diverging detector; this gate reads and writes no Phase-1.7-owned variable.
-
-If either condition is false, skip this entire gate silently: no log line, no offer, proceed straight to Step 0.7 Post-Processing below exactly as if this gate did not exist.
-
-#### Step 2: Non-Interactive Fast Path (Agent Mode)
-
-When `INTERACTIVE_MODE=agent`, skip AskUserQuestion entirely — there is no user to generate a bundle with. Log exactly one line to the brainstorm document's working memory:
-
-```
-agent-mode: design-handoff-offer skipped (no bundle to generate without a user)
-```
-
-Proceed to Step 0.7 Post-Processing with `bundleDetected` unchanged (still `false`).
-
-#### Step 3: Interactive Offer
-
-When `INTERACTIVE_MODE=picker`, present via **AskUserQuestion** (picker mode) with exactly two options, the escape hatch (`Skip`) last, per `commands/references/interactivity.md`'s Option Format. Compose the question and option text in the same language `$FEATURE_DESCRIPTION` is written in, per the Adaptive Language Rule (`commands/references/user-communication.md` § Adaptive Language Rule) — the English wording below is an illustration for a reader of this file, not a fixed string to emit verbatim:
-
-```
-No design bundle was found for this UI-bearing feature — want to generate a BusinessSpec/DesignSpec now?
-
-Generate now — run the design handoff interview and write a bundle
-Skip — proceed without a bundle
-```
-
-- **[Skip]:** Proceed to Step 0.7 Post-Processing with `bundleDetected` unchanged (still `false`). No artifact is produced.
-- **[Generate now]:** Follow Step 4 below.
-
-#### Step 4: Accept — Run Design Handoff and Re-Detect
-
-1. **Derive the topic slug.** From `$FEATURE_DESCRIPTION`, derive a topic slug using the five-step algorithm in `${CLAUDE_PLUGIN_ROOT}/commands/references/topic-slug.md`. Phase 1's own topic-slug derivation (Step 1b below) has not run yet at this point in the flow, so this gate derives it here; the same deterministic algorithm applied to the same `$FEATURE_DESCRIPTION` necessarily produces the same slug, so Step 1b's later derivation is expected redundancy, not a conflict.
-
-2. **Run the skill.** Read `${CLAUDE_PLUGIN_ROOT}/skills/aimi-design-handoff/SKILL.md` and follow its instructions exactly — inline read-and-follow, never a Task-spawned sub-agent. Pass the feature description (`$FEATURE_DESCRIPTION`), the topic slug just derived, and an explicit `outputRoot: .aimi/design-bundles/<topic-slug>` so the bundle it writes lands exactly where this gate re-detects it in the next step. This story does not re-derive the skill's own `README.md`/`BusinessSpec.md`/`DesignSpec.md` authoring or the spec-section contract's numbering — that is the skill's own job.
-
-3. **Re-detect.** After the skill returns, re-resolve `$AIMI_CLI` with the same per-call cache-read boilerplate already used three times in Step 0.7 above, then run:
-
-   ```bash
-   AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
-   : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-   BUNDLE_ERR_FILE=$(mktemp)
-   BUNDLE_RESULT=$($AIMI_CLI detect-design-bundle --bundle ".aimi/design-bundles/<topic-slug>" 2>"$BUNDLE_ERR_FILE")
-   BUNDLE_STATUS=$?
-   BUNDLE_STDERR=$(cat "$BUNDLE_ERR_FILE" 2>/dev/null)
-   rm -f "$BUNDLE_ERR_FILE"
-   ```
-
-   `--bundle` is mandatory here — never a bare `detect-design-bundle` call,
-   and never `--root`: `--bundle` reads the named path directly as the bundle
-   itself (per `outline:01`/D4's "fails loudly if it is not a bundle"), which
-   is simpler than `--root`'s former child-scan workaround (that scan used to
-   skip any directory literally named `.aimi`, so pointing `--root` at the
-   parent directory was needed to reach a pre-check that treated the
-   generated directory itself as a candidate before any child-scan ran) and
-   needs no explanation tied to that `.aimi`-skip case at all.
-
-4. **Re-derive.** Re-derive `bundleDetected`, `bundlePayload`, and `bundlePath` from this fresh result using the exact same rule stated in the bullet list above (`BUNDLE_STATUS` must be `0` and `BUNDLE_RESULT` non-null for `bundleDetected=true`) — no second test is written here, and no branch reads the generated `BusinessSpec.md`/`DesignSpec.md` directly outside this re-detection path. `--bundle` never produces its own ambiguity (it names exactly one directory), so any non-zero `BUNDLE_STATUS` here is simply "no detectable bundle", the same as step 5 below.
-
-5. **When `bundleDetected` is still `false`** after re-detection (the skill did not produce a detectable bundle), log exactly one warning line to the brainstorm document's working memory:
-
-   ```
-   design-handoff skill did not produce a detectable bundle — proceeding without one
-   ```
-
-   and continue exactly as if the offer had been declined — never abort the brainstorm session.
-
-Whether accepted or skipped, this gate runs to completion before Step 0.7 Post-Processing below, so a bundle generated here is seen by the Post-Processing prototype-generation gate and by every other `bundleDetected`-gated branch downstream, in the same brainstorm invocation.
+Applies when: `bundleDetected=false`, evaluated after the entry above has run. When `bundleDetected=true`, skip the file: no offer is made and `bundleDetected`, `bundlePayload` and `bundlePath` stay as derived.
+Covers: `#### Step 1: Fire-Condition Check`, `#### Step 2: Non-Interactive Fast Path (Agent Mode)`, `#### Step 3: Interactive Offer`, `#### Step 4: Accept — Run Design Handoff and Re-Detect`.
+Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/brainstorm/step-0-7-design-handoff-offer.md in full.
 
 ### Step 0.7 Post-Processing: Bundle Prototype Generation Gate
 
-**Check render bundle flag (at bundle-detection gate):** Immediately after deriving `bundleDetected`, check whether the topic text or any user reply so far contains `render bundle` (case-insensitive substring). If matched and not already emitted this session, set `renderBundlePending = true` and emit `render-bundle override active — regenerating prototype from specs` once to chat.
-
-**Generation condition:** When `bundleDetected=true` AND (the `prototypes[]` array in `bundlePayload` is empty OR `renderBundlePending = true`), run bundle prototype generation:
-
-1. **Check status:**
-   ```bash
-   AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
-   : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-   STATUS_JSON=$($AIMI_CLI bundle-prototype-status \
-     --bundle "<bundlePath>" \
-     --topic "<topic-slug>" \
-     $([ "$renderBundlePending" = "true" ] && echo "--force"))
-   ```
-   Parse `STATUS_JSON` for:
-   - `needs_generation` (bool)
-   - `view_list` (array of `{name, source_section}`)
-   - `view_source` (`"designSpec"` | `"businessSpec"` | `"none"`)
-   - `output_path` (string)
-
-2. **When `view_source` is `"none"`:** Emit exactly:
-   `bundle prototype generation skipped — no view list in DesignSpec § 4 or BusinessSpec § 5/§ 6`
-   This is `cmd_bundle_prototype_status`'s own hardcoded fallback probe order (DesignSpec § 4, then BusinessSpec § 5, then § 6) for placeholder-prototype generation — distinct from `BusinessSpec § 2` (Screens), the canonical screen-list section `commands/references/spec-section-contract.md` documents for story decomposition.
-   Then proceed without generation. Do not set `bundleGeneratedPrototypePath`. Skip the remaining sub-steps.
-
-3. **When `needs_generation` is `true`:** Create the output directory and spawn the author agent:
-   ```bash
-   mkdir -p .aimi/brainstorms/prototypes
-   ```
-   Parse additional fields from `STATUS_JSON`:
-   - `sidecar_path` — the sidecar JSON path returned by `bundle-prototype-status`
-   Extract from `bundlePayload`:
-   - `designSpec` → `designSpecPath` (may be null)
-   - `businessSpec` → `businessSpecPath` (may be null)
-   - `chats[]` → `chatPaths` (may be empty)
-
-   **Path guard:** Resolve `output_path` to an absolute path and verify it starts with `AIMI_ROOT`. If it does not, log one warning line (`bundle prototype generation skipped — output path outside project root: <output_path>`) and abort generation for this session without clearing `renderBundlePending`.
-
-   Spawn the bundle prototype author agent:
-   ```
-   Task subagent_type="aimi-engineering:research:aimi-bundle-prototype-author"
-     [model: <AGENT_MODELS.research when not "inherit">]
-     [effort: <AGENT_EFFORTS.research when not "inherit">]
-     prompt: "Generate a prototype HTML for the design bundle.
-              bundlePath=<bundlePath>
-              viewList=<view_list as JSON array of name strings>
-              viewSource=<view_source>
-              designSpecPath=<designSpecPath or empty>
-              businessSpecPath=<businessSpecPath or empty>
-              chatPaths[]=<chatPaths as JSON array>
-              outputPath=<output_path>"
-   ```
-
-   After the agent completes, verify the file was written:
-   ```bash
-   ls "<output_path>" 2>/dev/null
-   ```
-   If the file is missing, log one warning line (`bundle prototype generation failed — agent did not write output: <output_path>`) and proceed without a generated prototype.
-
-4. **When generation succeeds** (file confirmed on disk):
-
-   a. **Finalize the sidecar:** Compute hashes and call:
-      ```bash
-      AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
-      : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-      BUNDLE_HASH=$(sha256sum "<bundlePath>/README.md" 2>/dev/null | awk '{print $1}' || echo "")
-      DESIGN_HASH=$([ -n "<designSpecPath>" ] && sha256sum "<designSpecPath>" 2>/dev/null | awk '{print $1}' || echo "")
-      BUSINESS_HASH=$([ -n "<businessSpecPath>" ] && sha256sum "<businessSpecPath>" 2>/dev/null | awk '{print $1}' || echo "")
-      $AIMI_CLI bundle-prototype-finalize \
-        --topic "<topic-slug>" \
-        --bundle-hash "$BUNDLE_HASH" \
-        --design-spec-hash "$DESIGN_HASH" \
-        --business-spec-hash "$BUSINESS_HASH" \
-        --view-list '<view_list as JSON array>' \
-        --source-command brainstorm
-      ```
-
-   b. **Register the generated prototype:** Store `output_path` as `bundleGeneratedPrototypePath` in working memory. Append one entry to `prototype_entries`:
-      ```
-      { path: "<output_path>", question_category: "Bundle", branch: "bundle-generated" }
-      ```
-      This entry uses the same YAML key ordering as variant-derived entries (path, question_category, branch) so that plan.md Phase 0 can parse it uniformly.
-
-   c. **Clear the flag:** Set `renderBundlePending = false`.
-
-5. **When `needs_generation` is `false`** (and `renderBundlePending` was not `true`): Generation is not needed — the sidecar already records an up-to-date prototype. Use the `output_path` from `STATUS_JSON` as a reference for downstream phases if the file exists on disk. Do not append to `prototype_entries` here — the path will be picked up through `bundlePayload.prototypes[]` in Phase 4 as a normal bundle-derived entry.
-
-**Tag-breakout sanitization:** Before writing `bundleGeneratedPrototypePath` into any YAML frontmatter key (see Phase 4 `prototype:` frontmatter rules), replace `</prototype_html` with `&lt;/prototype_html` and `<prototype_html` with `&lt;prototype_html` in the path string. (In practice a file path will never contain these sequences, but the guard must be on the rail per security policy.)
+Applies when: `bundleDetected=true`, evaluated after the entry above has run, so a bundle generated by the offer is seen here. When `bundleDetected=false`, skip the file: no prototype is generated, `renderBundlePending` stays `false` and `bundleGeneratedPrototypePath` stays unset.
+Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/brainstorm/step-0-7-bundle-prototype-gate.md in full.
 
 ## Environment Variables
 
@@ -411,197 +182,14 @@ Certain literal phrases typed in the topic or in a reply trigger one-shot render
 
 ## Phase 0: Assess Requirements Clarity
 
-Decide from the feature description whether brainstorming is needed.
-
-**Clear requirements signals:**
-- Specific acceptance criteria provided
-- Referenced existing patterns to follow
-- Described exact expected behavior
-- Constrained, well-defined scope
-
-**If requirements are already clear:**
-Use **AskUserQuestion** to suggest: "The requirements already look detailed enough to plan. Run `/aimi:plan` now, or keep exploring the idea first?"
-
-*Agent-mode fallback: if `INTERACTIVE_MODE=agent`, auto-proceed to `/aimi:plan` (the non-disruptive default). Log: `agent-mode: phase-0-plan-redirect auto-proceeded to plan`.*
-
-**If unclear or vague:** proceed to Phase 1.
+Applies when: every run, after the three Step 0.7 entries above. There is no skipped case.
+Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/brainstorm/phase-0-assess-clarity.md in full.
 
 ## Phase 1: Research (Conditional, Parallel)
 
-### Step 1a: Specificity Assessment
-
-Before spawning research agents, assess the feature description against **two independent criteria** — one for codebase research, one for best-practices research. Each agent may be independently skipped or run.
-
-#### Codebase Research Assessment
-
-| Bucket | Signals | Action |
-|--------|---------|--------|
-| **Skip** | Description references specific file paths, names technologies/frameworks, or describes exact patterns to follow | Skip codebase researcher |
-| **Run** | Description is vague, conceptual, or exploratory (e.g., "improve performance", "add a settings page") | Run codebase researcher |
-| **Run** | Uncertain whether description is specific enough | Run codebase researcher |
-
-#### Best-Practices Research Assessment
-
-| Bucket | Signals | Action |
-|--------|---------|--------|
-| **Skip** | User explicitly says "follow existing pattern exactly" or description is purely internal refactoring (renaming, moving files, deleting dead code) | Skip best-practices researcher |
-| **Run** | Feature involves new functionality, external integrations, user-facing behavior, or architectural decisions | Run best-practices researcher |
-| **Run** | Uncertain whether external practices are relevant | Run best-practices researcher |
-
-Do not mention skip decisions to the user — just proceed seamlessly.
-
-**When both researchers are skipped:** Phase 2 generates topic-based questions that reference the specific technologies, file paths, or patterns the user already mentioned in their description. These are not generic fallback questions — they are informed by the concrete details the user provided.
-
-**When only codebase researcher is skipped:** Phase 2 questions are informed by external best practices plus the concrete details the user provided.
-
-**When only best-practices researcher is skipped:** Phase 2 questions are informed by codebase patterns plus the concrete details the user provided.
-
-### Step 1b: Preparation and Research (Parallel)
-
-#### Derive Topic Slug
-
-From the feature description, derive a topic slug (needed for research output paths)
-using the five-step algorithm in `commands/references/topic-slug.md`.
-
-If `AIMI_BRAINSTORM_DEBUG=1`: emit `[brainstorm-debug] topic-slug: <derived-slug>` to chat.
-
-#### Generate Run Discriminator
-
-Generate a single timestamp for this brainstorm run to prevent same-day re-runs from overwriting prior research files:
-
-```bash
-RUN_TS=$(date +%H%M%S)
-```
-
-Store `RUN_TS` and use it in **all** research agent prompts for this run.
-
-#### Create Research Directory
-
-```bash
-mkdir -p .aimi/research
-```
-
-#### Extract Path Hints
-
-Before spawning research agents, extract file-path hints from the feature description so the codebase researcher can scope its search rather than globbing the entire repo.
-
-**Regex:** Match tokens that look like file paths or directory globs — tokens containing `/` or `*` that do not start with a URL scheme (`http://`, `https://`, `ftp://`).
-
-Concretely, scan `$ARGUMENTS` for whitespace-delimited tokens that satisfy **all** of these:
-
-1. Contains at least one `/` or `*` character.
-2. Does not start with `http://`, `https://`, or `ftp://`.
-3. Does not start with `/etc/`.
-4. Does not contain `..` (any path traversal component).
-5. Is not inside a code fence (skip tokens between `` ``` `` or `` ` `` delimiters).
-6. Does not contain an HTML tag (`<` or `>`).
-
-**Sanitize each surviving token** using the base rules plus the path-hints extension defined in
-`commands/references/sanitization.md`.
-
-Store the surviving tokens as `pathHints` (a list). If no tokens survive, set `pathHints` to an empty list.
-
-#### Run Research Agents
-
-Spawn the selected research agents **in parallel** using the Task tool:
-
-```
-Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
-  [model: <AGENT_MODELS.research when not "inherit">]
-  [effort: <AGENT_EFFORTS.research when not "inherit">]
-  prompt: "Understand existing patterns related to: [feature description].
-           Look for: similar features, established patterns, CLAUDE.md guidance,
-           relevant file paths, technology choices.
-           researchDepth=standard
-           topicSlug=<topic-slug>
-           [If pathHints is non-empty]: paths: [<comma-joined pathHints>]
-           outputPath: .aimi/research/YYYY-MM-DD-<topic-slug>-[RUN_TS]-codebase.md"
-
-Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
-  [model: <AGENT_MODELS.research when not "inherit">]
-  [effort: <AGENT_EFFORTS.research when not "inherit">]
-  prompt: "Research current best practices for: [feature description].
-           Look for: industry standards, community conventions, recommended
-           patterns, common pitfalls, and authoritative guidance.
-           researchDepth=standard
-           topicSlug=<topic-slug>
-           outputPath: .aimi/research/YYYY-MM-DD-<topic-slug>-[RUN_TS]-best-practices.md"
-
-Task subagent_type="aimi-engineering:research:aimi-design-bundle-researcher"
-  [model: <AGENT_MODELS.research when not "inherit">]
-  [effort: <AGENT_EFFORTS.research when not "inherit">]
-  prompt: "Analyse the Claude Design bundle to extract design intent and chat
-           context relevant to: [feature description].
-           bundlePath=<bundlePath>
-           topicSlug=<topic-slug>
-           RUN_TS=[RUN_TS]
-           outputPath: .aimi/research/YYYY-MM-DD-<topic-slug>-[RUN_TS]-design-bundle.md"
-```
-
-Spawn the design-bundle researcher **only when `bundleDetected=true`**. When
-`bundleDetected=false`, omit this Task call entirely — no error, no log entry.
-
-Only spawn the agents that were not skipped in Step 1a.
-
-**Input sanitization:** Before interpolating the feature description into **each** research agent
-prompt, apply the base rules from `commands/references/sanitization.md` identically to both
-agent prompts.
-
-### Step 1c: Research Consolidation
-
-Merge the results from whichever agents completed successfully into a structured summary. Handle all four permutations:
-
-| Codebase Result | Best-Practices Result | Action |
-|-----------------|----------------------|--------|
-| **Success** | **Success** | Merge both into structured summary; surface conflicts between internal patterns and external best practices as candidate questions for Phase 2 |
-| **Success** | **Failed/Skipped** | Use codebase findings only; populate Key Patterns and File References sections |
-| **Failed/Skipped** | **Success** | Use best-practices findings only; populate Key Patterns and External Insights sections |
-| **Failed/Skipped** | **Failed/Skipped** | Proceed with no research context; Phase 2 falls back to generic topic-based questions (existing behavior) |
-
-#### Structured Consolidation Schema
-
-Organize the merged findings into these sections:
-
-1. **Key Patterns**: Relevant codebase patterns, naming conventions, architectural decisions, and best-practice patterns discovered by either agent
-2. **Conflicts**: When both agents succeed, compare their findings. If internal codebase patterns diverge from external best practices (e.g., the codebase uses pattern A but best practices recommend pattern B), capture each conflict as a candidate question for Phase 2. Present these as explicit choices: "The codebase currently uses [X], but industry best practices recommend [Y]. Which approach should we follow?"
-3. **File References**: Specific file paths, modules, and code locations relevant to the feature (from codebase researcher)
-4. **External Insights**: Industry standards, community conventions, recommended patterns, common pitfalls (from best-practices researcher)
-5. **Design Intent** _(populated only when `bundleDetected=true` and the design-bundle researcher succeeded)_: Chat-transcript themes, stated design rationale, visual preferences, and UX intent extracted from the Claude Design bundle. Store the list of addressed topic categories from the bundle as `bundleAddressedTopics` in working memory — this list is consumed by the Phase 2 topic-coverage gate. When the design-bundle researcher failed or was skipped, omit this section entirely; do not write a placeholder.
-
-This structured summary feeds into Phase 2 question generation and Phase 4 design document capture.
-
-#### Collect researchPaths
-
-After merging findings, collect the output paths of every researcher that succeeded into a `researchPaths` working-memory list. Brainstorm tracks four research kinds that plan can later reuse:
-
-| Kind | Filename suffix | Agent |
-|------|----------------|-------|
-| `codebase` | `-codebase.md` | `aimi-codebase-researcher` |
-| `best-practices` | `-best-practices.md` | `aimi-best-practices-researcher` |
-| `framework-docs` | `-framework-docs.md` | `aimi-framework-docs-researcher` (when spawned) |
-| `learnings` | `-learnings.md` | `aimi-learnings-researcher` (when spawned) |
-
-1. For each researcher that completed successfully, record the `outputPath` that was passed to that agent's prompt (e.g., `.aimi/research/YYYY-MM-DD-<topic-slug>-[RUN_TS]-codebase.md`). Include all four kinds above when the corresponding agent was spawned and succeeded.
-2. Paths are relative to AIMI_ROOT (no leading `./`, no `..` components).
-3. Deduplicate: if the same path appears more than once, keep only one entry.
-4. Validate each path exists on disk under AIMI_ROOT before adding it to the list. Drop any path that fails this check and emit one warning line per dropped entry: `warning: researchPaths entry not found on disk — dropping: <path>`.
-5. If all researchers were skipped or failed (the "Failed/Skipped + Failed/Skipped" row), the list remains empty.
-
-Store the final list in working memory as `researchPaths`. It is consumed when writing the brainstorm document in Phase 4.
-
-**Reuse contract for plan:** When `/aimi:plan` reads a brainstorm with a `researchPaths` frontmatter key, it classifies each path by filename suffix (per the table above) and builds a `reusedResearch{kind: path}` map. Plan uses this map to skip re-spawning researchers for kinds that are already fresh (within 14 days). A brainstorm without a `researchPaths` key (legacy) disables all reuse silently — no error. Plan never reuses paths for kinds whose suffix is not in the table (e.g., `-design-bundle.md` paths are ignored for reuse).
-
-### Quality Gate: Research Adequacy
-
-Before generating questions, review the research output from Phase 1.
-
-**Check:** Did research produce at least one **actionable finding** — a specific file path, pattern name, technology reference, or best practice?
-
-- **If yes:** Proceed to Phase 2 normally. Research findings inform question generation.
-- **If no (and research was run):** Use a conversational nudge before continuing:
-  > "Before we continue, I notice the research didn't surface concrete patterns or references in the codebase. Could you point me to any relevant files or existing features I should look at? Or if you'd prefer, we can proceed with general exploration."
-  Accept the user's response (additional context or confirmation to proceed) and continue to Phase 2.
-- **If research was skipped by specificity logic (Step 1a):** This gate is **advisory only** — the user already provided specific details that made research unnecessary. Proceed to Phase 2 without prompting.
+Applies when: every run that continues past Phase 0. When Phase 0 redirected to `/aimi:plan`, skip the file; no research runs and no research variable is set.
+Covers: `### Step 1a: Specificity Assessment`, `### Step 1b: Preparation and Research (Parallel)`, `### Step 1c: Research Consolidation`, `### Quality Gate: Research Adequacy`.
+Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/brainstorm/phase-1-research.md in full.
 
 ## Phase 1.7: UI Feature Detection
 

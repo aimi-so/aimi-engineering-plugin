@@ -471,6 +471,9 @@ REFERENCE_ALLOWLIST_FULL=(
   # plan/*.md is a glob so split files added later need no edit here; they
   # carry inline CLI resolution moved out of plan.md.
   "plan/*.md"
+  # brainstorm/*.md carries the brainstorm steps and phases moved out of
+  # brainstorm.md, pickers and inline CLI resolution included.
+  "brainstorm/*.md"
   # execute/*.md carries the execute flow moved out of execute.md, pickers and
   # inline CLI resolution included; the glob needs no edit for later splits.
   "execute/*.md"
