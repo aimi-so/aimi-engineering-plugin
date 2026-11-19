@@ -193,6 +193,8 @@ assert_eq "5" "$(printf '%s\n' "$OUT" | grep -c '_EFFORT=inherit$')" \
 assert_file_has "$PLAN_INSTALLED" 'RESOLVED_EFFORTS=$($AIMI_CLI resolve-efforts 2>/dev/null | head -n 1)' \
   "effort: preamble resolves RESOLVED_EFFORTS through head -n 1"
 assert_file_has "$PLAN_INSTALLED" 'variant="[$EXECUTOR_EFFORT' "effort: the aimi-task example carries variant="
+assert_file_has "$PLAN_INSTALLED" 'variant="[$WORKFLOW_EFFORT' "effort: the aimi-task example carries the workflow variant="
+assert_file_has "$PLAN_INSTALLED" 'model="[$WORKFLOW_MODEL' "effort: the aimi-task example carries the workflow model="
 
 # effort annotations survive the translation, in order
 effort_tokens() { grep -o 'effort: <AGENT_EFFORTS\.[a-z]* when not "inherit">' "$1"; }

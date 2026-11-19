@@ -172,8 +172,8 @@ For each record in SPLIT_PLAN, all Task( calls in one turn:
 
 Task(
     subagent_type: "general-purpose",
-    model: <AGENT_MODELS.executor when not "inherit">,
-    effort: <AGENT_EFFORTS.executor when not "inherit">,
+    model: <AGENT_MODELS.workflow when not "inherit">,
+    effort: <AGENT_EFFORTS.workflow when not "inherit">,
     description: "Execute split tasks: [that record's file basename]",
     prompt: [
         SPAWNED_SPLIT_TASK=flat-split-child
