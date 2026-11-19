@@ -16,6 +16,7 @@ Using the user's feature description and consolidated research findings (from St
 - Option text under 15 words
 - Every question includes an "Other: [please specify]" escape hatch
 - When research returns findings, make option A the "follow existing pattern" choice and reference specific patterns found by the research agent in the question text
+- When a prototype was recorded, compose each option per `commands/references/user-communication.md` § Prototype-First Options (the follow-existing-pattern rule above stays for structure the prototype does not show).
 - **Design Intent coverage gate:** When `bundleDetected=true` and Step 1c populated `bundleAddressedTopics`, treat every category present in that list as already addressed. Do not generate questions for those categories — the bundle's chat transcript has already surfaced the user's intent. Use the Design Intent section from Step 1c as a distinct context block when authoring questions for any remaining categories.
 
 #### Approach Questions

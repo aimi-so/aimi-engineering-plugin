@@ -23,6 +23,7 @@ Merge all collected entries into the shared `openQuestions[]` accumulator first 
 
 **For each new entry in `openQuestions[]`** without a resolution:
 - Call AskUserQuestion with the OQ text. Include `source` and `anchor` in the question header (e.g., `OQ · researchFile 2026-05-13-codebase.md:OQ3`) so the user knows exactly what they are deciding on.
+- When `prototypePaths` or `prototypeBlocks` is non-empty, compose the options per `commands/references/user-communication.md` § Prototype-First Options; only the option composition changes, the OQ text is still relayed.
 - Record the resolution in working memory `oqDecisions[]` keyed by anchor, using the form `researchFile:<basename>:OQ<n>` as the `source` field.
 
 **Do NOT write sentinels back to the researcher `.md` files** — researcher files are read-only artifacts from this gate's perspective. Only `oqDecisions[]` is mutated.
