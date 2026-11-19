@@ -85,6 +85,19 @@ LATE_PHASE_ENTRIES = (
     ("phase-3-9-business-contract.md", "Phase 3.9: Business Contract Authoring", None),
 )
 LATE_PHASE_FILES = tuple(f for f, _h, _c in LATE_PHASE_ENTRIES)
+# Phase 4, Phase 5 and the closing entry, in router order, after the Phase 3.9 entry.
+TAIL_ENTRIES = (
+    ("phase-4-capture.md", "Phase 4: Capture the Design"),
+    ("phase-4-pre-save.md", "Phase 4 Pre-Save Rules and Gates"),
+    ("phase-5-handoff.md", "Phase 5: Handoff"),
+    ("closing-error-handling-and-guidelines.md", "Closing: Error Handling and Guidelines"),
+)
+TAIL_FILES = tuple(f for f, _h in TAIL_ENTRIES)
+# Sections of brainstorm.md that may hold inline text; every other section is a router entry.
+INLINE_SECTION_PREFIXES = (
+    "Aimi Brainstorm", "Phase Files", "Feature Description", "Step 0:", "Step 0.5:",
+    "Step 0.6:", "Step 0.7: Detect", "Environment Variables", "Override Keywords",
+)
 # Headings that moved out of brainstorm.md: none may remain there, each is in exactly one reference file.
 MOVED_HEADINGS = (
     "### Question Generation Rules",
@@ -99,6 +112,8 @@ MOVED_HEADINGS = (
     "### Step 2: Reuse Check",
     "### Step 5: Validation Gate",
     "### Step 2: Derive Repository Facts",
+    "### Derive Filename",
+    "### Pre-Save Blocking Gate \u2014 Open Questions",
 )
 # Router-level phase headings: each stays in the router once and is repeated in its file.
 PHASE_ORDER_BEFORE_PHASE_4 = (
@@ -415,6 +430,53 @@ def check_moved_headings_left_the_router(corpus):
     return problems
 
 
+def check_late_phases_are_router_entries_in_order_tail(corpus):
+    """Phase 4, Phase 5 and the closing entry: one Read line each, in order, after the Phase 3.9 entry."""
+    if ROUTER_KEY not in corpus:
+        return NO_ROUTER
+    router = corpus[ROUTER_KEY]
+    order = [b for _i, b in read_lines(router)]
+    problems = []
+    for f in TAIL_FILES:
+        if REFERENCES_PREFIX + f not in corpus:
+            problems.append("%s: the file does not exist" % f)
+        if order.count(f) != 1:
+            problems.append("%s: %d router Read lines, expected exactly 1" % (f, order.count(f)))
+    if all(f in order for f in TAIL_FILES + LATE_PHASE_FILES[-1:]):
+        at = [order.index(f) for f in LATE_PHASE_FILES[-1:] + TAIL_FILES]
+        if at != sorted(at):
+            problems.append("the Phase 4, Phase 5 and closing entries are not in order after Phase 3.9")
+    by_read = {entry["reads"][0][1]: entry for entry in router_entries(router)}
+    for f, heading in TAIL_ENTRIES:
+        entry = by_read.get(f)
+        if entry is not None and entry["heading"] != heading:
+            problems.append("%s: its entry heading is %r, expected %r" % (f, entry["heading"], heading))
+    return problems
+
+
+def check_brainstorm_md_is_router_only(corpus):
+    """Outside the allowed sections, an entry holds a heading and only Applies when, Covers and Read lines, and no fence (counts of each belong to the other checks)."""
+    if ROUTER_KEY not in corpus:
+        return NO_ROUTER
+    problems = []
+    heading = None
+    scanned = scan_lines(corpus[ROUTER_KEY])
+    for n, (line, in_fence) in enumerate(scanned):
+        m = None if in_fence else HEADING.match(line)
+        if m:
+            heading = m.group(2)
+            continue
+        if heading is None or heading.startswith(INLINE_SECTION_PREFIXES):
+            continue
+        if in_fence or line.lstrip().startswith("```"):
+            problems.append("%s: line %d holds a fenced block" % (heading, n + 1))
+        elif not line.strip():
+            continue
+        elif not (READ_LINE.search(line) or line.startswith(("Applies when:", "Covers:"))):
+            problems.append("%s: line %d holds prose beyond Applies when, Covers and the Read line" % (heading, n + 1))
+    return problems
+
+
 def check_the_two_arguments_fences_stay_in_the_command_body(corpus):
     if ROUTER_KEY not in corpus:
         return NO_ROUTER
@@ -467,6 +529,8 @@ CHECKS = {
     "ordering": check_detection_precedes_the_first_research_task,
     "late_entries": check_late_phases_are_router_entries_in_order,
     "moved_headings": check_moved_headings_left_the_router,
+    "tail_entries": check_late_phases_are_router_entries_in_order_tail,
+    "router_only": check_brainstorm_md_is_router_only,
     "arguments": check_the_two_arguments_fences_stay_in_the_command_body,
 }
 
@@ -492,7 +556,7 @@ def test_shipped_tree_passes_every_check(name, corpus):
 
 def test_shipped_router_reaches_its_files_through_one_entry_each(corpus):
     reads = [b for _i, b in read_lines(corpus[ROUTER_KEY])]
-    assert reads == list(STEP_07_FILES + PHASE_FILES + LATE_PHASE_FILES)
+    assert reads == list(STEP_07_FILES + PHASE_FILES + LATE_PHASE_FILES + TAIL_FILES)
 
 
 def test_shipped_router_holds_no_task_spawn_and_the_files_hold_five(corpus):
@@ -561,7 +625,7 @@ def _mutate_applies_when_renamed(root):
     def edit(lines, entries):
         read_idx = {i for i, _ in entries[0]["reads"]}
         i = next(i for i, l in entries[0]["lines"] if l.startswith(APPLIES_WHEN) and i not in read_idx)
-        lines[i] = "Use when:" + lines[i][len(APPLIES_WHEN):]
+        del lines[i]
 
     _edit_router_lines(root, edit)
 
@@ -602,6 +666,24 @@ def _mutate_second_entry_reads_a_shared_file(root):
             last + 1,
             "Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/brainstorm/%s in full." % shared,
         )
+
+    _edit_router_lines(root, edit)
+
+
+def _mutate_prose_added_to_an_entry(root):
+    def edit(lines, entries):
+        entry = next(e for e in entries if e["reads"][0][1] == "phase-5-handoff.md")
+        lines.insert(entry["reads"][0][0] + 1, "Display the brainstorm summary and next steps.")
+
+    _edit_router_lines(root, edit)
+
+
+def _mutate_tail_entries_swapped(root):
+    def edit(lines, entries):
+        a = next(e for e in entries if e["reads"][0][1] == "phase-5-handoff.md")
+        b = next(e for e in entries if e["reads"][0][1] == "closing-error-handling-and-guidelines.md")
+        ia, ib = a["reads"][0][0], b["reads"][0][0]
+        lines[ia], lines[ib] = lines[ib], lines[ia]
 
     _edit_router_lines(root, edit)
 
@@ -659,6 +741,8 @@ MUTATIONS = {
     "late-entries-swapped": (_mutate_late_entries_swapped, "late_entries"),
     "moved-heading-restored-in-router": (_mutate_moved_heading_restored_in_router, "moved_headings"),
     "second-entry-reads-a-shared-file": (_mutate_second_entry_reads_a_shared_file, "shared_file"),
+    "prose-added-to-an-entry": (_mutate_prose_added_to_an_entry, "router_only"),
+    "tail-entries-swapped": (_mutate_tail_entries_swapped, "tail_entries"),
     "compaction-sentence-dropped": (_mutate_compaction_dropped, "compaction"),
     "failed-read-sentence-dropped": (_mutate_failed_read_dropped, "failed_read"),
     "h1-prefix-changed": (_mutate_h1_prefix_changed, "header"),
