@@ -307,3 +307,127 @@ def test_refuses_without_python3(root):
 def test_is_loopback_origin_is_the_one_rule(url, schemes, ok):
     args = (url,) if schemes is None else (url, schemes)
     assert U.is_loopback_origin(*args) is ok
+
+
+# ---- usage-recipe-sources ----
+
+
+def _touch(base, rel, text=""):
+    path = os.path.join(base, rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write(text)
+
+
+def _sources(root, *projects):
+    args = []
+    for p in projects:
+        args += ["--project", p]
+    return U.main(["usage_recipe.py", "sources", "--aimi-root", root, *args])
+
+
+def _src_out(root, capsys, *projects):
+    capsys.readouterr()
+    assert _sources(root, *projects) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_sources_two_repositories_in_order_and_kind_order(root, capsys):
+    _touch(root, "web/README.md")
+    _touch(root, "web/CONTRIBUTING.md")
+    _touch(root, "web/CLAUDE.md")
+    _touch(root, "web/AGENTS.md")
+    _touch(root, "web/Makefile")
+    _touch(root, "web/justfile")
+    _touch(root, "web/docker-compose.yml")
+    _touch(root, "web/.devcontainer/devcontainer.json")
+    _touch(root, "web/.github/workflows/b.yaml")
+    _touch(root, "web/.github/workflows/a.yml")
+    _touch(root, "web/.github/workflows/notes.txt")
+    _touch(root, "web/package.json", json.dumps({"scripts": {"dev": "x"}}))
+    os.makedirs(os.path.join(root, "api"))
+    out = _src_out(root, capsys, "web", "api")
+    assert [r["project"] for r in out["repositories"]] == ["web", "api"]
+    assert out["repositories"][1]["sources"] == []
+    kinds = [s["kind"] for s in out["repositories"][0]["sources"]]
+    assert kinds == ["readme", "contributing", "claude-md", "agents-md", "makefile", "justfile",
+                     "package-scripts", "compose", "devcontainer", "workflow", "workflow"]
+    wf = [s["path"] for s in out["repositories"][0]["sources"] if s["kind"] == "workflow"]
+    assert wf == [".github/workflows/a.yml", ".github/workflows/b.yaml"]
+
+
+def test_sources_prints_no_content(root, capsys):
+    _touch(root, "r/README.md", "SECRET-CONTENT-123")
+    _touch(root, "r/package.json", json.dumps({"scripts": {"dev": "SECRET-CONTENT-123"}}))
+    capsys.readouterr()
+    assert _sources(root, "r") == 0
+    assert "SECRET-CONTENT-123" not in capsys.readouterr().out
+
+
+def test_sources_package_json_without_scripts_or_malformed_is_no_source(root, capsys):
+    _touch(root, "a/package.json", json.dumps({"name": "x"}))
+    _touch(root, "b/package.json", "{not json")
+    out = _src_out(root, capsys, "a", "b")
+    assert [r["sources"] for r in out["repositories"]] == [[], []]
+
+
+def test_sources_workspaces_array_and_packages_object(root, capsys):
+    _touch(root, "a/package.json", json.dumps({"workspaces": ["pkgs/*"]}))
+    _touch(root, "a/pkgs/x/package.json", json.dumps({"scripts": {"s": "t"}}))
+    _touch(root, "a/pkgs/y/package.json", json.dumps({"name": "noscripts"}))
+    _touch(root, "b/package.json", json.dumps({"workspaces": {"packages": ["apps/*"]}}))
+    _touch(root, "b/apps/z/package.json", json.dumps({"scripts": {"s": "t"}}))
+    out = _src_out(root, capsys, "a", "b")
+    assert out["repositories"][0]["sources"] == [{"kind": "package-scripts", "path": "pkgs/x/package.json"}]
+    assert out["repositories"][1]["sources"] == [{"kind": "package-scripts", "path": "apps/z/package.json"}]
+
+
+def test_sources_workspace_absolute_dotdot_and_symlink_escape_are_skipped(root, capsys):
+    outside = tempfile.mkdtemp()
+    try:
+        _touch(outside, "o/package.json", json.dumps({"scripts": {"s": "t"}}))
+        _touch(root, "a/package.json", json.dumps({"workspaces": [outside + "/o", "../*", "ok/../../*", "link"]}))
+        os.symlink(os.path.join(outside, "o"), os.path.join(root, "a", "link"))
+        _touch(root, "a/README.md")
+        os.symlink(os.path.join(outside, "o", "package.json"), os.path.join(root, "a", "CONTRIBUTING.md"))
+        out = _src_out(root, capsys, "a")
+        assert out["repositories"][0]["sources"] == [{"kind": "readme", "path": "README.md"}]
+    finally:
+        import shutil
+        shutil.rmtree(outside, ignore_errors=True)
+
+
+@pytest.mark.parametrize(
+    "projects,text",
+    [
+        ((), "at least one --project"),
+        (("a", "a"), "given more than once"),
+        (("../x",), "usage-recipe-sources:"),
+        (("missing",), "not a directory inside the layout"),
+    ],
+)
+def test_sources_refusals(root, capsys, projects, text):
+    os.makedirs(os.path.join(root, "a"))
+    capsys.readouterr()
+    assert _sources(root, *projects) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("Error: usage-recipe-sources: ") and text in err
+
+
+def _cli_sources(root, *projects):
+    args = []
+    for p in projects:
+        args += ["--project", p]
+    return subprocess.run(["bash", CLI, "usage-recipe-sources", *args], cwd=root, capture_output=True, text=True)
+
+
+def test_sources_cli_is_read_only_and_confines_the_key(root):
+    _touch(root, "a/README.md")
+    before = sorted(os.listdir(os.path.join(root, ".aimi")))
+    res = _cli_sources(root, "a")
+    assert res.returncode == 0, res.stderr
+    assert json.loads(res.stdout)["repositories"][0]["sources"] == [{"kind": "readme", "path": "README.md"}]
+    assert sorted(os.listdir(os.path.join(root, ".aimi"))) == before
+    bad = _cli_sources(root, "../elsewhere")
+    assert bad.returncode != 0 and bad.stdout == ""
+    assert _cli_sources(root).returncode == 1

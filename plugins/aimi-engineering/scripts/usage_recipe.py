@@ -10,13 +10,14 @@ serves both recipes.
 
 Shaped like deps_recipe.py, whose command, key and tracked-config rules it
 imports rather than copies: an `_OPS` table, `main(argv)`, usage at exit 2.
-Two ops:
+Three ops:
 
   record --config <path> --project <key> [--serve C] [--cli C] [--setup C]...
          [--cleanup C]... [--port N] [--ready URL] [--login none|manual]
          [--login-url URL] [--browser agent-browser|chrome]
          [--external-services TEXT]
   get    --config <path> --project <key>
+  sources --aimi-root <dir> --project <key> [--project <key>]...
 
 The wrapper in aimi-cli.sh owns the flags, `check_python3` and the lock; this
 module makes the whole read-merge-write inside that lock, in one crossing.
@@ -30,8 +31,10 @@ is refused, never printed. It also trusts nothing in a config tracked by git,
 and answers `untrusted` for it.
 """
 
+import glob
 import json
 import os
+import re
 import sys
 from urllib.parse import urlsplit
 
@@ -41,6 +44,7 @@ Refusal = D.Refusal
 
 RECORD_VERB = "usage-recipe-record"
 GET_VERB = "usage-recipe-get"
+SOURCES_VERB = "usage-recipe-sources"
 
 MAX_STEPS = 20
 PORT_MIN = 1024
@@ -365,7 +369,168 @@ def _op_get(args):
     return 0
 
 
-_OPS = {"record": _op_record, "get": _op_get}
+# ---- sources: which of a repository's own files may state how it comes up ----
+
+PACKAGE_JSON_MAXBYTES = 5 * 1024 * 1024
+_README_RE = re.compile(r"^README")
+_CONTRIBUTING_RE = re.compile(r"^CONTRIBUTING")
+_WORKFLOW_RE = re.compile(r"\.ya?ml$")
+_FIXED_NAMES = (
+    ("claude-md", ("CLAUDE.md",)),
+    ("agents-md", ("AGENTS.md",)),
+    ("makefile", ("GNUmakefile", "Makefile", "makefile")),
+    ("justfile", ("Justfile", "justfile")),
+)
+_COMPOSE_NAMES = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
+_DEVCONTAINER_NAMES = (".devcontainer.json", ".devcontainer/devcontainer.json")
+
+
+def _real_file(repo_real, rel):
+    """True when <rel> under the repository is a regular file whose real path
+    stays inside the repository (a symlink leaving it is not a source)."""
+    path = os.path.join(repo_real, rel)
+    real = os.path.realpath(path)
+    return _within(real, repo_real) and os.path.isfile(real)
+
+
+def _within(child, parent):
+    return child == parent or child.startswith(parent.rstrip(os.sep) + os.sep)
+
+
+def _list_names(directory):
+    try:
+        return sorted(os.listdir(directory))
+    except OSError:
+        return []
+
+
+def _package_json(repo_real, rel):
+    """The parsed package.json at <rel>, or None. A malformed or unreadable
+    one is simply not a source."""
+    if not _real_file(repo_real, rel):
+        return None
+    path = os.path.realpath(os.path.join(repo_real, rel))
+    try:
+        if os.path.getsize(path) > PACKAGE_JSON_MAXBYTES:
+            return None
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError, RecursionError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _workspace_patterns(doc):
+    ws = doc.get("workspaces")
+    if isinstance(ws, dict):
+        ws = ws.get("packages")
+    if not isinstance(ws, list):
+        return []
+    out = []
+    for pat in ws:
+        if not isinstance(pat, str) or not pat or "\0" in pat:
+            continue
+        if pat.startswith("!") or os.path.isabs(pat) or pat.startswith("/"):
+            continue
+        if ".." in pat.replace("\\", "/").split("/"):
+            continue
+        out.append(pat)
+    return out
+
+
+def _package_script_sources(repo_real):
+    found = []
+    root_doc = _package_json(repo_real, "package.json")
+    if root_doc is None:
+        return found
+    if isinstance(root_doc.get("scripts"), dict):
+        found.append("package.json")
+    for pat in _workspace_patterns(root_doc):
+        try:
+            matches = glob.glob(pat, root_dir=repo_real)
+        except (OSError, ValueError):
+            continue
+        for match in matches:
+            directory = os.path.realpath(os.path.join(repo_real, match))
+            if not _within(directory, repo_real) or not os.path.isdir(directory):
+                continue
+            rel = os.path.relpath(directory, repo_real).replace(os.sep, "/")
+            rel = "package.json" if rel == "." else rel + "/package.json"
+            doc = _package_json(repo_real, rel)
+            if doc is not None and isinstance(doc.get("scripts"), dict):
+                found.append(rel)
+    return sorted(set(found))
+
+
+def repository_sources(repo_real):
+    """The existing source files of one repository, as [{kind, path}], in the
+    fixed kind order, paths sorted within a kind. Reads no file but
+    package.json, and never reports a path whose real path leaves the repo."""
+    top = _list_names(repo_real)
+    sources = []
+
+    def add(kind, rels):
+        for rel in sorted(set(rels)):
+            if _real_file(repo_real, rel):
+                sources.append({"kind": kind, "path": rel})
+
+    add("readme", [n for n in top if _README_RE.match(n)])
+    add("contributing", [n for n in top if _CONTRIBUTING_RE.match(n)])
+    for kind, names in _FIXED_NAMES:
+        add(kind, [n for n in names if n in top])
+    for rel in _package_script_sources(repo_real):
+        sources.append({"kind": "package-scripts", "path": rel})
+    add("compose", [n for n in _COMPOSE_NAMES if n in top])
+    add("devcontainer", [n for n in _DEVCONTAINER_NAMES
+                         if n.split("/")[0] in top])
+    add("workflow", [".github/workflows/" + n for n in _list_names(os.path.join(repo_real, ".github", "workflows"))
+                     if _WORKFLOW_RE.search(n)])
+    return sources
+
+
+def sources(aimi_root, projects):
+    """Answer {repositories: [{project, sources}]} for <projects>, in order."""
+    if not projects:
+        raise Refusal("at least one --project <key> is required")
+    root_real = os.path.realpath(aimi_root)
+    seen, repositories = set(), []
+    for project in projects:
+        key = D.validate_key(project)
+        if key in seen:
+            raise Refusal("--project '%s' is given more than once" % key)
+        seen.add(key)
+        directory = os.path.realpath(os.path.join(root_real, key))
+        if not _within(directory, root_real) or not os.path.isdir(directory):
+            raise Refusal("--project '%s' is not a directory inside the layout" % key)
+        repositories.append({"project": key, "sources": repository_sources(directory)})
+    return {"repositories": repositories}
+
+
+def _op_sources(args):
+    try:
+        root, projects, i = None, [], 0
+        while i < len(args):
+            flag = args[i]
+            if flag not in ("--aimi-root", "--project") or i + 1 >= len(args):
+                raise Refusal("unknown or incomplete flag: %s" % flag)
+            if flag == "--project":
+                projects.append(args[i + 1])
+            elif root is not None:
+                raise Refusal("--aimi-root was given more than once")
+            else:
+                root = args[i + 1]
+            i += 2
+        if not root:
+            raise Refusal("--aimi-root is required")
+        report = sources(root, projects)
+    except Refusal as exc:
+        sys.stderr.write("Error: %s: %s\n" % (SOURCES_VERB, exc))
+        return 1
+    sys.stdout.write(json.dumps(report, ensure_ascii=False) + "\n")
+    return 0
+
+
+_OPS = {"record": _op_record, "get": _op_get, "sources": _op_sources}
 
 
 def main(argv):

@@ -310,6 +310,8 @@ def test_get_story_context_is_approved(line):
 # recipe command or write state are not (see ADVERSARIAL below).
 USAGE_READ_VERBS = [
     "usage-recipe-get --project .",
+    "usage-recipe-sources --project .",
+    "usage-recipe-sources --project api --project web",
     "usage-env-status --run run-1",
     "usage-validation-required --tasks-file .aimi/tasks.json",
     "usage-validation-verdict --required-file .aimi/r.json --evidence-dir .aimi/ev",
