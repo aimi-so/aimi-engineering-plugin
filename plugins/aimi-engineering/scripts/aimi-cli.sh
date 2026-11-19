@@ -115,7 +115,7 @@ find_aimi_root() {
 # bare positional arguments of the verbs in _PATH_ARG_POSITIONAL_VERBS (never
 # the value of a flag); a story id, a reason or a branch name is never touched.
 _PATH_ARG_FLAGS=" --tasks-file --file --staging-dir --outline --result --output --old --new --input --tasks --spec --prototype --phase-dir --root --bundle --from --to --previous-file --review --dir --brainstorm-path --required-file --evidence-dir --resolve "
-_PATH_ARG_POSITIONAL_VERBS=" archive-task research-lookup extract-sections extract-prototype-sections measure-command-file "
+_PATH_ARG_POSITIONAL_VERBS=" archive-task research-lookup extract-sections extract-prototype-sections measure-command-file inspect-prototype-kit import-prototype-kit "
 _rebase_invocation_relative_args() {
   local verb="$1"; shift
   local prev="" arg candidate
@@ -15640,6 +15640,60 @@ cmd_slugify() {
 }
 
 # ============================================================================
+# inspect-prototype-kit <path> / import-prototype-kit <path> [--slug <s>]
+# ============================================================================
+#
+# Look at a prototype kit (a folder or .zip of HTML screens), and copy a
+# qualifying one into .aimi/sources/<slug>-<hash8>/. Bash owns the flags, the
+# confinement of the kit path (before python3 starts) and check_python3, which
+# refuses rather than degrades: a missing interpreter must not read as "not a
+# kit". Every rule is prototype_kit.py's, behind one crossing. No lock: the
+# copy is placed by an atomic rename and re-importing identical content reuses it.
+_prototype_kit_verb() {
+  local verb="$1" mode="$2"; shift 2
+  local usage="usage: aimi-cli.sh $verb <path>"
+  [ "$mode" = import ] && usage="$usage [--slug <s>]"
+  local kit="" slug="" have_slug=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --slug)
+        if [ "$mode" != import ] || [ $# -lt 2 ]; then
+          echo "Error: $verb: bad --slug ($usage)" >&2
+          exit 1
+        fi
+        slug="$2"; have_slug=1
+        shift 2 ;;
+      -*)
+        echo "Error: $verb: unknown flag: $1 ($usage)" >&2
+        exit 1 ;;
+      *)
+        if [ -n "$kit" ]; then
+          echo "Error: $verb: exactly one path is accepted ($usage)" >&2
+          exit 1
+        fi
+        kit="$1"
+        shift ;;
+    esac
+  done
+  if [ -z "$kit" ]; then
+    echo "Error: $verb: a kit path is required ($usage)" >&2
+    exit 1
+  fi
+  validate_path_in_project "$kit"
+  check_python3
+  local aimi_dir_abs
+  aimi_dir_abs="$(cd "$AIMI_DIR" 2>/dev/null && pwd)" || aimi_dir_abs="$PWD/$AIMI_DIR"
+  if [ "$have_slug" -eq 1 ]; then
+    python3 -I "$(_aimi_script_py prototype_kit.py)" "$mode" "$kit" --aimi-dir "$aimi_dir_abs" --slug "$slug"
+  else
+    python3 -I "$(_aimi_script_py prototype_kit.py)" "$mode" "$kit" --aimi-dir "$aimi_dir_abs"
+  fi
+}
+
+cmd_inspect_prototype_kit() { _prototype_kit_verb inspect-prototype-kit inspect "$@"; }
+cmd_import_prototype_kit() { _prototype_kit_verb import-prototype-kit import "$@"; }
+
+# ============================================================================
 # validate-outline: check an outline's produces/consumes contract, derive waves
 # Usage: aimi-cli.sh validate-outline --outline <path>
 # ============================================================================
@@ -18672,6 +18726,13 @@ COMMANDS:
                               {status:"absent", recipe:null} for none, and
                               {status:"untrusted", recipe:null} for a config tracked by git.
                               Refuses a stored entry that fails validation; needs python3.
+    inspect-prototype-kit <path>
+                              Print {kind, htmlFiles, markdownFiles, otherFiles, refused, qualifies}
+                              for a folder or .zip prototype kit. Writes nothing; needs python3.
+    import-prototype-kit <path> [--slug <s>]
+                              Copy a qualifying kit into .aimi/sources/<slug>-<hash8>/ and print
+                              {dir, htmlFiles, markdownFiles, otherFiles, reused}. Refuses the whole
+                              kit, writing nothing, on any unsafe member; needs python3.
     usage-recipe-sources --project <key> [--project <key>]...
                               Print {repositories:[{project, sources:[{kind, path}]}]}: the
                               files of each repository that may state how it comes up (readme,
@@ -19929,6 +19990,8 @@ main() {
     usage-recipe-record) shift; cmd_usage_recipe_record "$@" ;;
     usage-recipe-get) shift; cmd_usage_recipe_get "$@" ;;
     usage-recipe-sources) shift; cmd_usage_recipe_sources "$@" ;;
+    inspect-prototype-kit) shift; cmd_inspect_prototype_kit "$@" ;;
+    import-prototype-kit) shift; cmd_import_prototype_kit "$@" ;;
     usage-env-up) shift; cmd_usage_env_up "$@" ;;
     usage-env-status) shift; cmd_usage_env_status "$@" ;;
     usage-env-down) shift; cmd_usage_env_down "$@" ;;

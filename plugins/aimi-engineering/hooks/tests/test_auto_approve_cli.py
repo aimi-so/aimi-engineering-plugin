@@ -320,6 +320,7 @@ USAGE_READ_VERBS = [
     "usage-validation-get",
     "audit-open --tasks-file .aimi/tasks.json",
     "audit-open",
+    "inspect-prototype-kit .aimi/kit",
 ]
 
 
@@ -329,6 +330,7 @@ def test_usage_read_only_verbs_are_approved(call):
 
 
 USAGE_PROMPTING_VERBS = [
+    "import-prototype-kit .aimi/kit --slug kit",
     "usage-recipe-record --project . --serve 'npm run dev' --ready /",
     "usage-env-up --run run-1 --repo .",
     "usage-env-down --run run-1",
