@@ -133,10 +133,17 @@ outside this rule: the verb names it and you read the path it reports.
 `story.implementation.prototypeAnchor` is set, read every prototype with the Read tool before
 writing implementation code:
 
-- First check `metadata.prototypeDropped` for an entry naming a prototype this story's
-  acceptance criteria depend on. If there is one, log `prototype <path> dropped — <reason>`
-  and say so in the report. It is a record only: never open, move, delete or resolve the path
-  it names.
+- First check `metadata.prototypeDropped`. An entry records how the plan saw a prototype;
+  it never stops you reading one. You open prototypes only through `metadata.prototypePaths[]`
+  and `story.implementation.prototypeAnchor` (below), never through a `prototypeDropped` path.
+  - `reason: "no-view-anchors"`: the file has no `data-view` sections, so the plan did not
+    slice it and this story's criteria may restate only part of it. Read it in full anyway: it
+    is still this story's layout reference. Log `prototype <path> not sliced — read in full`.
+  - Any other reason (`aggregate-cap`): the plan was written without its contents. Read it in
+    full when it is listed below, and name in the report each place where a criterion and the
+    prototype disagree. Log `prototype <path> unseen by the plan — <reason>`.
+  - A path named only in `prototypeDropped`, in neither of those fields: do not open it; say
+    so in the report.
 - Check `metadata.prototypeSuperseded` (`[{path, decision, note}]`) for an entry whose `path`
   is a prototype you read. Read it NEXT TO that prototype, log
   `prototype <path> superseded by <decision> — <note>`, and do not reproduce the superseded

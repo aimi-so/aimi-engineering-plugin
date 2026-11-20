@@ -21,6 +21,9 @@ Planning stays faithful to what the operator handed over and decided: a named pr
 - The split sub-orchestrators of `/aimi:execute` now run on the `workflow` model category instead of `executor`; the story workers they spawn still read `executor`. A user whose `workflow` model is weaker than their `executor` model will see the sub-orchestrators that coordinate a split run on that weaker model, while story workers keep the stronger one. Run `/aimi:setup-models` to change either.
 - `/aimi:setup-models` words the `workflow` question as covering execution sub-orchestrators and the `executor` question as story workers that edit code.
 
+### Fixed
+- A story worker reads a prototype the plan recorded in `metadata.prototypeDropped` instead of refusing to open it. A `no-view-anchors` entry names a single-file prototype the plan did read and still lists in `prototypePaths`, and the worker had been told never to open that path, so screen stories were built from the acceptance criteria's restatement of the prototype rather than from the prototype. The worker now reads such a prototype in full as its layout reference, reads an `aggregate-cap` one in full and reports where the criteria disagree with it, and still never opens a path named only in the record.
+
 ## [1.163.0] - 2026-11-17
 
 A clean merge of a wave is now checked as a whole before any of its stories is marked complete, so two stories that merge without a conflict but break each other are caught at the wave that caused it.
