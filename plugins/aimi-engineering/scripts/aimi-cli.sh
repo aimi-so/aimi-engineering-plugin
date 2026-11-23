@@ -2941,6 +2941,71 @@ cmd_set_execution_mode() {
   ) 200>"${tasks_file}.lock"
 }
 
+# Merge the top-level keys of a JSON object into a tasks file's metadata.
+# Usage: patch-metadata --tasks-file <path> [--from <patch.json>] [--remove <key>]...
+#
+# /aimi:plan Phase 4 used to rewrite the whole tasks.json with the Write tool
+# to change a handful of metadata keys, which meant re-emitting every story the
+# merge had just validated. This sends only the keys that change.
+#
+# --tasks-file is required and never falls back to the current-tasks pointer:
+# the caller is a planner that has just written the file and knows its path,
+# and the pointer can still name an older plan.
+cmd_patch_metadata() {
+  local usage="Usage: aimi-cli.sh patch-metadata --tasks-file <path> [--from <patch.json>] [--remove <key>]..."
+  local tasks_file="" patch_file="" op_args=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks-file) shift; tasks_file="${1:-}" ;;
+      --from)       shift; patch_file="${1:-}" ;;
+      --remove)
+        shift
+        if [ -z "${1:-}" ]; then
+          echo "Error: patch-metadata: --remove needs a key" >&2
+          echo "$usage" >&2
+          exit 1
+        fi
+        op_args+=(--remove "$1")
+        ;;
+      *)
+        echo "Error: patch-metadata: unknown argument: $1" >&2
+        echo "$usage" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -z "$tasks_file" ] || { [ -z "$patch_file" ] && [ "${#op_args[@]}" -eq 0 ]; }; then
+    echo "$usage" >&2
+    exit 1
+  fi
+
+  tasks_file=$(resolve_path "$tasks_file")
+  validate_path_in_project "$tasks_file"
+  if [ ! -f "$tasks_file" ]; then
+    echo "Error: patch-metadata: tasks file does not exist: $tasks_file" >&2
+    exit 1
+  fi
+  if [ -n "$patch_file" ]; then
+    validate_path_in_project "$patch_file"
+    if [ ! -f "$patch_file" ]; then
+      echo "Error: patch-metadata: patch file does not exist: $patch_file" >&2
+      exit 1
+    fi
+    op_args+=(--from "$patch_file")
+  fi
+
+  # One crossing, inside the lock: the patch is read, judged against the
+  # document, written and reported by the single call.
+  check_python3
+  (
+    _lock "${tasks_file}.lock"
+    python3 "$(_aimi_tasks_py)" patch-metadata \
+      --tasks-file "$tasks_file" "${op_args[@]}"
+  ) 200>"${tasks_file}.lock"
+}
+
 # Count pending stories
 # Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_count_pending() {
@@ -12063,6 +12128,40 @@ cmd_deps_recipe_record() {
   return "$rc"
 }
 
+# verify-stage-declared [--project <key>]
+#
+# Prints whether a project key declared stage-aware verification in
+# <AIMI_ROOT>/.aimi/config.json, as one JSON line {project, staged}. A pure
+# reader: no lock, one crossing into scripts/verify_stage.py, which owns the
+# document rules. /aimi:execute reads it to decide whether a parallel story
+# worker gets AIMI_VERIFY_STAGE=worktree and whether the integrated wave check
+# may be skipped.
+cmd_verify_stage_declared() {
+  local project="."
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project)
+        if [ $# -lt 2 ]; then
+          echo "Error: verify-stage-declared: --project requires a value" >&2
+          echo "Usage: aimi-cli.sh verify-stage-declared [--project <key>]" >&2
+          exit 1
+        fi
+        project="$2"; shift 2 ;;
+      *)
+        echo "Error: verify-stage-declared: unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh verify-stage-declared [--project <key>]" >&2
+        exit 1 ;;
+    esac
+  done
+
+  check_python3
+
+  local config="$AIMI_DIR/config.json"
+  validate_path_in_project "$config"
+
+  python3 "$(_aimi_script_py verify_stage.py)" declared --config "$config" --project "$project"
+}
+
 # bookkeeping-declared [--project <key>]
 #
 # Prints one project key's effective bookkeeping declaration from
@@ -12843,6 +12942,74 @@ _resolve_branch_base() {
   # jq reader of .base/.reason/.promptNeeded is unaffected.
   printf '{"base":"%s","reason":"%s","currentBranch":"%s","defaultBranch":"%s","promptNeeded":%s,"baseDivergence":"%s"}\n' \
     "$base" "$reason" "$current_branch" "$default_branch" "$prompt_needed" "$divergence"
+}
+
+# How a LOCAL branch stands against its origin counterpart, as one JSON line:
+#   {"branch":"<name>","divergence":"<state>","ahead":<n>,"behind":<n>}
+# <state> is _branch_divergence's answer (none | in-sync | local-ahead |
+# local-behind | diverged) and the two counts are commits on one side only.
+#
+# Usage: branch-divergence [--branch <name>] [--project <path>]
+#
+# Read-only and offline: it compares refs/heads/<name> with
+# refs/remotes/origin/<name> as the last fetch left them and never contacts the
+# remote, so the caller decides when to fetch. /aimi:plan calls it right after
+# its own `git fetch origin`, because the plan records the working tree's HEAD
+# as metadata.baseRef and nothing else said when that tree was behind origin.
+# --branch defaults to the current branch. A detached HEAD, a branch origin
+# does not have, and a current branch whose name this verb will not print all
+# answer "none" with an empty or echoed name: there is nothing to compare.
+cmd_branch_divergence() {
+  local usage="Usage: aimi-cli.sh branch-divergence [--branch <name>] [--project <path>]"
+  local branch="" branch_given=false project_dir=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --branch)  shift; branch="${1:-}"; branch_given=true ;;
+      --project) shift; project_dir="${1:-}" ;;
+      *)
+        echo "Error: branch-divergence: unknown argument: $1" >&2
+        echo "$usage" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  [ -n "$project_dir" ] || project_dir=$(_caller_project_dir)
+  _require_git_repo "$project_dir"
+
+  # The name is printed inside a JSON string by printf and handed to git as a
+  # ref, so it is held to a set with no quote, backslash, space or "..".
+  local safe='^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$'
+  if [ "$branch_given" = true ]; then
+    if ! [[ "$branch" =~ $safe ]] || [[ "$branch" == *..* ]]; then
+      echo "Error: branch-divergence: invalid branch name: $branch" >&2
+      exit 1
+    fi
+  else
+    branch=$(git branch --show-current 2>/dev/null || echo "")
+    if [ -n "$branch" ] && { ! [[ "$branch" =~ $safe ]] || [[ "$branch" == *..* ]]; }; then
+      branch=""
+    fi
+  fi
+
+  local origin_present=false divergence ahead=0 behind=0 counts
+  if [ -n "$branch" ] && git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+    origin_present=true
+  fi
+  divergence=$(_branch_divergence "$branch" "$origin_present")
+  case "$divergence" in
+    local-ahead|local-behind|diverged)
+      counts=$(git rev-list --left-right --count \
+        "refs/heads/$branch...refs/remotes/origin/$branch" 2>/dev/null || echo "")
+      if [[ "$counts" =~ ^([0-9]+)[[:space:]]+([0-9]+)$ ]]; then
+        ahead="${BASH_REMATCH[1]}"
+        behind="${BASH_REMATCH[2]}"
+      fi
+      ;;
+  esac
+  printf '{"branch":"%s","divergence":"%s","ahead":%s,"behind":%s}\n' \
+    "$branch" "$divergence" "$ahead" "$behind"
 }
 
 # CLI wrapper for _resolve_branch_base(): arg-parsing, --project cd and the
@@ -18287,6 +18454,16 @@ COMMANDS:
                               Pass a gate on a story; optionally store selected option
     gate-fail <id> [--tasks-file <path>]
                               Fail a gate on a story
+    patch-metadata --tasks-file <path> [--from <patch.json>] [--remove <key>]...
+                              Merge the top-level keys of the JSON object in <patch.json>
+                              into the tasks file's metadata, each key replacing the
+                              value it names, and delete each --remove key. Refuses a
+                              patch that is not a non-empty object, a key named by both
+                              flags, a branchName outside ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$,
+                              and changing or removing baseRef, pluginVersion,
+                              roadmapPath or phase when the file already holds one.
+                              Prints {patched, unchanged, removed}; writes nothing
+                              when nothing changes.
     update-field <id> <field.path> <value> [--tasks-file <path>]
                               Update a nested field on a story (e.g., verification.status passed).
                               <field.path> must be a dotted chain of identifier segments
@@ -18792,6 +18969,12 @@ COMMANDS:
                               maps each declared shared file to its rule. Absence prints
                               an empty paths; a malformed or git-tracked declaration
                               exits 1. Read-only (key defaults to ".").
+    verify-stage-declared [--project <key>]
+                              Print whether the project key declared stage-aware
+                              verification (verifyStage in .aimi/config.json) as one JSON
+                              line {project, staged}. Absence prints staged false; a
+                              malformed declaration exits 1. Read-only (key defaults
+                              to ".").
     bookkeeping-resolve [--project <key>] [--root <dir>]
                               In a repository mid-merge, resolve the project key's
                               declared bookkeeping files (key defaults to ".", root to
@@ -18896,6 +19079,12 @@ COMMANDS:
                               Create or checkout branch with deterministic logic.
                               Without --project, acts on the caller's repository; refuses
                               when a git .aimi root is a different repository
+    branch-divergence [--branch <name>] [--project <path>]
+                              How a local branch stands against origin/<name> as the last
+                              fetch left it; read-only, never contacts the remote. Prints
+                              {"branch","divergence","ahead","behind"}; divergence is one
+                              of none, in-sync, local-ahead, local-behind, diverged.
+                              --branch defaults to the current branch.
     resolve-base-branch <name> --default-branch <branch> [--base <branch>] [--project <path>]
                               Decide what branch a new branch or container should be cut
                               from -- no checkout is performed. Prints a single JSON object:
@@ -20027,6 +20216,7 @@ main() {
     mark-failed)       shift; cmd_mark_failed "$@" ;;
     mark-skipped)      shift; cmd_mark_skipped "$@" ;;
     set-execution-mode) shift; cmd_set_execution_mode "$@" ;;
+    patch-metadata)    shift; cmd_patch_metadata "$@" ;;
     count-pending)     shift; cmd_count_pending "$@" ;;
     run-verdict)       shift; cmd_run_verdict "$@" ;;
     validate-deps)            shift; cmd_validate_deps "$@" ;;
@@ -20067,6 +20257,7 @@ main() {
     # block above, before find_aimi_root -- never here.
     setup-branch)      shift; cmd_setup_branch "$@" ;;
     resolve-base-branch) shift; cmd_resolve_base_branch "$@" ;;
+    branch-divergence) shift; cmd_branch_divergence "$@" ;;
     clear-state)       cmd_clear_state ;;
     version)           cmd_version ;;
     check-version)     shift; cmd_check_version "$@" ;;
@@ -20088,6 +20279,7 @@ main() {
     validate-outline) shift; cmd_validate_outline "$@" ;;
     validate-staging) shift; cmd_validate_staging "$@" ;;
     bookkeeping-declared) shift; cmd_bookkeeping_declared "$@" ;;
+    verify-stage-declared) shift; cmd_verify_stage_declared "$@" ;;
     bookkeeping-resolve) shift; cmd_bookkeeping_resolve "$@" ;;
     deps-recipe-record) shift; cmd_deps_recipe_record "$@" ;;
     usage-recipe-record) shift; cmd_usage_recipe_record "$@" ;;

@@ -13,7 +13,7 @@ repeated here, so the table and the merge cannot disagree.
 
 Sources:
   * golden_from_jq.json, always. Only the NN-*.json story inputs of each case
-    count; audit-result.json, outline.json, metadata.json and any *-outline.json
+    count; audit-result.json, audit-resolutions.json, outline.json, metadata.json and any *-outline.json
     are inputs that carry no story.
   * `.aimi/**/*tasks*.json`, when present. Looked for under --aimi-root, then
     $AIMI_ROOT, then the working directory's repository (and, from a worktree,

@@ -16,6 +16,7 @@ Run this gate on every path, split or not. It reads the staging files directly r
 BAD_PROJECTS=0
 STAGED_PROJECTS=$(find "$RUN_DIR" -maxdepth 1 -type f -name '*.json' \
   ! -name '*outline*.json' ! -name 'metadata.json' ! -name 'audit-result.json' \
+  ! -name 'audit-resolutions.json' \
   | sort \
   | while IFS= read -r f; do
       jq -r 'if type == "array" then .[] else . end | .project // empty' "$f"

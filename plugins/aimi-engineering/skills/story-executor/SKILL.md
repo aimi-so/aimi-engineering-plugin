@@ -33,6 +33,7 @@ Your spawn prompt gives you these values. Use them exactly as given; never re-de
 | `PROJECT_GUIDELINES` | when the project has any | Absolute paths of the project's `CLAUDE.md`/`AGENTS.md` files. |
 | `HEADED_MODE` | when visual-follow is active | `true`: a headed browser session named `visual-follow` is already open. |
 | `VISUAL_VERIFICATION` | worktree stories | `post-merge`: skip the Visual Verification section; it runs after the merge. |
+| `VERIFY_STAGE` | worktree stories of a project that declared it | `worktree`: export `AIMI_VERIFY_STAGE=worktree` into every verify run (Step 1.5). |
 
 A value that is absent is unset. Do not invent one.
 
@@ -225,6 +226,12 @@ anything. Say in the report that the baseline came from that detached copy.
 **Pre-run.** Run the verify once, exactly as written, from the Step 0c directory, with
 `TASKS_FILE_PATH` and `AIMI_ROOT` exported into its environment (exactly the values you were
 handed), so a verify that reads its own tasks file or `"$AIMI_ROOT/.aimi/..."` finds them.
+When `VERIFY_STAGE` was handed to you, export `AIMI_VERIFY_STAGE` with that value as well, for
+the pre-run, the probe and Step 4; when it was not, leave the variable unset and never invent
+it. The project's own commands read it and leave out the checks that cannot run beside a
+sibling story's, which run after the wave's merge instead. A segment that skips itself this way
+lands in the probe's list 1: report it as deferred to the post-merge check, not as a defect, and
+say in your report that the verify ran at stage `worktree`.
 Record the exit code. A ZERO exit means the verify already passes before any work, so it does
 not discriminate before from after: put a warning in the report. The warning never blocks, in
 any mode, and must name its legitimate cause — a story re-run over partial work can pass this

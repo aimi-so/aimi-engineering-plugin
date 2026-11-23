@@ -12,7 +12,7 @@ area live under `docs/dev/`; read the one that matches what you are about to cha
 | `docs/dev/hooks.md` | a hook guard (staging-file, raw forge write) or a bypass env (§ Guard Bypass Envs) |
 | `docs/dev/ratchets.md` | the artifact-language or spec-section ratchet, or their baselines |
 | `docs/dev/routers.md` | `commands/plan.md`, `commands/execute.md`, their step files, or the OpenCode references allowlist |
-| `docs/dev/execute-wave-loop.md` | `commands/references/execute/step-4-wave-execution-loop.md` or `commands/references/execute/bookkeeping-resolve.md` (the reasoning their comments point at) |
+| `docs/dev/execute-wave-loop.md` | `commands/references/execute/step-4-wave-execution-loop.md` or `commands/references/execute/bookkeeping-resolve.md` (the reasoning their comments point at), or the `verifyStage` key of `.aimi/config.json`, `verify-stage-declared` and `AIMI_VERIFY_STAGE` (§ Stage-aware verification) |
 | `docs/dev/bookkeeping.md` | the `bookkeeping` key of `.aimi/config.json`, `bookkeeping-declared`, `bookkeeping-resolve`, `bookkeeping*.py`, or the declared-path exemption in `wave_contention` and the cross-story auditor |
 | `docs/dev/cli-path-resolution.md` | a resolution layer or line in `commands/references/cli-path-resolution.md`, or `hooks/auto-approve-cli.sh` |
 | `docs/dev/story-lifecycle.md` | `remove-story`, `set-verification`, `acknowledge-*`, `judge-verification`, `triage-verify`, `split-detect` |

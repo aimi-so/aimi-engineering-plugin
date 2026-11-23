@@ -55,7 +55,8 @@ after stories were expanded, most staged files only moved: the same entry sits
 at another idx. `plan_shift` classifies every entry by exact title, `apply_shift`
 renames the shifted `NN-<slug>.json` files and rewrites their `outline:NN`
 tokens in one pass, and only the stories the edit really affects are listed for
-re-expansion. Nothing is written until every refusal is decided. One JSON
+re-expansion: one that cites a removed entry, one whose own contract or summary
+changed, and one that consumes a name whose producer changed. Nothing is written until every refusal is decided. One JSON
 report on stdout: {renamed[{from,to,file}], removed[], reexpand[{idx,reason}],
 expand[], auditInvalidated}. `renamed[].from`/`removed[]` are OLD idx, every
 other idx is NEW; `file` is the renamed file's new basename.
@@ -384,6 +385,17 @@ def _rewrite_tokens(node, mapping, pattern):
     return node, False
 
 
+# An entry's summary is what its expander is told the story delivers. Editing
+# it changes what the story should say even though no name moved, so the kept
+# story is expanded again. It used to be left out: narrowing a story's scope at
+# the gate changed the outline and nothing else, and the audit was not even
+# invalidated.
+def _summary_of(entry):
+    """The summary as its words: a re-wrapped or re-spaced line is not an edit."""
+    value = entry.get("summary")
+    return " ".join(value.split()) if isinstance(value, str) else value
+
+
 def plan_shift(staging_dir, old_entries, new_entries):
     """Decide the whole shift in memory. Writes nothing; raises OutlineRefusal.
 
@@ -460,6 +472,8 @@ def plan_shift(staging_dir, old_entries, new_entries):
                 why.append("cites removed entry " + ", ".join(cited))
         if changed_contract[old_idx]:
             why.append("its own produces/consumes changed")
+        if _summary_of(old_entries[old_idx]) != _summary_of(new_entries[new_idx]):
+            why.append("its summary changed")
         for name in _contract(new_entries[new_idx], "consumes"):
             if name.startswith("ext:"):
                 continue

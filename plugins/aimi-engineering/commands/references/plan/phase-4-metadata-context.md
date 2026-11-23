@@ -26,7 +26,7 @@
 - **frontendOnly** (when `implementationScope == "frontend-only"`): `true`
 - **backendSpec** (when `implementationScope == "frontend-only"`): derive per the rules below
 
-Use the Write tool to patch the output tasks.json with these fields merged into the `metadata` object.
+Write these fields as `phase-4-metadata-identity.md` § How the Patch Is Written states; never rewrite the tasks.json.
 
 **For split files (full-stack):** the set of files to patch comes from `MERGE_RETURN` — the value Phase 3e captured from story-merge's stdout. **Never reconstruct split filenames by concatenating `$TASKS_PATH` with `-frontend-tasks.json`/`-backend-tasks.json`**: on the PROJECT axis the surviving projects, their basename slugs, and their count are computed inside story-merge and are unknowable to this command any other way, and even on the SIDE axis the returned paths already account for `--phase-aware`'s basename collapse.
 

@@ -644,7 +644,7 @@ def test_staged_story_write_over_existing_denied_reason_names_both_routes(tmp_pa
 
 @pytest.mark.parametrize(
     "name",
-    ["metadata.json", "outline.json", "audit-result.json", "03-research-outline.json"],
+    ["metadata.json", "outline.json", "audit-result.json", "audit-resolutions.json", "03-research-outline.json"],
 )
 def test_staged_story_sidecars_stay_writable(tmp_path, monkeypatch, name):
     run = _staged_story_setup(tmp_path, monkeypatch)
@@ -655,6 +655,20 @@ def test_staged_story_sidecars_stay_writable(tmp_path, monkeypatch, name):
         output, exit_code = _run_guard_runtime_state(monkeypatch, make(str(target)))
         assert exit_code == 0
         assert "deny" not in output
+
+
+def test_the_metadata_patch_file_beside_the_run_directories_stays_writable(tmp_path, monkeypatch):
+    """/aimi:plan Phase 4 writes `.aimi/.tasks-staging/metadata-patch.json` with
+    the Write tool, once per tasks file, for `patch-metadata --from`."""
+    run = _staged_story_setup(tmp_path, monkeypatch)
+    target = run.parent / "metadata-patch.json"
+
+    for make in (_make_write_input, _make_edit_input):
+        for agent_type in (None, "x"):
+            output, exit_code = _run_guard_runtime_state(monkeypatch, make(str(target), agent_type=agent_type))
+            assert exit_code == 0
+            assert "deny" not in output
+        target.write_text("{}")  # the second pass overwrites an existing file
 
 
 def test_staged_story_same_name_outside_tasks_staging_allowed(tmp_path, monkeypatch):
@@ -806,7 +820,7 @@ def test_staged_story_subagent_creating_new_story_allowed_in_both_stamp_states(t
         assert "deny" not in output
 
 
-@pytest.mark.parametrize("name", ["metadata.json", "outline.json", "audit-result.json", "03-research-outline.json"])
+@pytest.mark.parametrize("name", ["metadata.json", "outline.json", "audit-result.json", "audit-resolutions.json", "03-research-outline.json"])
 def test_staged_sidecars_stay_writable_by_a_subagent(tmp_path, monkeypatch, name):
     run = _staged_story_setup(tmp_path, monkeypatch)
     target = run / name

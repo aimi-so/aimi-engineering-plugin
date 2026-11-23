@@ -1663,13 +1663,19 @@ def test_the_sidecars_plan_writes_beside_the_stories_are_skipped_by_name():
 def test_a_sidecar_is_an_exact_name_or_a_name_ending_in_outline_json():
     """The predicate is a SUFFIX, not a substring.
 
-    The four that must stay sidecars include topic-outline.json, which no exact
+    The five that must stay sidecars include topic-outline.json, which no exact
     name covers -- it is matched only by the suffix arm, and golden_from_jq.json
     records it as skipped, so an exact-list-only rule would move a recorded
     verdict. The two that must NOT be sidecars are the names the substring rule
     ate: 'outline' is a descriptive word in the middle of each, not the file's
     kind."""
-    for name in ("outline.json", "topic-outline.json", "metadata.json", "audit-result.json"):
+    for name in (
+        "outline.json",
+        "topic-outline.json",
+        "metadata.json",
+        "audit-result.json",
+        "audit-resolutions.json",
+    ):
         assert SM.is_sidecar(name), name
     for name in (
         "05-n-foundation-outline-entries.json",
@@ -2348,6 +2354,53 @@ def test_audit_gate_a_directory_with_a_sidecar_but_one_story_is_not_gated(tmp_pa
     proc, doc = _merge(tmp_path, files, audit=False)
     assert proc.returncode == 0, proc.stderr
     assert len(doc["userStories"]) == 1
+
+
+def test_a_merge_follows_a_resolve_that_left_its_resolutions_file_in_the_run_directory(tmp_path):
+    """The Resolve option of the Unresolved Gate writes audit-resolutions.json
+    INTO the run directory and `apply-audit-patches --resolve` leaves it there.
+    The audit gate used to meet it as a staged file the audit never read and
+    refuse the merge, so this runs the two verbs in the order /aimi:plan does."""
+    root = str(tmp_path)
+    staging = os.path.join(root, ".aimi", "stg")
+    os.makedirs(os.path.join(root, ".aimi", "tasks"))
+    os.makedirs(staging)
+    files = _two()
+    files["audit-result.json"] = _audit_sidecar(
+        files, unresolved=[{"storyIdx": "01", "message": "the empty state is missing"}]
+    )
+    files["audit-resolutions.json"] = {
+        "resolutions": [
+            {
+                "message": "the empty state is missing",
+                "stories": ["01"],
+                "criterion": "The list shows an empty state",
+            }
+        ]
+    }
+    for name, value in files.items():
+        with open(os.path.join(staging, name), "w", encoding="utf-8") as handle:
+            handle.write(value if isinstance(value, str) else json.dumps(value))
+
+    def cli(*args):
+        return subprocess.run(
+            ["bash", CLI] + list(args), cwd=root, capture_output=True, text=True, timeout=120
+        )
+
+    resolved = cli(
+        "apply-audit-patches", "--staging-dir", ".aimi/stg",
+        "--resolve", ".aimi/stg/audit-resolutions.json",
+    )
+    assert resolved.returncode == 0, resolved.stderr
+    assert json.loads(resolved.stdout)["resolvedStories"] == ["01"]
+    assert os.path.isfile(os.path.join(staging, "audit-resolutions.json"))
+
+    merged = cli("story-merge", "--staging-dir", ".aimi/stg", "--output", ".aimi/tasks/out-tasks.json")
+    assert merged.returncode == 0, merged.stderr
+    with open(os.path.join(root, ".aimi", "tasks", "out-tasks.json"), encoding="utf-8") as handle:
+        doc = json.load(handle)
+    assert len(doc["userStories"]) == 2
+    assert "The list shows an empty state" in doc["userStories"][0]["acceptanceCriteria"]
 
 
 def test_audit_gate_uses_the_staged_set_the_verb_audited_against(tmp_path):

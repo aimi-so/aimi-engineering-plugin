@@ -5396,9 +5396,18 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     --prototype texts it measures. The literal is `open(source_path, "rb")`, a
     new distinct form, so the set below gains one member. It is a read, and it
     adds no os.path call -- an unreadable file is an OSError, not a predicate.
+
+    THE TWELFTH open() ARRIVED WITH patch-metadata, and it is again a read of a
+    file named by a CLI ARGUMENT (--from): the patch object /aimi:plan Phase 4
+    writes beside its run directories. cmd_patch_metadata confines the path
+    with validate_path_in_project before python3 starts and refuses a missing
+    file there, so what reaches this open is a path inside the project. The
+    literal is `open(patch_path, "rb")`, a new distinct form. Nothing else in
+    this test moved for the verb: it writes the tasks file it was handed
+    through write_docs_atomically and has no writer of its own.
     """
     code = _code()
-    assert code.count("open(") == 11
+    assert code.count("open(") == 12
     assert 'open(path, "r", encoding="utf-8")' in code
     assert 'open(spec_path, "rb")' in code
     assert 'open(path, "r", encoding="utf-8", errors="replace")' in code
@@ -5407,7 +5416,8 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     assert 'open(brainstorm_path, "rb")' in code
     assert 'open(input_path, "rb")' in code
     assert 'open(source_path, "rb")' in code
-    assert len(re.findall(r'open\([^)]*"[rw]b?"', code)) == 11
+    assert 'open(patch_path, "rb")' in code
+    assert len(re.findall(r'open\([^)]*"[rw]b?"', code)) == 12
     assert not re.search(r'open\([^)]*"[wax]', code), "every open here is a read"
     assert len(re.findall(r"^def write_docs_atomically\(", code, re.M)) == 1
     assert code.count("os.replace(") == 1 and code.count("NamedTemporaryFile(") == 1
@@ -5662,6 +5672,7 @@ def test_every_locked_tasks_verb_crosses_into_python_exactly_once():
         "cmd_usage_validation_record",
         "cmd_judge_verification",
         "cmd_set_execution_mode",
+        "cmd_patch_metadata",
         "cmd_normalize_status",
         "cmd_normalize_verification",
         "cmd_normalize_waves",
@@ -7324,6 +7335,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "mark-skipped",
         "update-field",
         "set-execution-mode",
+        "patch-metadata",
         "normalize-status",
         "normalize-verification",
         "normalize-waves",

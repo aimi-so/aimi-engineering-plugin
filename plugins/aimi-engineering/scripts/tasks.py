@@ -6045,6 +6045,101 @@ def op_set_execution_mode(argv):
     return 0
 
 
+# The four metadata keys story-merge fills itself when it is invoked with
+# --feature and --phase. /aimi:plan Phase 4 verifies them on that path and never
+# recomputes one, so a patch that would change a value already on disk is a
+# planner overwriting what the merge validated.
+PREFILLED_METADATA_KEYS = ("baseRef", "pluginVersion", "roadmapPath", "phase")
+
+
+def _same_json(left, right):
+    """Equality as the file would show it: True and 1 are different values."""
+    return json.dumps(left, sort_keys=True) == json.dumps(right, sort_keys=True)
+
+
+def op_patch_metadata(argv):
+    """Merge a patch object's top-level keys into metadata, in one crossing.
+
+    Each key of the patch replaces the metadata value of the same name, whole:
+    a nested object is not merged into. A null is written as null, because
+    `planPath` is null by contract, so removal has its own flag: `--remove
+    <key>`, repeatable, and a key that is already absent is not an error. Every
+    refusal happens before the write, so a refused call leaves the file
+    byte-identical, and a call that changes nothing writes nothing either.
+    """
+    verb = "patch-metadata"
+    usage = "Usage: tasks.py patch-metadata --tasks-file <path> [--from <patch.json>] [--remove <key>]..."
+    path = _flag(argv, "--tasks-file")
+    patch_path = _flag(argv, "--from")
+    removals = []
+    for position, arg in enumerate(argv):
+        if arg == "--remove" and position + 1 < len(argv) and argv[position + 1] not in removals:
+            removals.append(argv[position + 1])
+    if not path or (not patch_path and not removals):
+        die(usage)
+    patch = {}
+    if patch_path:
+        try:
+            with open(patch_path, "rb") as handle:
+                patch = json.load(handle)
+        except (OSError, UnicodeDecodeError) as err:
+            die("Error: " + verb + ": cannot read patch file " + patch_path + ": " + str(err))
+        except (ValueError, RecursionError) as err:
+            die("Error: " + verb + ": malformed JSON in patch file " + patch_path + ": " + str(err))
+        if not isinstance(patch, dict):
+            die("Error: " + verb + ": the patch file must hold one JSON object: " + patch_path)
+        if not patch:
+            die("Error: " + verb + ": the patch object holds no key: " + patch_path)
+    both = [key for key in removals if key in patch]
+    if both:
+        die("Error: " + verb + ": a key is both patched and removed: " + ", ".join(both))
+
+    docs = read_docs(path, verb)
+    if len(docs) != 1 or not isinstance(docs[0], dict):
+        die("Error: " + verb + ": the tasks file must hold exactly one JSON object: " + path)
+    doc = docs[0]
+    metadata = doc.get("metadata")
+    if not isinstance(metadata, dict):
+        die("Error: " + verb + ": the tasks file has no metadata object: " + path)
+
+    if "branchName" in patch:
+        branch = patch["branchName"]
+        if not isinstance(branch, str) or not BRANCH_NAME.fullmatch(branch):
+            die(
+                "Error: " + verb + ": branchName does not match the required pattern "
+                "^[a-zA-Z0-9][a-zA-Z0-9/_-]*$"
+            )
+    conflicts = [
+        key
+        for key in PREFILLED_METADATA_KEYS
+        if key in metadata
+        and (key in removals or (key in patch and not _same_json(metadata[key], patch[key])))
+    ]
+    if conflicts:
+        die(
+            "Error: " + verb + ": the tasks file already holds a value for "
+            + ", ".join(conflicts)
+            + " that this call would change or remove; these keys are verified,"
+            " never overwritten: " + path
+        )
+
+    patched = []
+    unchanged = []
+    for key, value in patch.items():
+        if key in metadata and _same_json(metadata[key], value):
+            unchanged.append(key)
+        else:
+            metadata[key] = value
+            patched.append(key)
+    removed = [key for key in removals if key in metadata]
+    for key in removed:
+        del metadata[key]
+    if patched or removed:
+        write_docs_atomically(path, docs)
+    _emit_compact({"patched": patched, "unchanged": unchanged, "removed": removed})
+    return 0
+
+
 def _normalize_op(verb, rule):
     """Both normalizers: map, write, and report the count from the SAME call.
 
@@ -10255,6 +10350,7 @@ _OPS = {
     "mark-skipped": _mark_op("mark-skipped"),
     "update-field": op_update_field,
     "set-execution-mode": op_set_execution_mode,
+    "patch-metadata": op_patch_metadata,
     "normalize-status": _normalize_op("normalize-status", normalize_status),
     "normalize-verification": _normalize_op("normalize-verification", normalize_verification),
     "normalize-waves": _normalize_op("normalize-waves", normalize_waves),

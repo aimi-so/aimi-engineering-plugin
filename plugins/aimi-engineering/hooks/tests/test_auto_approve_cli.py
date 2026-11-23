@@ -319,6 +319,23 @@ def test_bookkeeping_declared_is_approved(line):
     assert run_hook(line), f"a bookkeeping-declared shape was not auto-approved:\n  {line}"
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        "$AIMI_CLI verify-stage-declared",
+        "$AIMI_CLI verify-stage-declared --project .",
+        "${AIMI_CLI} branch-divergence",
+        "$AIMI_CLI branch-divergence --project /repo",
+    ],
+)
+def test_the_two_read_only_execution_readers_are_approved(line):
+    assert run_hook(line), f"a read-only verb shape was not auto-approved:\n  {line}"
+
+
+def test_patch_metadata_is_a_writer_and_keeps_prompting():
+    assert not run_hook("$AIMI_CLI patch-metadata --tasks-file t.json --from p.json")
+
+
 # The read-only usage-validation verbs are approved bare; the ones that run a
 # recipe command or write state are not (see ADVERSARIAL below).
 USAGE_READ_VERBS = [

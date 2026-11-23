@@ -34,12 +34,16 @@ if len(merged_stories) == 1:
     story = merged_stories[0]
     tree_head  = git -C [merge_cwd] rev-parse HEAD^{tree}
     tree_story = git -C [merge_cwd] rev-parse [story.worktree_name]^{tree}   # the story's verified commit
-    if tree_head == tree_story and result_payload_by_id[story.id].verify.exit == 0:
+    project    = "." if group_key == "DEFAULT" else group_key
+    staged     = $AIMI_CLI verify-stage-declared --project [project]   # {"project","staged"}; a non-zero exit reads as staged
+    if staged is false and tree_head == tree_story and result_payload_by_id[story.id].verify.exit == 0:
         Report: "wave [wave] ([group_key]): integrated check skipped, one story merged and the tree equals its verified commit."
         status = skipped; return
 ```
 
 A wave with one merged story out of several launched is the same case. Anything else runs the check.
+
+A project that declared stage-aware verification (`verifyStage` in `.aimi/config.json`) is never skipped: its story workers ran with `AIMI_VERIFY_STAGE=worktree`, so the checks that cannot run beside a sibling's have not run anywhere yet, and this check is where they do.
 
 ## Select the union
 
@@ -59,6 +63,7 @@ PRE_RECONCILE_SHA = git -C [merge_cwd] rev-parse HEAD
 $WORKTREE_MGR install-deps ...   # the same arguments as that group's setup
 export AIMI_ROOT=[AIMI_ROOT]
 export TASKS_FILE_PATH=[WAVE_TASKS_FILE]     # the run's own tasks file, for every command below
+export AIMI_VERIFY_STAGE=merged              # in every Bash call that runs a union command, declared or not
 ```
 
 A command's `project` is its cwd under merge_cwd. It must be relative, free of `..` and inside merge_cwd; otherwise stop the check, naming it.

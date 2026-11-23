@@ -34,8 +34,9 @@ _GOLDEN_CORPUS_PARTS = ("scripts", "tests", "golden_from_jq.json")
 
 # A staged story file: `<any>/.aimi/.tasks-staging/<run>/NN-*.json`.  The name
 # rule is the one story_merge.py's is_sidecar applies in the other direction --
-# metadata.json, outline.json, audit-result.json and any `*-outline.json` are
-# sidecars, not stories -- so the hook and the merge agree on what a story is.
+# metadata.json, outline.json, audit-result.json, audit-resolutions.json and any
+# `*-outline.json` are sidecars, not stories -- so the hook and the merge agree
+# on what a story is.
 _STAGED_STORY_NAME = re.compile(r"^[0-9]{2}-.*\.json$")
 _STAGING_PARTS = (".aimi", ".tasks-staging")
 

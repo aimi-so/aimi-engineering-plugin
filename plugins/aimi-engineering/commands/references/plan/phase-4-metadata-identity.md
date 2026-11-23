@@ -12,18 +12,21 @@ After `story-merge` writes the tasks.json, patch the `metadata` object — and r
 
 Either way the skeleton story-merge emits is minimal (`title: "feat: merged tasks"`, `branchName: "feat/merged"`) and everything under **Authored here, never derived** below is this phase's to write, on both paths.
 
-### Write metadata.json to staging dir (if RUN_DIR still exists)
+### How the Patch Is Written
 
-When Phase 3e succeeds, `RUN_DIR` is deleted by story-merge. Write `metadata.json` directly as part of the patch step below. If story-merge fails (RUN_DIR preserved), write `metadata.json` to `RUN_DIR` for diagnostic reference:
+Never rewrite a tasks file to change its `metadata`. For each file, use the Write tool to put only the keys this phase sets, as one JSON object, in `.aimi/.tasks-staging/metadata-patch.json`, then run:
 
 ```bash
-# metadata.json path (for diagnostic reference when story-merge fails)
-# <RUN_DIR>/metadata.json
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI patch-metadata --tasks-file "[tasks file path]" --from .aimi/.tasks-staging/metadata-patch.json
 ```
+
+Each key replaces the value it names, whole; `--remove <key>` deletes one. It prints `{patched, unchanged, removed}`. A non-zero exit wrote nothing: it refuses a `branchName` outside the pattern below and a changed `baseRef`, `pluginVersion`, `roadmapPath` or `phase` the merge pre-filled. Report the line verbatim and STOP. One call per tasks file; `rm -f` the patch file after the last. When story-merge failed, `RUN_DIR` is preserved and nothing is patched: write the object to `<RUN_DIR>/metadata.json` for diagnostic reference instead.
 
 ### Derive and Patch Metadata Fields
 
-Read the tasks.json file written by story-merge and patch the `metadata` object with the fields below. Four of them — `baseRef`, `pluginVersion`, `roadmapPath` and `phase` — are **verified rather than authored** on a run where story-merge was invoked with `--feature` and `--phase`; each of those four bullets says what verification means for its own field, and what to do on the legacy path where it is still hand-patched.
+Patch the `metadata` object of the tasks.json story-merge wrote with the fields below. Four of them — `baseRef`, `pluginVersion`, `roadmapPath` and `phase` — are **verified rather than authored** on a run where story-merge was invoked with `--feature` and `--phase`; each of those four bullets says what verification means for its own field, and what to do on the legacy path where it is still hand-patched.
 
 **Authored here, never derived:** `title`, `branchName`, `issues`, `finalize`, `decisions` and `researchPaths` — story-merge composes none of these on any path. `branchName`'s prefix is `metadata.type`, decided at the `- **type**` bullet below and therefore not knowable at merge time; the other five are accumulated by this command's own earlier phases and never travel to the merge at all. Reading the split the wrong way costs something in both directions: hand-patching one of the four verified fields overwrites a value the merge already validated, and waiting for one of these six to be pre-filled loses it.
 

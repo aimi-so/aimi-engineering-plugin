@@ -576,6 +576,49 @@ def test_outline_shift_unchanged_outline_leaves_the_audit_and_reports_nothing(tm
     assert tree(run) == before
 
 
+def test_outline_shift_reexpands_a_kept_story_whose_summary_changed_and_not_its_consumers(tmp_path):
+    """Narrowing a story's scope at the gate edits its summary and nothing
+    else. That used to report an empty shift and keep the old audit."""
+    run = tmp_path / "run"
+    run.mkdir()
+    stage(run, "01", "alpha")
+    stage(run, "02", "beta", dependsOn=["outline:01"])
+    (run / "audit-result.json").write_text('{"auditedIdx":["01","02"]}')
+    old = [oe("01", "Alpha", produces=["sym:a"]), oe("02", "Beta", consumes=["sym:a"])]
+    new = [dict(old[0], summary="build A only"), old[1]]
+    report = report_of(shift(tmp_path, old, new, run)[0])
+    assert report == {
+        "renamed": [],
+        "removed": [],
+        "reexpand": [{"idx": "01", "reason": "its summary changed"}],
+        "expand": [],
+        "auditInvalidated": True,
+    }
+    assert not (run / "audit-result.json").exists()
+    assert (run / "01-alpha.json").exists() and (run / "02-beta.json").exists()
+
+
+def test_outline_shift_a_respaced_summary_is_not_an_edit(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    stage(run, "01", "alpha")
+    old = [dict(oe("01", "Alpha"), summary="build the  thing")]
+    new = [dict(old[0], summary=" build the thing\n")]
+    report = report_of(shift(tmp_path, old, new, run)[0])
+    assert report["reexpand"] == [] and report["auditInvalidated"] is False
+
+
+def test_outline_shift_foundation_defaults_spelled_out_are_not_an_edit(tmp_path):
+    """A rewritten outline.json may spell out the defaults an entry omitted."""
+    run = tmp_path / "run"
+    run.mkdir()
+    stage(run, "01", "alpha")
+    old = [oe("01", "Alpha")]
+    new = [dict(old[0], foundationEntry=False, foundationMode="greenfield", foundationProject=None)]
+    report = report_of(shift(tmp_path, old, new, run)[0])
+    assert report["reexpand"] == [] and report["auditInvalidated"] is False
+
+
 def test_outline_shift_deletes_the_stale_audit_when_anything_changed(tmp_path):
     run = tmp_path / "run"
     run.mkdir()

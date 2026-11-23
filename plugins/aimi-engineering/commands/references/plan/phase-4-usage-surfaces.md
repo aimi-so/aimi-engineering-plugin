@@ -6,7 +6,7 @@
 
 Two jobs, in this order, after story-merge has written the tasks file(s) and `MERGE_RETURN` is known: (1) declare which stories deliver a usable surface as `metadata.usageSurfaces`, (2) ask the person once, per participating project, how the product is brought up, logged into and driven, and record the answer. Usage validation later runs the recipe the person confirmed and never guesses a command. User-facing wording follows `commands/references/user-communication.md`; the option format follows `commands/references/interactivity.md`. A spawned task (its conversation opens with `SPAWNED_SPLIT_TASK=<kind>`) never asks and never records.
 
-Read each merged tasks file with the Read tool and merge `metadata` with the Write tool, as the neighbouring Phase 4 files do. Open no file with `jq`.
+Read each merged tasks file with the Read tool and write `metadata.usageSurfaces` with `patch-metadata`, as `phase-4-metadata-identity.md` § How the Patch Is Written states. Open no file with `jq`.
 
 ## Surfaces
 
@@ -35,7 +35,7 @@ Applies in picker mode once at least one file carries `usageSurfaces`. When none
 
 **Participating projects** are the distinct `project` values of the stories across the files (on the PROJECT axis, one per `MERGE_RETURN` entry; otherwise one project, key `.`). Once a surface is declared anywhere, ask **every** participating project that has no recorded recipe, once per run. A project has a surface of its own when its file carries a `usageSurfaces` entry.
 
-First show the person the surfaces the stories name (kind, url or command, story ids) and ask once to confirm them, as a picker question: A. Confirm (default), B. Edit (the person says what to change; re-derive and patch again), C. Declare none (remove the key from every file and stop).
+First show the person the surfaces the stories name (kind, url or command, story ids) and ask once to confirm them, as a picker question: A. Confirm (default), B. Edit (the person says what to change; re-derive and patch again), C. Declare none (`patch-metadata --remove usageSurfaces` on every file, then stop).
 
 ### Key and state
 

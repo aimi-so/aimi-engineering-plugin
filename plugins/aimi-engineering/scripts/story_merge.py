@@ -202,9 +202,9 @@ def die_list(header, lines, code=1):
 # Reading the staging directory
 # ---------------------------------------------------------------------------
 #
-# Non-story sidecars written by plan.md Phase 3b have a different shape and would
-# be mis-merged as bogus stories, so they are skipped by name. A sidecar is one of
-# the three exact names in _SIDECARS, or any file whose basename ENDS IN
+# Non-story sidecars written by /aimi:plan have a different shape and would be
+# mis-merged as bogus stories, so they are skipped by name. A sidecar is one of
+# the exact names in _SIDECARS, or any file whose basename ENDS IN
 # "-outline.json" -- the open arm that keeps future <topic>-outline.json metadata
 # files out of the merge.
 #
@@ -219,7 +219,11 @@ def die_list(header, lines, code=1):
 # So the word "outline" may appear anywhere in a story's name; only a file whose
 # name ENDS that way is claiming to BE an outline.
 
-_SIDECARS = ("outline.json", "metadata.json", "audit-result.json")
+# audit-resolutions.json is the file the Phase 3d.5 Resolve option writes for
+# `apply-audit-patches --resolve`. It stays in the run directory after that verb
+# has read it, so without its name here the audit gate below met it as a staged
+# file the audit never read and refused every merge that followed a Resolve.
+_SIDECARS = ("outline.json", "metadata.json", "audit-result.json", "audit-resolutions.json")
 
 
 def is_sidecar(base):
@@ -250,7 +254,7 @@ def staging_files(staging_dir):
         # that index with this same expression, and it is what makes a skip
         # expensive: only a numbered file occupies a position, so only a numbered
         # file can shift every outline:NN after it and manufacture the cycle that
-        # gets reported instead of the skip. The three exact _SIDECARS names and a
+        # gets reported instead of the skip. The exact _SIDECARS names and a
         # plain <topic>-outline.json carry no index, hold no position, and are
         # written beside the stories on every ordinary run -- announcing those
         # would be noise on every merge, and would report nothing that can go

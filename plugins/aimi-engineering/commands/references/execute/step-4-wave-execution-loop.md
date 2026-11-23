@@ -265,6 +265,9 @@ while true:
                 - VISUAL_VERIFICATION = post-merge  ← every worktree story: the dev server cannot see
                   worktree changes, so visual verification runs after merge-all instead
                 - HEADED_MODE: never for a worktree story, for the same reason
+                - VERIFY_STAGE = worktree  ← only when this story's group declared it: once per group
+                  per run, `$AIMI_CLI verify-stage-declared --project [project]` ("." for DEFAULT, else
+                  the group key) printed "staged":true. A non-zero exit: show the line, omit it.
         )
 
     # All Tasks return in the same turn. Collect results.

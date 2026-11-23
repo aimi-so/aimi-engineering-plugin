@@ -89,6 +89,11 @@ Store `INTERACTIVE_MODE` for use by Phase 0.5, Phase 1.8, Phase 1.9, Phase 2.5, 
 
 Read and follow the **Resolve Agent Models** section of `commands/references/cli-path-resolution.md` to populate `AGENT_MODELS` and `AGENT_EFFORTS`. When resolution fails, treat every category as `"inherit"` and continue.
 
+### Local Branch Freshness
+
+Applies when: Step 0 stored a `BRANCH_DIVERGENCE` whose `divergence` is `local-behind` or `diverged`. Otherwise skip: the plan is written against the local tree as it is.
+Before running this phase, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/plan/step-0-branch-freshness.md in full.
+
 ## Phase 0: Idea Refinement
 
 Check `.aimi/brainstorms/` for a matching brainstorm (semantic match on topic, within 14 days):
