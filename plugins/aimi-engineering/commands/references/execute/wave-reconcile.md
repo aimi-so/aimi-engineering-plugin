@@ -35,7 +35,7 @@ if len(merged_stories) == 1:
     tree_head  = git -C [merge_cwd] rev-parse HEAD^{tree}
     tree_story = git -C [merge_cwd] rev-parse [story.worktree_name]^{tree}   # the story's verified commit
     project    = "." if group_key == "DEFAULT" else group_key
-    staged     = $AIMI_CLI verify-stage-declared --project [project]   # {"project","staged"}; a non-zero exit reads as staged
+    staged     = $AIMI_CLI verify-stage-declared --project [project]   # {"project","staged","declared"}; a non-zero exit reads as staged
     if staged is false and tree_head == tree_story and result_payload_by_id[story.id].verify.exit == 0:
         Report: "wave [wave] ([group_key]): integrated check skipped, one story merged and the tree equals its verified commit."
         status = skipped; return

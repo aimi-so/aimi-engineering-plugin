@@ -74,16 +74,26 @@ def test_the_verb_prints_one_json_line_and_defaults_to_the_root_key(tmp_path):
     _config(tmp_path, {"verifyStage": {".": True}})
     bare = _cli(tmp_path)
     assert bare.returncode == 0, bare.stderr
-    assert json.loads(bare.stdout) == {"project": ".", "staged": True}
+    assert json.loads(bare.stdout) == {"project": ".", "staged": True, "declared": True}
     other = _cli(tmp_path, "--project", "web")
-    assert json.loads(other.stdout) == {"project": "web", "staged": False}
+    assert json.loads(other.stdout) == {"project": "web", "staged": False, "declared": False}
 
 
 def test_the_verb_answers_false_with_no_config_at_all(tmp_path):
     os.makedirs(tmp_path / ".aimi")
     proc = _cli(tmp_path)
     assert proc.returncode == 0, proc.stderr
-    assert json.loads(proc.stdout) == {"project": ".", "staged": False}
+    assert json.loads(proc.stdout) == {"project": ".", "staged": False, "declared": False}
+
+
+def test_an_entry_of_false_is_an_answer_and_absence_is_not(tmp_path):
+    config = _config(tmp_path, {"verifyStage": {".": False}})
+    assert VS.read_entry(config, ".") is False
+    assert VS.read_entry(config, "web") is None
+    assert VS.load_declaration(config, ".") is False
+    proc = _cli(tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {"project": ".", "staged": False, "declared": True}
 
 
 def test_the_verb_refuses_a_malformed_declaration_with_an_empty_stdout(tmp_path):
@@ -123,8 +133,29 @@ def _text(*parts):
 def test_the_wave_loop_hands_the_stage_only_to_a_declared_group():
     step4 = _text(EXEC, "step-4-wave-execution-loop.md")
     line = next(l for l in step4.splitlines() if "VERIFY_STAGE = worktree" in l)
-    assert "only when" in line
+    assert "only when" in line and ".staged is true" in line
     assert "verify-stage-declared --project" in step4
+
+
+def test_the_wave_loop_suggests_the_declaration_once_and_only_where_it_can_matter():
+    step4 = _text(EXEC, "step-4-wave-execution-loop.md")
+    block = step4[step4.index("STAGE DECLARATION"):step4.index("DERIVE EXEC_ROOT")]
+    # Read once per group per run, before any worktree exists or any worker is spawned.
+    assert step4.index("STAGE = {}") < step4.index("while true:")
+    assert block.index("if group_key not in STAGE:") < block.index("verify-stage-declared --project")
+    assert step4.index("STAGE DECLARATION") < step4.index("CREATE WORKTREES PER PROJECT GROUP")
+    # Only an unanswered project with two or more stories in the wave, and only once.
+    condition = next(l for l in block.splitlines() if "declared is false" in l)
+    assert "n >= 2" in condition and "not STAGE[group_key].noticed" in condition
+    # A refusal never also gets the notice.
+    assert "store {staged: false, declared: true}" in block
+    # The notice carries the action itself: the key, the variable, and how to turn it off.
+    notice = next(l for l in block.splitlines() if "Report:" in l)
+    assert '{\\"verifyStage\\": {\\"[project]\\": true}}' in notice
+    assert ".aimi/config.json" in notice
+    assert "AIMI_VERIFY_STAGE is worktree" in notice
+    assert '{\\"[project]\\": false} turns this notice off' in notice
+    assert "AskUserQuestion" not in block
 
 
 def test_the_worker_exports_the_stage_it_was_handed_and_never_invents_one():

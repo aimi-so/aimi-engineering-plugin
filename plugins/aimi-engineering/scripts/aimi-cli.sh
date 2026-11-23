@@ -12131,11 +12131,12 @@ cmd_deps_recipe_record() {
 # verify-stage-declared [--project <key>]
 #
 # Prints whether a project key declared stage-aware verification in
-# <AIMI_ROOT>/.aimi/config.json, as one JSON line {project, staged}. A pure
+# <AIMI_ROOT>/.aimi/config.json, as one JSON line {project, staged, declared};
+# declared is true when the key has an entry at all, false included. A pure
 # reader: no lock, one crossing into scripts/verify_stage.py, which owns the
 # document rules. /aimi:execute reads it to decide whether a parallel story
-# worker gets AIMI_VERIFY_STAGE=worktree and whether the integrated wave check
-# may be skipped.
+# worker gets AIMI_VERIFY_STAGE=worktree, whether the integrated wave check
+# may be skipped, and whether to suggest the declaration.
 cmd_verify_stage_declared() {
   local project="."
   while [ $# -gt 0 ]; do
@@ -18972,7 +18973,8 @@ COMMANDS:
     verify-stage-declared [--project <key>]
                               Print whether the project key declared stage-aware
                               verification (verifyStage in .aimi/config.json) as one JSON
-                              line {project, staged}. Absence prints staged false; a
+                              line {project, staged, declared}. Absence prints both
+                              false, an entry of false prints declared true; a
                               malformed declaration exits 1. Read-only (key defaults
                               to ".").
     bookkeeping-resolve [--project <key>] [--root <dir>]

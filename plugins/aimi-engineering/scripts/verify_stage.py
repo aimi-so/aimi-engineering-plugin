@@ -15,10 +15,14 @@ them when the value is `merged`.
 /aimi:execute is the consumer. It exports `worktree` to the story workers of a
 declared project that run in parallel worktrees, exports `merged` in the
 integrated wave check that follows the merge, and never skips that check for a
-declared project, because it is the only place those checks run.
+declared project, because it is the only place those checks run. It also
+reads `declared` to tell a project that never answered, once per run, how to
+opt in.
 
 ABSENCE IS NOT AN ERROR. No config, no `verifyStage` key and no entry for the
-requested project all answer `staged: false`. Anything present but malformed
+requested project all answer `staged: false, declared: false`. An entry of
+`false` answers `staged: false, declared: true`: the project has said it does
+not want the stage, and /aimi:execute stops suggesting it. Anything present but malformed
 is refused, naming the config file: a typo must not read as "not declared" and
 quietly put the end-to-end suite back into every parallel worktree.
 
@@ -42,11 +46,11 @@ class VerifyStageError(ValueError):
     """A malformed verifyStage declaration."""
 
 
-def load_declaration(config_path, project_key):
-    """True when project_key declares stage-aware verification, else False."""
+def read_entry(config_path, project_key):
+    """The project's entry: True or False when present, None when absent."""
     config = str(config_path)
     if not os.path.exists(config):
-        return False
+        return None
     try:
         with open(config, "r", encoding="utf-8") as fh:
             doc = json.load(fh)
@@ -55,18 +59,23 @@ def load_declaration(config_path, project_key):
     if not isinstance(doc, dict):
         raise VerifyStageError("%s is not a JSON object" % config)
     if KEY not in doc:
-        return False
+        return None
     declared = doc[KEY]
     if not isinstance(declared, dict):
         raise VerifyStageError("%s: %s is not an object" % (config, KEY))
     if project_key not in declared:
-        return False
+        return None
     value = declared[project_key]
     if not isinstance(value, bool):
         raise VerifyStageError(
             "%s: %s for project %r is not true or false" % (config, KEY, project_key)
         )
     return value
+
+
+def load_declaration(config_path, project_key):
+    """True when project_key declares stage-aware verification, else False."""
+    return read_entry(config_path, project_key) is True
 
 
 def _parse(args):
@@ -93,11 +102,12 @@ def _declared(args):
         return 2
     config, project = parsed
     try:
-        staged = load_declaration(config, project)
+        entry = read_entry(config, project)
     except VerifyStageError as exc:
         sys.stderr.write("Error: %s: %s\n" % (VERB, exc))
         return 1
-    sys.stdout.write(json.dumps({"project": project, "staged": staged}, ensure_ascii=False) + "\n")
+    answer = {"project": project, "staged": entry is True, "declared": entry is not None}
+    sys.stdout.write(json.dumps(answer, ensure_ascii=False) + "\n")
     return 0
 
 

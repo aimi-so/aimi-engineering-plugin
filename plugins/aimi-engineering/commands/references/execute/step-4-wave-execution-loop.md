@@ -9,6 +9,7 @@
 wave = 1
 DESIGN_REVIEW_BUFFERS = {}  # key: story_id, value: {title, output}; populated by post-merge design reviewer
 CONSOLE_BUFFER = {}         # key: story_id, value: ATTRIBUTION object; populated by post-merge console capture (see Console Error Attribution section)
+STAGE = {}                  # key: group_key, value: verify-stage-declared's answer, read once per run (see Stage Declaration)
 
 # WAVE_TASKS_FILE — this run's own tasks file (PHASE_TASKS_PATH in phase mode, else TASKS_PATH,
 # both already resolved here, a split sub-orchestrator's included). Every CLI call in this
@@ -141,6 +142,23 @@ while true:
             project_roots[group_key] = AIMI_ROOT / group_key  (resolve to absolute path)
 
     # ========================================
+    # STAGE DECLARATION — once per group per run
+    # ========================================
+    # Stories of one wave verify side by side, and a worktree does not isolate a test database,
+    # a fixed container name or a port. A project that declared verifyStage leaves those checks
+    # to the integrated check after the merge; one that never answered is told how, once.
+    for group_key in project_groups:
+        project = "." if group_key == "DEFAULT" else group_key
+        if group_key not in STAGE:
+            STAGE[group_key] = $AIMI_CLI verify-stage-declared --project [project]   # {"project","staged","declared"}
+            # A non-zero exit: show its line and store {staged: false, declared: true}, so no notice
+            # is added on top of a refusal.
+        n = len(project_groups[group_key])
+        if STAGE[group_key].declared is false and n >= 2 and not STAGE[group_key].noticed:
+            STAGE[group_key].noticed = true   # the first wave with two or more of its stories, once per run
+            Report: "[group_key]: [n] stories run their checks at the same time, each in its own worktree. Checks that share one test database, container or port can collide. To run those once, after this wave's merge: add {\"verifyStage\": {\"[project]\": true}} to .aimi/config.json, and make those checks exit 0 early when AIMI_VERIFY_STAGE is worktree. {\"[project]\": false} turns this notice off."
+
+    # ========================================
     # DERIVE EXEC_ROOT / EXEC_BRANCH PER PROJECT GROUP — see container-execution.md's
     # Execution Context. The only PHASE_MODE/CONTAINER_MODE check in the loop; every
     # consumer below reads EXEC_ROOT[group_key]/EXEC_BRANCH[group_key].
@@ -265,9 +283,7 @@ while true:
                 - VISUAL_VERIFICATION = post-merge  ← every worktree story: the dev server cannot see
                   worktree changes, so visual verification runs after merge-all instead
                 - HEADED_MODE: never for a worktree story, for the same reason
-                - VERIFY_STAGE = worktree  ← only when this story's group declared it: once per group
-                  per run, `$AIMI_CLI verify-stage-declared --project [project]` ("." for DEFAULT, else
-                  the group key) printed "staged":true. A non-zero exit: show the line, omit it.
+                - VERIFY_STAGE = worktree  ← only when STAGE[wt.group_key].staged is true (Stage Declaration above)
         )
 
     # All Tasks return in the same turn. Collect results.
