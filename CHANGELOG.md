@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.166.0] - 2026-11-23
+
+Five things a real planning and execution run met: a merge refused after Resolve, an outline edit that changed nothing, a plan written against a branch behind origin without a word, metadata that could only be written by rewriting the whole tasks file, and end-to-end suites colliding when a wave ran them side by side.
+
+### Added
+- `patch-metadata --tasks-file <path> [--from <patch.json>] [--remove <key>]...`, which merges the top-level keys of a JSON object into a tasks file's `metadata` in one crossing inside the lock. It refuses a `branchName` outside the branch pattern and a changed or removed `baseRef`, `pluginVersion`, `roadmapPath` or `phase` the file already holds, and writes nothing when no key changes.
+- `branch-divergence [--branch <name>] [--project <path>]`, a read-only verb that reports how a local branch stands against `origin/<name>` as the last fetch left it, with the commit counts on each side. It never contacts the remote.
+- Stage-aware verification, for a project whose end-to-end checks share one test database, fixed container names or a fixed port. The project declares `{"verifyStage": {"<project key>": true}}` in `.aimi/config.json` and its own command leaves itself out when `AIMI_VERIFY_STAGE` is `worktree`. `/aimi:execute` exports `worktree` to that project's parallel story workers and `merged` in the integrated wave check, and never skips that check for a declared project. `verify-stage-declared` is the reader. See `plugins/aimi-engineering/docs/dev/execute-wave-loop.md` § Stage-aware verification.
+- `/aimi:plan` reads that verb right after its fetch. When the local branch is behind or has diverged, it asks whether to fast-forward, continue or stop (one log line in agent mode) before any research runs. The step lives in `commands/references/plan/step-0-branch-freshness.md`.
+
+### Changed
+- `/aimi:plan` Phase 4 writes metadata through `patch-metadata` and no longer rewrites the tasks file with the Write tool.
+- `outline-shift` lists a kept story for re-expansion when its own `summary` changed, compared as words. Editing only a summary at the gate used to report an empty shift.
+- Edit Outline After Expansion returns to the gate that offered it, with its findings as they were, when the edit changed nothing a story reads, instead of auditing identical stories again.
+- `aimi-codebase-researcher` describes the working tree only and never reads another ref, since the plan records the working tree's HEAD as its base.
+
+### Fixed
+- `story-merge` no longer refuses a run directory after the Unresolved Gate's Resolve option. `audit-resolutions.json`, which Resolve writes there and `apply-audit-patches --resolve` leaves behind, is now skipped as a sidecar.
+
 ## [1.165.0] - 2026-11-19
 
 Planning stays faithful to what the operator handed over and decided: a named prototype kit travels from brainstorm into the plan, audit findings are resolved one at a time or reported as open, and a story's files stay inside its own repository.
