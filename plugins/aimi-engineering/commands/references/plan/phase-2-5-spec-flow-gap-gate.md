@@ -27,6 +27,7 @@ Merge all collected entries into the shared `openQuestions[]` accumulator.
 
 **For each new entry in `openQuestions[]`** without a resolution:
 - Call AskUserQuestion with the OQ text. Include `source` and `anchor` in the question header (e.g., `OQ · specFlow Gap3` or `OQ · specFlow CriticalQ1`) so the user knows exactly what they are deciding on.
+- When `prototypePaths` or `prototypeBlocks` is non-empty, compose the options per `commands/references/user-communication.md` § Prototype-First Options; only the option composition changes, the OQ text is still relayed.
 - Record the resolution in working memory `oqDecisions[]` keyed by anchor, using `specFlow:CriticalQ<n>` or `specFlow:Gap<n>` as the `source` field.
 
 **Do NOT write sentinels back to the spec-flow analyzer output** — that output is a read-only artifact from this gate's perspective. Only `oqDecisions[]` is mutated.

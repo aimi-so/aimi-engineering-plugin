@@ -5558,7 +5558,7 @@ test_apply_audit_patches() {
 
   output=$("$CLI" apply-audit-patches --staging-dir "$stg" --annotate-deferred --reason "after review" 2>&1) && exit_code=0 || exit_code=$?
   assert_eq "02|cross-checked" "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); n=json.load(open(sys.argv[2]))["notes"]; print(",".join(d["annotated"]) + "|" + n)' "$output" "$stg/01-story.json")" "apply-audit-patches: --annotate-deferred touches only the story an unresolved entry names"
-  assert_eq "1" "$(python3 -c 'import json,sys; n=json.load(open(sys.argv[1]))["notes"]; print(int("[audit-deferred: resolved at plan review] endpoint name drift" in n and "after review" in n))' "$stg/02-story.json")" "apply-audit-patches: the human --reason and the finding land in the annotated story's notes"
+  assert_eq "1" "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); n=json.load(open(sys.argv[2]))["notes"]; print(int("[audit-deferred: unresolved — review before execution] endpoint name drift" in n and "after review" not in n and "resolved at plan review" not in n and any("after review" in json.dumps(o) for o in d["oqDecisions"])))' "$output" "$stg/02-story.json")" "apply-audit-patches: a deferral writes the unresolved marker and the finding into the notes, and the --reason reaches oqDecisions only"
 
   printf '%s\n' '{"title":"S03","description":"d","acceptanceCriteria":["Typecheck passes"],"status":"pending","dependsOn":[],"notes":"","verification":{"strategy":"test","status":"pending"}}' > "$stg/03-story.json"
   printf '%s\n' '{"patches":[],"unresolved":[{"storyIdx":"03","message":"agent finding"}]}' > "$stg/audit-result.json"
@@ -5568,7 +5568,7 @@ test_apply_audit_patches() {
   printf '%s\n' '{"status":"audit-failed","auditedIdx":["01","02","03"],"patches":[],"unresolved":[{"storyIdx":"_audit","message":"audit failed - no patches applied"}]}' > "$stg/audit-result.json"
   output=$("$CLI" apply-audit-patches --staging-dir "$stg" --annotate-deferred --reason "after review" 2>&1) && exit_code=0 || exit_code=$?
   assert_eq "01,02,03" "$(python3 -c 'import json,sys; print(",".join(json.loads(sys.argv[1])["annotated"]))' "$output")" "apply-audit-patches: a stub-backed deferral lists every staged idx as annotated"
-  assert_eq "1" "$(python3 -c 'import json,sys; n=json.load(open(sys.argv[1]))["notes"]; print(int("cross-story audit did not run" in n and "after review" in n))' "$stg/03-story.json")" "apply-audit-patches: a stub-backed deferral writes the cross-story audit did not run message and the reason into a staged story"
+  assert_eq "1" "$(python3 -c 'import json,sys; n=json.load(open(sys.argv[1]))["notes"]; print(int("[audit-deferred: unresolved — review before execution] " in n and "cross-story audit did not run" in n and "after review" not in n))' "$stg/03-story.json")" "apply-audit-patches: a stub-backed deferral writes the cross-story audit did not run message under the unresolved marker, without the reason"
   assert_eq "1" "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(int(len(d["oqDecisions"]) == 1 and d["oqDecisions"][0]["anchor"] == "auditUnresolved:_audit"))' "$output")" "apply-audit-patches: the stub fan-out keeps exactly one auditUnresolved:_audit decision"
 
   output=$("$CLI" apply-audit-patches --staging-dir "$stg" --agent-deferral 2>&1) && exit_code=0 || exit_code=$?

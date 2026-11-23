@@ -37,7 +37,8 @@ Verify probe: [N] unlabelled non-discriminating, [M] unmeasured, [K] not probed
 [If gaps found]: Gaps identified: [N] (captured as criteria/notes)
 [If auditFailed]: Audit: shipped unaudited
 [If audit unresolved non-empty AND Unresolved Gate outcome is "applied"]: Audit warnings: [N] cross-story issue(s) — reviewed, applied
-[If audit unresolved non-empty AND Unresolved Gate outcome is "deferred"]: Audit deferred: [N] item(s) — flagged on affected stories, review before execution
+[If metadata.auditOpen non-empty]: Audit open: [N] finding(s) — flagged on affected stories, review before execution
+[If findings were resolved as criteria]: Audit resolved: [M] finding(s) — added as acceptance criteria
 [If metadata.smellWarnings non-empty]: Smell warnings: [N] finding(s)
 [If 10+ stories]: Warning: [N] stories generated. Consider splitting into smaller feature sets.
 [If parallel stories detected]: Parallel groups: [N] stories can run concurrently (max concurrency: [maxConcurrency])
@@ -60,20 +61,17 @@ Next steps:
 
 **Audit line:** `Audit: shipped unaudited` is printed exactly when the Failure Fallback stub fired in this run (`auditFailed`); story-merge confirms it with a stderr line containing `plan shipped unaudited`. A run whose audit never failed prints nothing here.
 
-**Audit warnings / Audit deferred line:** present only when Phase 3d.5 ran, `unresolved[]` was non-empty, and the Phase 3d.5 Unresolved Gate above resolved it via **Apply anyway** or **Defer with reason** — never via Abort, since Step 5 is never reached on that path. `N` is the count of items in `unresolved[]`. The two lines are mutually exclusive, keyed by the gate's outcome:
-- **Apply anyway:** `Audit warnings: [N] cross-story issue(s) — reviewed, applied`
-- **Defer with reason** (chosen interactively, or auto-selected by the agent-mode fallback): `Audit deferred: [N] item(s) — flagged on affected stories, review before execution`
+**Audit warnings line:** present only when Phase 3d.5 ran, `unresolved[]` was non-empty, and the Unresolved Gate above resolved it via **Apply anyway**. `N` is the count of items in `unresolved[]`: `Audit warnings: [N] cross-story issue(s) — reviewed, applied`, then one bullet per item, `[storyIdx]: [sanitized message]`, from the `unresolved[]` entry schema `{storyIdx, message}`. Abort never reaches Step 5.
 
-Either way, render each item as a bullet immediately after that line:
-- `[storyIdx]: [sanitized message]` — `storyIdx` and `message` come from the `unresolved[]` entry schema `{storyIdx, message}`.
+**Audit open / Audit resolved lines:** `Audit open` is present only when `metadata.auditOpen` is non-empty (findings left open by Resolve, Defer as open or the agent-mode fallback); `N` is its length. Render one bullet per element immediately after it: `[stories joined by comma]: [sanitized message]`, from the element schema `{message, stories}`. `Audit resolved` is present only when Resolve confirmed at least one criterion; `M` is the count of `resolved` `auditGate` decisions. Render nothing when no finding is open or resolved.
 
-**Sanitization before rendering** — auditor-emitted `message` strings carry text that originated (transitively) from sub-agent output and may contain hostile characters. Before rendering each bullet, apply this sanitization to the `message` field in order:
+**Sanitization before rendering** — auditor-emitted `message` strings carry text that originated (transitively) from sub-agent output and may contain hostile characters. Before rendering each bullet (an `Audit open` bullet included), apply this sanitization to the `message` field in order:
 1. Replace newlines and carriage returns with single spaces.
 2. Strip any `$(` sequences.
 3. Remove backtick characters.
 4. Truncate to 200 characters; append `…` when truncation fires.
 
-The `storyIdx` field is already constrained by the schema (`^[0-9]{2}$` or the `_audit` sentinel) and requires no sanitization. When `unresolved[]` is empty, Phase 3d.5 was skipped (fewer than 2 stories), or the gate resolved via Abort (in which case Step 5 is never reached at all), omit both lines and the bullet list entirely — do not render an empty section.
+The `storyIdx` field is already constrained by the schema (`^[0-9]{2}$` or the `_audit` sentinel) and requires no sanitization. When `unresolved[]` is empty, Phase 3d.5 was skipped (fewer than 2 stories), or the gate resolved via Abort (in which case Step 5 is never reached at all), omit these lines and the bullet lists entirely — do not render an empty section.
 
 **Smell warnings line:** present only when the merged tasks.json has a non-empty `metadata.smellWarnings` array. `N` is the count of entries. Render each item as a bullet immediately after the `Smell warnings` line, choosing the case that matches its `type`:
 

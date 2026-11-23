@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.165.0] - 2026-11-19
+
+Planning stays faithful to what the operator handed over and decided: a named prototype kit travels from brainstorm into the plan, audit findings are resolved one at a time or reported as open, and a story's files stay inside its own repository.
+
+### Added
+- `inspect-prototype-kit` and `import-prototype-kit` (`scripts/prototype_kit.py`): a zip or folder the brainstorm argument names is checked member by member before anything is written, then copied into `.aimi/sources/<slug>/`; the operator's original is never recorded.
+- The brainstorm records a kit's HTML under `prototype:` and its markdown handoff under the new `prototypeHandoff:` frontmatter key, and `/aimi:plan` loads `prototypeHandoff` as untrusted data for the Phase 1 researchers and the Pass 2 expanders.
+- `commands/brainstorm.md` is a router over `commands/references/brainstorm/`, with `scripts/tests/test_brainstorm_wiring.py` and `scripts/tests/brainstorm_text.py` pinning it, and `brainstorm/*.md` joins the OpenCode reference translation allowlist.
+- `usage-recipe-sources`, which lists each repository's own files that may state how its product comes up, so the recipe confirmation proposes a step from the file that states it and asks an open question only for a step no file states.
+- `apply-audit-patches --resolve`, a mode that appends an operator-confirmed criterion to each story an audit finding names; a finding left open stays open.
+- `metadata.auditOpen` and the `audit-open` verb, which lists the audit findings a plan left open; `/aimi:execute` shows them at the start and asks whether to run anyway.
+- The Prototype-First Options rule in `commands/references/user-communication.md`: a question whose options include the prototype's behaviour recommends it as option A.
+- Cross-repository `implementation.files` entries are an error in `validate-tasks` and a refusal in `story-merge` when the `.aimi` root is not a git repository and the stories tag two or more projects.
+
+### Changed
+- The Phase 3d.5 Unresolved Gate offers Resolve and Defer as open in place of Defer with reason.
+- The split sub-orchestrators of `/aimi:execute` now run on the `workflow` model category instead of `executor`; the story workers they spawn still read `executor`. A user whose `workflow` model is weaker than their `executor` model will see the sub-orchestrators that coordinate a split run on that weaker model, while story workers keep the stronger one. Run `/aimi:setup-models` to change either.
+- `/aimi:setup-models` words the `workflow` question as covering execution sub-orchestrators and the `executor` question as story workers that edit code.
+
+### Fixed
+- A story worker reads a prototype the plan recorded in `metadata.prototypeDropped` instead of refusing to open it. A `no-view-anchors` entry names a single-file prototype the plan did read and still lists in `prototypePaths`, and the worker had been told never to open that path, so screen stories were built from the acceptance criteria's restatement of the prototype rather than from the prototype. The worker now reads such a prototype in full as its layout reference, reads an `aggregate-cap` one in full and reports where the criteria disagree with it, and still never opens a path named only in the record.
+
 ## [1.164.0] - 2026-11-17
 
 Files that every story touches by design, such as a changelog or a version manifest, no longer serialize a wave or stop its merge when the project declares them and a rule can reconcile them.

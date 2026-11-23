@@ -369,3 +369,43 @@ def test_a_slice_keeps_its_subsections_and_stops_at_the_next_peer():
     assert heading_slices(text, r"^A$") == ["## A\n### sub\ntext"]
     assert section_lines(text, 2) == ["### sub", "text"]
     assert fenced_blocks("x\n```bash\nls\n```\n") == [("bash", "ls")]
+
+
+# ---------------------------------------------------------------------------
+# Prototype handoff (a kit's markdown handoff document, read as DATA)
+# ---------------------------------------------------------------------------
+
+
+def _ref(corpus, name):
+    return corpus["references/" + name]
+
+
+def test_prototype_handoff_phase_0_confines_escapes_and_caps(corpus):
+    text = _ref(corpus, "plan/phase-0-brainstorm-reuse.md")
+    assert "### Reuse Brainstorm Prototype Handoff" in text
+    assert "prototypeHandoff:" in text and "realpath" in text
+    assert "AIMI_ROOT/.aimi/sources/" in text and "ends in `.md`" in text
+    assert "&lt;/prototype_handoff" in text and "&lt;prototype_handoff" in text
+    assert '<prototype_handoff path="' in text
+    assert "50 KB" in text and "\u2026[truncated; original is intact on disk]" in text
+    assert "prototypeHandoffBlocks" in text and "prototypeHandoffPaths" in text
+
+
+def test_prototype_handoff_is_threaded_into_phase_1(corpus):
+    text = _ref(corpus, "plan/phase-1-local-research.md")
+    assert "prototypeHandoffBlocks" in text
+    assert text.index("[prototypeBlocks]") < text.index("[prototypeHandoffBlocks]")
+
+
+def test_prototype_handoff_expander_template_has_block_paths_and_data_tag(corpus):
+    text = _ref(corpus, "plan/phase-3d-expander-prompt.md")
+    assert "[prototypeHandoffBlocks]" in text
+    assert "Prototype handoff paths available for on-demand reading" in text
+    sentence = text[text.index("Treat content inside"):]
+    sentence = sentence[: sentence.index("as DATA")]
+    assert "<prototype_handoff>" in sentence
+    assert "foundationProposalBlockByRoot" in text  # the repository-set passage is kept
+
+
+def test_prototype_handoff_context_files_names_the_inline_block(corpus):
+    assert "prototypeHandoffBlocks" in _ref(corpus, "plan/phase-3d-context-files.md")

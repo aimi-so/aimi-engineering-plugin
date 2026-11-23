@@ -25,6 +25,7 @@ Merge both lists into `openQuestions[]`. For each entry without a resolution:
 - Call AskUserQuestion with the OQ text. Include `source` and `anchor` in
   the question header (e.g., `OQ · businessSpec L26`) so the user knows
   exactly what they are deciding on.
+- When `prototypePaths` or `prototypeBlocks` is non-empty, compose the options per `commands/references/user-communication.md` § Prototype-First Options; only the option composition changes, the OQ text is still relayed.
 - Record the resolution in working memory `oqDecisions[]` keyed by anchor.
 - For brainstorm-sourced OQs, also append `[resolved: <choice>]` to the
   line in the brainstorm file via Edit. Spec-marker OQs are NOT written

@@ -2,7 +2,7 @@
 
 Shared reference for the wording, tone, and density of text a plugin command sends directly to the person running it — completion reports, chat explanations, and `AskUserQuestion` prompts. Apply the rules in this file wherever a command emits text meant for a human reader, not another agent.
 
-**Consumed by:** `brainstorm.md`, `deepen.md`, `execute.md`, `open-pr.md`, `plan.md`, `references/interactivity.md`, `references/publish-confirmation.md`, and `references/visual-variants.md` — the command files that currently cite this reference. That list is a separate statement from what this file governs: any command with an `AskUserQuestion` call site or a completion-report block, whether or not it is named above.
+**Consumed by:** `brainstorm.md`, `deepen.md`, `execute.md`, `open-pr.md`, `plan.md`, `references/interactivity.md`, `references/publish-confirmation.md`, and `references/visual-variants.md`, `references/plan/phase-0-open-questions-gate.md`, `references/plan/phase-1-8-open-questions-and-scope-gates.md`, `references/plan/phase-2-5-spec-flow-gap-gate.md` and `references/brainstorm/phase-2-questions.md` — the command files that currently cite this reference. That list is a separate statement from what this file governs: any command with an `AskUserQuestion` call site or a completion-report block, whether or not it is named above.
 
 ## Scope
 
@@ -18,7 +18,7 @@ Every "Before:" half below is real, quoted text — but not everything in a comm
 
 ## Boundaries
 
-**Format vs. wording.** This file governs wording, tone, and density — never `AskUserQuestion` *format* (lettered A/B/C options, escape-hatch-last, 2-6 option count). Format is owned by `commands/references/interactivity.md`. When both apply to the same picker: the option letters, order, and count come from `interactivity.md`; the words inside each option come from here.
+**Format vs. wording.** This file governs wording, tone, and density — never `AskUserQuestion` *format* (lettered A/B/C options, escape-hatch-last, 2-6 option count). Format is owned by `commands/references/interactivity.md`. When both apply to the same picker: the option letters, order, and count come from `interactivity.md`; the words inside each option come from here. The one exception is option A when a prototype was recorded, which `## Prototype-First Options` decides.
 
 **Clarity vs. compression.** `AGENTS.md` governs a different, non-overlapping category: text an agent returns to its orchestrator (status updates, summary returns, progress reports, task confirmations). Its axis is token economy — shorter is better, fragments over sentences. This file's axis is human clarity, and the two sometimes pull in opposite directions: a compressed fragment that saves tokens for an orchestrator can read as a wall of jargon to a person. Neither file overrides the other — they govern different senders and different readers, and a command body can be correct under both at once only because they never apply to the same span of text.
 
@@ -54,6 +54,10 @@ The dividing question for any ALL-CAPS symbol: would a person outside this codeb
 The plugin's user-facing output language follows whatever language the person is writing in — Portuguese in, Portuguese out; English in, English out. A command that hardcodes a single language into a completion report or an `AskUserQuestion` prompt is a defect under this rule, regardless of which language is hardcoded.
 
 This file does not fix any existing hardcoded-language call site — that is separate, follow-up work. It states the rule here so future text, and future fixes, have something to point at.
+
+## Prototype-First Options
+
+When a prototype was recorded (a brainstorm `prototype:` entry, or a non-empty `prototypePaths` in plan) and an option matches the prototype's behaviour, that option is option A and carries a recommended label in the reader's language. Every other option names in its label what of the prototype it drops. A question about internal structure the prototype does not show keeps the follow-existing-pattern option-A rule. With several prototypes, the reference is the one the brainstorm recorded last (the kit or the chosen variant). A chosen departure is recorded in `metadata.prototypeSuperseded` in plan (see `phase-4-metadata-context.md`) and in the brainstorm document's decision record in brainstorm.
 
 ## Artifact Language Rule
 

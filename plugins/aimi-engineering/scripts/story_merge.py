@@ -1616,6 +1616,26 @@ def group_key(value):
     return norm_project(value)
 
 
+def tagged_project_keys(stories):
+    """The distinct project keys the stories carry, "." (the root) excluded.
+
+    A story counts only when project_state calls its raw value "tagged", and the
+    key is group_key's, so every caller that asks which repositories a plan
+    spans gets the same set the grouping pass routes by.
+    """
+    keys = set()
+    for story in stories:
+        if not isinstance(story, dict):
+            continue
+        value = story.get("project")
+        if project_state(value) != "tagged":
+            continue
+        key = group_key(value)
+        if key not in (None, "."):
+            keys.add(key)
+    return keys
+
+
 # ---------------------------------------------------------------------------
 # The four metadata fields a --feature/--phase merge already knows
 # ---------------------------------------------------------------------------
@@ -3000,22 +3020,31 @@ def verify_refusal_findings(story):
     ]
 
 
-def rail_and_path_findings(story):
+def rail_and_path_findings(story, other_projects=None, multi_repo=False):
     """Sanitized guard-rail and path findings for one story; [] for a clean one.
 
-    Rails first, then paths, the order the report keeps. The two rules live in
-    tasks.py (guard_rail_findings, implementation_path_findings) and are
+    Rails first, then paths, then the cross-repository entries, the order the
+    report keeps. The rules live in tasks.py (guard_rail_findings,
+    implementation_path_findings, cross_repository_file_findings) and are
     imported INSIDE this body for the reason verify_refusal_findings gives; this
-    function restates neither. Both callers -- validate-staging and the
+    function restates none of them. Both callers -- validate-staging and the
     story-merge refusal -- read it, so they cannot disagree about a story.
+    `other_projects` and `multi_repo` are the cross-repository rule's two
+    layout arguments; left at their defaults that rule finds nothing.
     """
     if not isinstance(story, dict):
         return []
-    from tasks import guard_rail_findings, implementation_path_findings
+    from tasks import (
+        cross_repository_file_findings,
+        guard_rail_findings,
+        implementation_path_findings,
+    )
 
     return [
         rm_sanitize(finding, _FINDING_MAXLEN)
-        for finding in guard_rail_findings(story) + implementation_path_findings(story)
+        for finding in guard_rail_findings(story)
+        + implementation_path_findings(story)
+        + cross_repository_file_findings(story, other_projects or (), multi_repo)
     ]
 
 
@@ -3062,6 +3091,14 @@ def validate_staging(staging_dir, outline=None):
 
         edges = validate_outline(outline)["edges"]
     report = {}
+    # One staged file shows one story, so the repository set is the layout's own:
+    # the child git repositories of the root, plus each story's own project key
+    # below. The layout is read once, from PROJECT_ROOT the way main reads it.
+    from tasks import child_repository_keys, is_multi_repo_root
+
+    layout_root = os.environ.get("PROJECT_ROOT") or os.getcwd()
+    multi_repo = is_multi_repo_root(layout_root)
+    layout_keys = child_repository_keys(layout_root) if multi_repo else set()
     for idx, path in sorted(staged_idx_map(staging_dir).items()):
         try:
             with open(path, "r", encoding="utf-8") as handle:
@@ -3072,7 +3109,11 @@ def validate_staging(staging_dir, outline=None):
         findings = []
         for entry in entries:
             findings.extend(verify_refusal_findings(entry))
-            findings.extend(rail_and_path_findings(entry))
+            findings.extend(
+                rail_and_path_findings(
+                    entry, layout_keys | tagged_project_keys([entry]), multi_repo
+                )
+            )
             findings.extend(verification_url_findings_sanitized(entry))
             findings.extend(malformed_outline_token_findings(entry))
         if entries:
@@ -3114,9 +3155,15 @@ def rail_and_path_refusal_lines(stories):
     A builder of its own: verify_refusal_lines hard-codes the implementation.verify
     prefix, and these findings already name their field and index.
     """
+    from tasks import is_multi_repo_root
+
+    keys = tagged_project_keys(stories)
+    multi_repo = len(keys) >= 2 and is_multi_repo_root(
+        os.environ.get("PROJECT_ROOT") or os.getcwd()
+    )
     lines = []
     for story in stories:
-        for finding in rail_and_path_findings(story):
+        for finding in rail_and_path_findings(story, keys, multi_repo):
             lines.append(
                 "  Story "
                 + story["id"]
@@ -3221,7 +3268,8 @@ def main(argv):
             "Error: story-merge: an implementation.guardRails entry must be a whole"
             " top-level segment of implementation.verify, an implementation.files entry"
             " must stay inside the story's repository (a file outside it belongs in"
-            " implementation.outputs as a .aimi/ path), and implementation.outputs must"
+            " implementation.outputs as a .aimi/ path, and a file of another repository"
+            " of the layout in that repository's own story), and implementation.outputs must"
             " hold .aimi/ paths; no files were written:",
             rails_and_paths,
         )

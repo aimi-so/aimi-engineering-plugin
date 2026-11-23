@@ -129,4 +129,5 @@ Story content validation failed:
 [error output]
 
 Review the stories for suspicious content and fix before execution.
+A finding that names an implementation.files entry of another repository of the layout is not fixed here: re-plan, so the entry moves to the story of the repository that owns it.
 ```

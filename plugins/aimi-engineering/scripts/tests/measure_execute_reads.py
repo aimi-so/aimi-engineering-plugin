@@ -67,6 +67,7 @@ TABLE = {
     "usage-validation-loop.md": FLAT,
     "step-0-7-visual-follow-prompt.md": ALL,
     "step-0-9-split-detection.md": ALL,
+    "step-1-audit-open.md": ALL,
     "step-0-9-split-flow.md": set(),
     "step-0-9-split-waves.md": set(),
     "step-0-9-aggregated-completion.md": set(),

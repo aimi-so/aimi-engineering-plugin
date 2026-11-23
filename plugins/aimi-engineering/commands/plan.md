@@ -320,6 +320,11 @@ Before running this phase (fewer than 2 staging files: skip), Read ${CLAUDE_PLUG
 Applies when: the audit above ran.
 Before running this phase, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/plan/phase-3d5-audit-apply-gate.md in full.
 
+### Resolve audit findings
+
+Applies when: the Unresolved Gate's Resolve option was chosen (interactive mode only).
+Before running this phase, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/plan/phase-3d5-resolve.md in full.
+
 ## Phase 3e: story-merge Invocation
 
 Applies when: every run.

@@ -175,7 +175,13 @@ from roadmap import (
 # file is a DIFFERENT function -- validate_waves' own read-only twin, which
 # returns a dict and omits any story a cycle or a dangling dependency never
 # reaches. This import is the writer; that one stays the checker.
-from story_merge import compute_waves, outline_tokens_in
+from story_merge import (
+    compute_waves,
+    group_key,
+    outline_tokens_in,
+    project_state,
+    tagged_project_keys,
+)
 
 # The one prose sanitizer roadmap.py and story_merge.py already import -- see
 # sanitize.py's own docstring for why it is a module of its own rather than a
@@ -1680,11 +1686,20 @@ def guard_rail_findings(story):
     return findings
 
 
-def validate_stories(doc):
+def validate_stories(doc, project_root=None):
     stories = _stories(doc)
     errors = []
     for story in stories:
         errors += _story_errors(story)
+    # The cross-repository rule is the one finding here that needs the layout.
+    # With no root (a caller that has none) it is skipped, and the verdict is
+    # what it always was. It runs after every per-story rule so no earlier
+    # message moves, and its git call happens only when two keys are in play.
+    keys = tagged_project_keys(stories)
+    if project_root and len(keys) >= 2 and is_multi_repo_root(project_root):
+        for story in stories:
+            for finding in cross_repository_file_findings(story, keys, True):
+                errors.append(jq_tostring(jq_index(story, "id", STORY)) + ": " + finding)
     return _verdict(errors)
 
 
@@ -2862,6 +2877,145 @@ def implementation_path_findings(story):
     return findings + implementation_outputs_findings(story)
 
 
+# The cross-repository rule for `implementation.files`. A story of a multi-repo
+# layout runs in ONE repository, so an entry that starts with another
+# repository's key -- or with the AIMI root, which holds every repository -- names
+# a file the story's own repository does not have. It is a story-to-project
+# relation, not a property of the path alone, which is why it is not part of
+# _path_escape_reason: the same string is a perfectly good path in a monorepo,
+# where the rule returns nothing. LEXICAL like the path rule: strings and sets
+# only, no filesystem. Only is_multi_repo_root and child_repository_keys read
+# the machine, and they are separate helpers a caller runs once.
+CROSS_REPOSITORY_ROOT_TOKENS = ("$AIMI_ROOT", "${AIMI_ROOT}")
+CROSS_REPOSITORY_REMEDY = (
+    "put the file in the story of the project that owns it, with the project-key "
+    "prefix dropped, or report it as unresolved when no story owns that project"
+)
+
+
+def is_multi_repo_root(root):
+    """True when the `.aimi` root is not a git repository.
+
+    The same test as multi-repo-handling.md's AIMI_ROOT_IS_GIT_REPO rule:
+    `git -C <root> rev-parse --git-dir` failing. A root git cannot be asked about
+    (no path, no git binary) is never called multi-repo, so a host that cannot
+    tell refuses nothing.
+    """
+    if not root:
+        return False
+    try:
+        result = subprocess.run(
+            ["git", "-C", root, "rev-parse", "--git-dir"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
+    return result.returncode != 0
+
+
+def child_repository_keys(root):
+    """The names of the immediate subfolders of `root` that are git repositories.
+
+    validate-staging sees one staged story at a time, so the layout's repository
+    set comes from the folder instead of from the plan. A nested key such as
+    apps/web is not found this way; the staged story's own project key covers it.
+    """
+    keys = set()
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return keys
+    for name in names:
+        if name.startswith("."):
+            continue
+        # A string join and a stat, never an os.path call: this module names no
+        # path of its own, and the name here came from listing the confined root.
+        try:
+            os.stat(root + "/" + name + "/.git")
+        except OSError:
+            continue
+        keys.add(name)
+    return keys
+
+
+def _cross_repository_match(entry, keys):
+    """The key or root token `entry` starts with as WHOLE path segments, or None.
+
+    Segment by segment and case-sensitive: `api` never matches `api-gateway`,
+    and `apps/web` matches only `apps/web` and `apps/web/...`. The longest key
+    wins so a nested key is named in full.
+    """
+    segments = entry.split("/")
+    for token in CROSS_REPOSITORY_ROOT_TOKENS:
+        if segments[0] == token:
+            return token
+    best = None
+    for key in keys:
+        parts = key.split("/")
+        if segments[: len(parts)] == parts and (best is None or len(parts) > len(best.split("/"))):
+            best = key
+    return best
+
+
+def cross_repository_file_entries(story, other_project_keys, multi_repo):
+    """[(index, entry, matched)] for the `implementation.files` entries of a story
+    that name another repository of a multi-repo layout; [] otherwise.
+
+    `other_project_keys` is the layout's repository set; the story's own project
+    key is removed from it here, so a caller may pass the whole set. In a git
+    root (`multi_repo` false) or with fewer than two keys in play it is empty.
+    An entry the path rule already refuses is that rule's, not reported twice.
+    """
+    if not multi_repo:
+        return []
+    implementation = _story_implementation(story)
+    if implementation is None:
+        return []
+    files = implementation.get("files")
+    if not isinstance(files, list):
+        return []
+    own = story.get("project")
+    own_key = group_key(own) if project_state(own) == "tagged" else None
+    keys = {key for key in other_project_keys if isinstance(key, str) and key not in ("", ".")}
+    if len(keys | ({own_key} if own_key else set())) < 2:
+        return []
+    keys.discard(own_key)
+    found = []
+    for index, entry in enumerate(files):
+        if not isinstance(entry, str):
+            continue
+        if implementation_path_problem(IMPLEMENTATION_FILES_FIELD, entry) is not None:
+            continue
+        matched = _cross_repository_match(entry, keys)
+        if matched is not None:
+            found.append((index, entry, matched))
+    return found
+
+
+def cross_repository_file_findings(story, other_project_keys, multi_repo):
+    """One sentence per `implementation.files` entry naming another repository.
+
+    Decided from the story, the layout's project keys and whether the layout is
+    multi-repo; it reads no filesystem. Each sentence names the field index and
+    the quoted path.
+    """
+    findings = []
+    for index, entry, matched in cross_repository_file_entries(
+        story, other_project_keys, multi_repo
+    ):
+        if matched in CROSS_REPOSITORY_ROOT_TOKENS:
+            reason = "starts with " + matched + ", the root that holds every repository"
+        else:
+            reason = "starts with the key of another repository, " + matched
+        findings.append(
+            _path_finding(
+                IMPLEMENTATION_FILES_FIELD, index, entry, reason, CROSS_REPOSITORY_REMEDY
+            )
+        )
+    return findings
+
+
 def validate_tasks(docs, tasks_file, project_root, fields, warn):
     """R2 through R15, in the order bash ran them, over the parsed stream.
 
@@ -3024,6 +3178,8 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
     # a document-sourced path is resolved against PROJECT_ROOT; a path that
     # escapes warns for the same reason a missing directory does, since neither
     # names a directory that exists UNDER the project root.
+    layout_keys = tagged_project_keys([s for d in docs for s in _stories(d)])
+    layout_multi = len(layout_keys) >= 2 and is_multi_repo_root(project_root)
     for doc in docs:
         for story in _stories(doc):
             implementation = jq_index(story, "implementation", ".userStories[]")
@@ -3035,8 +3191,13 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
             base = _story_project_base(story, project_root)
             escapes = []
             unopenable = []
+            crossing = {e for _i, e, _m in cross_repository_file_entries(story, layout_keys, layout_multi)}
             for entry in files:
                 if not isinstance(entry, str):
+                    continue
+                # R27 reports an entry of another repository; it is not also a
+                # directory that does not exist under THIS story's repository.
+                if entry in crossing:
                     continue
                 # An escape is judged by the lexical rule alone and is NEVER
                 # reported as a missing directory: the entry does not name a
@@ -3353,6 +3514,60 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
                     + ", a staging reference story-merge did not resolve; replace it"
                     " with the US-NNN id of the story it names"
                 )
+
+    # R27 -- an `implementation.files` entry that names another repository of a
+    # multi-repo layout. Appended AFTER R26 for R17's reason. An ERROR where R17
+    # warns about the same entry's neighbours: the story runs in one repository
+    # and the entry names a file that is not in it, so no executor can resolve
+    # it. Nothing happens in a git root or below two keys, and the rule is
+    # cross_repository_file_findings', stated nowhere else. R17 skips an entry
+    # this reports, so it is never also warned as a missing directory.
+    for doc in docs:
+        for story in _stories(doc):
+            for finding in cross_repository_file_findings(story, layout_keys, layout_multi):
+                errors.append(
+                    tasks_file + ": "
+                    + jq_tostring(jq_index(story, "id", ".userStories[]"))
+                    + ": " + finding
+                )
+
+    # R28 -- metadata.auditOpen's shape. Appended AFTER R27 for R17's reason: a
+    # rule below the last one can only add lines after everything already
+    # recorded. SHAPE ONLY, and an ERROR: the key has one writer (/aimi:plan
+    # Phase 4), so a malformed value is the plugin having written a record its
+    # reader cannot parse. Absent does nothing; present it must be a non-empty
+    # array of {message, stories} objects, `stories` holding staged idx strings
+    # (two digits, or the `_audit` sentinel) and never US-NNN ids.
+    audit_open = jq_index(doc0_metadata, "auditOpen", ".metadata")
+    if audit_open is not None or (
+        isinstance(doc0_metadata, dict) and "auditOpen" in doc0_metadata
+    ):
+        where = tasks_file + ": metadata.auditOpen"
+        if not isinstance(audit_open, list) or not audit_open:
+            errors.append(where + " must be a non-empty array")
+        else:
+            for index, entry in enumerate(audit_open):
+                at = where + "[" + str(index) + "]"
+                if not isinstance(entry, dict):
+                    errors.append(at + " must be an object")
+                    continue
+                message = entry.get("message")
+                if not isinstance(message, str) or not message:
+                    errors.append(at + ".message must be a non-empty string")
+                stories = entry.get("stories")
+                if (
+                    not isinstance(stories, list)
+                    or not stories
+                    or not all(
+                        isinstance(item, str)
+                        and (item == "_audit" or re.fullmatch(r"[0-9]{2}", item))
+                        for item in stories
+                    )
+                ):
+                    errors.append(
+                        at + ".stories must be a non-empty array of staged idx"
+                        " strings (NN or _audit)"
+                    )
 
     return errors
 
@@ -5283,7 +5498,8 @@ def op_validate_stories(argv):
     path = _flag(argv, "--tasks-file")
     if not path:
         die("Usage: tasks.py validate-stories --tasks-file <path>")
-    verdicts = [validate_stories(doc) for doc in read_docs(path, "validate-stories")]
+    project_root = os.environ.get("PROJECT_ROOT")
+    verdicts = [validate_stories(doc, project_root) for doc in read_docs(path, "validate-stories")]
     _emit_echoed(verdicts)
     if not verdicts or not verdicts[-1]["valid"]:
         return 1
@@ -6323,6 +6539,44 @@ def op_usage_validation_get(argv):
         die(prefix + "the roadmap path escapes the project: " + roadmap_rel)
     feature = os.path.basename(os.path.dirname(roadmap_path))
     _emit(_usage_phase_answer(roadmap_path, feature, phase_id, prefix))
+    return 0
+
+
+def op_audit_findings(argv):
+    """audit-open: the audit findings a plan left open, from metadata.auditOpen.
+
+    A read: nothing is written and no lock is taken. Prints
+    {"count": N, "findings": [{"message": str, "stories": [str]}]}, and answers
+    count 0 with an empty list when the key is absent. A value that is present
+    but not an array of {message, stories} objects dies naming the file: an
+    unreadable list must never be read as nothing open.
+    """
+    prefix = "Error: audit-open: "
+    path = _flag(argv, "--tasks-file")
+    if not path:
+        die("Usage: tasks.py audit-open --tasks-file <path>")
+    docs = read_docs(path, "audit-open")
+    first = docs[0] if docs else None
+    metadata = first.get("metadata") if isinstance(first, dict) else None
+    raw = metadata.get("auditOpen") if isinstance(metadata, dict) else None
+    if raw is None and not (isinstance(metadata, dict) and "auditOpen" in metadata):
+        _emit({"count": 0, "findings": []})
+        return 0
+    where = prefix + "metadata.auditOpen in " + path
+    if not isinstance(raw, list):
+        die(where + " is not an array")
+    findings = []
+    for index, entry in enumerate(raw):
+        message = entry.get("message") if isinstance(entry, dict) else None
+        stories = entry.get("stories") if isinstance(entry, dict) else None
+        if (
+            not isinstance(message, str)
+            or not isinstance(stories, list)
+            or not all(isinstance(item, str) for item in stories)
+        ):
+            die(where + "[" + str(index) + "] is not a {message, stories} object")
+        findings.append({"message": message, "stories": stories})
+    _emit({"count": len(findings), "findings": findings})
     return 0
 
 
@@ -10011,6 +10265,7 @@ _OPS = {
     "acknowledge-evidence": op_acknowledge_evidence,
     "usage-validation-record": op_usage_validation_record,
     "usage-validation-get": op_usage_validation_get,
+    "audit-open": op_audit_findings,
     "judge-verification": op_judge_verification,
     "reset-orphaned": op_reset_orphaned,
     "gate-pass": _gate_op("gate-pass", "passed"),

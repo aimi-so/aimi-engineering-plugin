@@ -216,11 +216,11 @@ def test_matching_rules_are_stated():
 
 def test_op_table_has_the_path_rows_and_counts_ten_fields():
     table = _op_table()
-    assert table["implementation.files"] == {"replace", "remove"}
+    assert table["implementation.files"] == {"add", "replace", "remove"}
     assert table["implementation.outputs"] == {"add", "replace", "remove"}
     assert len(table) == 10
     assert "one of the ten fields" in AGENT_TEXT
-    assert "| `implementation.files` | `replace, remove` |" in AGENT_TEXT
+    assert "| `implementation.files` | `add, replace, remove` |" in AGENT_TEXT
     assert "| `implementation.outputs` | `add, replace, remove` |" in AGENT_TEXT
     assert "a path starting with `.aimi/`, relative to the AIMI root" in AGENT_TEXT
     assert "plain relative path inside the story's repository" in AGENT_TEXT
@@ -295,3 +295,16 @@ def test_auditor_file_stays_within_its_recorded_budget():
     budget = _recorded_budget()
     assert budget % 4096 == 0
     assert budget - 4096 < len(AGENT_TEXT.encode("utf-8")) <= budget
+
+
+def test_cross_repository_remedy_moves_to_the_owner_or_reports_unresolved():
+    assert "| `implementation.files` | `add, replace, remove` |" in AGENT_TEXT
+    assert "starts with another project's key" in AGENT_TEXT
+    assert "a `files` `remove` on the wrong story plus a `files` `add` on the owning story" in AGENT_TEXT
+    assert "`api/src/x.py` becomes `src/x.py`" in AGENT_TEXT
+    assert "an `unresolved[]` entry naming the story and the path" in AGENT_TEXT
+    assert "Never move such an entry into `implementation.outputs`" in AGENT_TEXT
+
+
+def test_cross_repository_outputs_remedy_sentence_still_appears_once():
+    assert AGENT_TEXT.count("is moved with a `files` `remove` plus an `outputs` `add`") == 1

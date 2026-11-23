@@ -264,7 +264,7 @@ Store the JSON strings as `AGENT_MODELS` and `AGENT_EFFORTS` (or as working-memo
 At each `Task` spawn site, extract the model from `AGENT_MODELS` and the effort from `AGENT_EFFORTS` using the agent's `CATEGORY` (the same category for both):
 
 - For namespaced agents (`subagent_type="aimi-engineering:CATEGORY:NAME"`), use the directory category — one of `research`, `review`, `design`, `workflow`.
-- For host built-in `general-purpose` spawns used as **sub-orchestrators** by `/aimi:execute` (the parallel frontend/backend Tasks and the per-story executor), use the `executor` category.
+- For host built-in `general-purpose` spawns of `/aimi:execute`, use the category the site's own annotation names: the split sub-orchestrators (flat and phase mode) use the `workflow` category, and the story workers (story, finalize, reconcile, usage fix) use the `executor` category.
 
 - **When the resolved value is a model string** (anything other than `"inherit"`): add a `model:` line to the Task call with that string as the value.
 - **When the resolved value is `"inherit"`**: omit the `model:` line entirely — current behavior is preserved.
@@ -331,8 +331,8 @@ The model SELECTION must happen at the LLM-orchestrator layer using the interact
    - "Model for research/reading tasks (research)?" — suggested default: Claude Code → `haiku`, OpenCode → an Anthropic Haiku model id from `opencode models`
    - "Model for review and analysis (review)?" — suggested default: Claude Code → `opus`, OpenCode → an Anthropic Opus model id
    - "Model for design tasks (design)?" — suggested default: Claude Code → `sonnet`, OpenCode → an Anthropic Sonnet model id
-   - "Model for workflow tasks (workflow)?" — suggested default: Claude Code → `sonnet`, OpenCode → an Anthropic Sonnet model id
-   - "Model for execution sub-orchestrators (executor)?" — suggested default: Claude Code → `sonnet`, OpenCode → an Anthropic Sonnet model id
+   - "Model for workflow tasks, including execution sub-orchestrators (workflow)?" — suggested default: Claude Code → `sonnet`, OpenCode → an Anthropic Sonnet model id
+   - "Model for story workers that edit code (executor)?" — suggested default: Claude Code → `sonnet`, OpenCode → an Anthropic Sonnet model id
 
 3. Run `$AIMI_CLI detect-models --research <chosen_research> --review <chosen_review> --design <chosen_design> --workflow <chosen_workflow> --executor <chosen_executor>` with the user's picks to write the config.
 

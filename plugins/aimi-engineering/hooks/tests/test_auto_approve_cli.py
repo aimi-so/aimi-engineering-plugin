@@ -323,12 +323,17 @@ def test_bookkeeping_declared_is_approved(line):
 # recipe command or write state are not (see ADVERSARIAL below).
 USAGE_READ_VERBS = [
     "usage-recipe-get --project .",
+    "usage-recipe-sources --project .",
+    "usage-recipe-sources --project api --project web",
     "usage-env-status --run run-1",
     "usage-validation-required --tasks-file .aimi/tasks.json",
     "usage-validation-verdict --required-file .aimi/r.json --evidence-dir .aimi/ev",
     "usage-validation-get --tasks-file .aimi/tasks.json",
     "usage-validation-get --feature f --phase 1",
     "usage-validation-get",
+    "audit-open --tasks-file .aimi/tasks.json",
+    "audit-open",
+    "inspect-prototype-kit .aimi/kit",
 ]
 
 
@@ -338,6 +343,7 @@ def test_usage_read_only_verbs_are_approved(call):
 
 
 USAGE_PROMPTING_VERBS = [
+    "import-prototype-kit .aimi/kit --slug kit",
     "usage-recipe-record --project . --serve 'npm run dev' --ready /",
     "usage-env-up --run run-1 --repo .",
     "usage-env-down --run run-1",

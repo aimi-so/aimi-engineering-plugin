@@ -48,7 +48,7 @@ The `metadata.backendSpec.endpoints[].responseShape` field follows a strict flat
 - `codebaseVerified` — auto-resolved by Phase 2.4 codebase cross-check; evidence field holds classified file:line hits
 - `outline` — an outline-gate edit recorded in Phase 3c (rename, add, remove, reorder)
 - `phase` — a phase-cut Edit round recorded by the Phase 0 Scope-Context Classification (Inline Fallback) gate; anchor format `phase:edit:<idx>` (zero-padded index into the proposed phase list at edit time). Distinct from `/aimi:brainstorm`'s own roadmap-gate edits, which are local to that command's `phaseEditDecisions[]` working memory and use `source: "phaseGate"` instead — the two never share a decisions array.
-- `auditGate` — a decision recorded by the Phase 3d.5 Unresolved Gate (anchor `auditUnresolved:<storyIdx-or-_audit>`); `resolution` is `applied` | `deferred`
+- `auditGate` — a decision recorded by the Phase 3d.5 Unresolved Gate (anchor `auditUnresolved:<storyIdx-or-_audit>`); `resolution` is `applied` | `deferred` | `resolved` (`resolved`: a criterion confirmed at the Resolve option of the gate)
 
 Consumers can branch on the prefix to distinguish decisions by origin.
 

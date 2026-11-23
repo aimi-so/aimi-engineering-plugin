@@ -4,6 +4,8 @@
 
 ### Per-Repo Branch and Container Setup for the Split
 
+Before Pass 1, run the **Open Audit Findings** router entry of `commands/execute.md` on the `split-detect` anchor's tasks file (once per top-level run).
+
 **Each active split file owns exactly one repo, so its worktree/container is rooted at that repo's own resolved path — never at `$AIMI_ROOT`.** In a multi-repo layout `$AIMI_ROOT` is a plain parent folder holding several repos, not a repository itself; rooting the split's worktree there is what produces `fatal: not a git repository` (issue #73).
 
 Four passes follow, each one a real loop over the same ordered member list: derive, create, report, clean up.
@@ -170,8 +172,8 @@ For each record in SPLIT_PLAN, all Task( calls in one turn:
 
 Task(
     subagent_type: "general-purpose",
-    model: <AGENT_MODELS.executor when not "inherit">,
-    effort: <AGENT_EFFORTS.executor when not "inherit">,
+    model: <AGENT_MODELS.workflow when not "inherit">,
+    effort: <AGENT_EFFORTS.workflow when not "inherit">,
     description: "Execute split tasks: [that record's file basename]",
     prompt: [
         SPAWNED_SPLIT_TASK=flat-split-child

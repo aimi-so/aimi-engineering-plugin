@@ -84,9 +84,10 @@ def test_stub_annotates_every_staged_story(tmp_path, count):
     assert report["annotated"] == ["%02d" % n for n in range(1, count + 1)]
     for n in range(1, count + 1):
         notes = get(stg / ("%02d-s.json" % n))["notes"]
-        assert notes.startswith(RESOLVED + " ")
+        assert notes.startswith(MARKER + " ")
+        assert RESOLVED not in notes
         assert MSG in notes
-        assert LABEL + " reviewed" in notes
+        assert LABEL not in notes
     assert len(report["oqDecisions"]) == 1
     assert report["oqDecisions"][0]["anchor"] == "auditUnresolved:_audit"
 

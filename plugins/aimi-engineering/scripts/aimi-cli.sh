@@ -114,8 +114,8 @@ find_aimi_root() {
 # Only the values of the flags in _PATH_ARG_FLAGS are candidates, plus the
 # bare positional arguments of the verbs in _PATH_ARG_POSITIONAL_VERBS (never
 # the value of a flag); a story id, a reason or a branch name is never touched.
-_PATH_ARG_FLAGS=" --tasks-file --file --staging-dir --outline --result --output --old --new --input --tasks --spec --prototype --phase-dir --root --bundle --from --to --previous-file --review --dir --brainstorm-path --required-file --evidence-dir "
-_PATH_ARG_POSITIONAL_VERBS=" archive-task research-lookup extract-sections extract-prototype-sections measure-command-file "
+_PATH_ARG_FLAGS=" --tasks-file --file --staging-dir --outline --result --output --old --new --input --tasks --spec --prototype --phase-dir --root --bundle --from --to --previous-file --review --dir --brainstorm-path --required-file --evidence-dir --resolve "
+_PATH_ARG_POSITIONAL_VERBS=" archive-task research-lookup extract-sections extract-prototype-sections measure-command-file inspect-prototype-kit import-prototype-kit "
 _rebase_invocation_relative_args() {
   local verb="$1"; shift
   local prev="" arg candidate
@@ -12150,6 +12150,7 @@ cmd_bookkeeping_resolve() {
 
 # usage-recipe-record --project <key> (--serve <cmd> | --cli <cmd>) [flags]
 # usage-recipe-get --project <key>
+# usage-recipe-sources --project <key> [--project <key>]...
 #
 # The usage recipe is how a person confirmed the whole product comes up for
 # real-usage validation, stored at usage.recipe[<key>] of
@@ -12213,6 +12214,47 @@ cmd_usage_recipe_get() {
 
   python3 "$(_aimi_script_py usage_recipe.py)" get --config "$config" \
     ${_USAGE_RECIPE_ARGS[@]+"${_USAGE_RECIPE_ARGS[@]}"}
+}
+
+# usage-recipe-sources lists each repository's own files that may state how it
+# comes up. Read-only and decides nothing: no lock, no write, no file content
+# printed. Each <aimi_root>/<key> is confined here before python3 starts (the
+# usage-env-up shape); usage_recipe.py confines again and owns every other rule.
+# Refuses without python3, like usage-recipe-get.
+cmd_usage_recipe_sources() {
+  local -a keys=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project)
+        if [ $# -lt 2 ]; then
+          echo "Error: usage-recipe-sources: --project requires a value" >&2
+          exit 1
+        fi
+        keys+=("$2")
+        shift 2 ;;
+      *)
+        echo "Error: usage-recipe-sources: unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh usage-recipe-sources --project <key> [--project <key>]..." >&2
+        exit 1 ;;
+    esac
+  done
+  if [ "${#keys[@]}" -eq 0 ]; then
+    echo "Error: usage-recipe-sources: at least one --project <key> is required" >&2
+    exit 1
+  fi
+  local aimi_root="${AIMI_DIR%/.aimi}" k k_dir
+  local -a project_args=()
+  for k in "${keys[@]}"; do
+    case "$k" in
+      /*) k_dir="$k" ;;
+      *) k_dir="$aimi_root/$k" ;;
+    esac
+    validate_path_in_project "$k_dir"
+    project_args+=(--project "$k")
+  done
+  check_python3
+  python3 "$(_aimi_script_py usage_recipe.py)" sources --aimi-root "$aimi_root" \
+    "${project_args[@]}"
 }
 
 # usage-env-up --run <key> --repo <project>[=<branch>]... [--restart]
@@ -15506,6 +15548,7 @@ cmd_story_merge() {
 # apply-audit-patches: validate and apply the cross-story auditor's patches
 # Usage: aimi-cli.sh apply-audit-patches --staging-dir <dir> [--result <path>]
 #           [--annotate-deferred --reason <text> [--agent-deferral]]
+#        or: aimi-cli.sh apply-audit-patches --staging-dir <dir> --resolve <resolutions.json>
 # ============================================================================
 #
 # Modelled on cmd_story_merge rather than on the tasks.json verbs: there is no
@@ -15516,12 +15559,12 @@ cmd_story_merge() {
 # (the idx lookup, every patch rule, the writes) is audit_patches.py's, behind
 # one crossing.
 cmd_apply_audit_patches() {
-  local usage="usage: aimi-cli.sh apply-audit-patches --staging-dir <dir> [--result <path>] [--annotate-deferred --reason <text> [--agent-deferral]]"
-  local staging_dir="" result_path="" annotate=false reason="" reason_given=false agent_deferral=false
+  local usage="usage: aimi-cli.sh apply-audit-patches --staging-dir <dir> [--result <path>] [--annotate-deferred --reason <text> [--agent-deferral]] | --resolve <resolutions.json>"
+  local staging_dir="" result_path="" annotate=false reason="" reason_given=false agent_deferral=false resolve_path="" resolve_given=false
 
   while [ $# -gt 0 ]; do
     case "$1" in
-      --staging-dir|--result|--reason)
+      --staging-dir|--result|--reason|--resolve)
         if [ $# -lt 2 ]; then
           echo "Error: apply-audit-patches: $1 needs a value ($usage)" >&2
           exit 1
@@ -15530,6 +15573,7 @@ cmd_apply_audit_patches() {
           --staging-dir) staging_dir="$2" ;;
           --result) result_path="$2" ;;
           --reason) reason="$2"; reason_given=true ;;
+          --resolve) resolve_path="$2"; resolve_given=true ;;
         esac
         shift 2
         ;;
@@ -15552,6 +15596,16 @@ cmd_apply_audit_patches() {
     echo "Error: apply-audit-patches: --staging-dir <dir> is required ($usage)" >&2
     exit 1
   fi
+  if [ "$resolve_given" = true ]; then
+    if [ "$annotate" = true ] || [ "$reason_given" = true ] || [ "$agent_deferral" = true ] || [ -n "$result_path" ]; then
+      echo "Error: apply-audit-patches: --resolve cannot be combined with --annotate-deferred, --reason, --agent-deferral or --result ($usage)" >&2
+      exit 1
+    fi
+    if [ -z "$resolve_path" ]; then
+      echo "Error: apply-audit-patches: --resolve needs a non-empty path ($usage)" >&2
+      exit 1
+    fi
+  fi
   if [ "$annotate" = true ] && [ -z "$reason" ]; then
     echo "Error: apply-audit-patches: --annotate-deferred requires a non-empty --reason ($usage)" >&2
     exit 1
@@ -15570,6 +15624,9 @@ cmd_apply_audit_patches() {
   if [ -n "$result_path" ]; then
     validate_path_in_project "$result_path"
   fi
+  if [ -n "$resolve_path" ]; then
+    validate_path_in_project "$resolve_path"
+  fi
 
   if [ ! -d "$staging_dir" ]; then
     echo "Error: apply-audit-patches: staging directory does not exist: $staging_dir" >&2
@@ -15580,6 +15637,9 @@ cmd_apply_audit_patches() {
   local aa_args=(--staging-dir "$staging_dir")
   if [ -n "$result_path" ]; then
     aa_args+=(--result "$result_path")
+  fi
+  if [ -n "$resolve_path" ]; then
+    aa_args+=(--resolve "$resolve_path")
   fi
   if [ "$annotate" = true ]; then
     aa_args+=(--annotate-deferred --reason "$reason")
@@ -15664,6 +15724,60 @@ cmd_slugify() {
   check_python3
   python3 "$(_aimi_script_py slug.py)" "$@"
 }
+
+# ============================================================================
+# inspect-prototype-kit <path> / import-prototype-kit <path> [--slug <s>]
+# ============================================================================
+#
+# Look at a prototype kit (a folder or .zip of HTML screens), and copy a
+# qualifying one into .aimi/sources/<slug>-<hash8>/. Bash owns the flags, the
+# confinement of the kit path (before python3 starts) and check_python3, which
+# refuses rather than degrades: a missing interpreter must not read as "not a
+# kit". Every rule is prototype_kit.py's, behind one crossing. No lock: the
+# copy is placed by an atomic rename and re-importing identical content reuses it.
+_prototype_kit_verb() {
+  local verb="$1" mode="$2"; shift 2
+  local usage="usage: aimi-cli.sh $verb <path>"
+  [ "$mode" = import ] && usage="$usage [--slug <s>]"
+  local kit="" slug="" have_slug=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --slug)
+        if [ "$mode" != import ] || [ $# -lt 2 ]; then
+          echo "Error: $verb: bad --slug ($usage)" >&2
+          exit 1
+        fi
+        slug="$2"; have_slug=1
+        shift 2 ;;
+      -*)
+        echo "Error: $verb: unknown flag: $1 ($usage)" >&2
+        exit 1 ;;
+      *)
+        if [ -n "$kit" ]; then
+          echo "Error: $verb: exactly one path is accepted ($usage)" >&2
+          exit 1
+        fi
+        kit="$1"
+        shift ;;
+    esac
+  done
+  if [ -z "$kit" ]; then
+    echo "Error: $verb: a kit path is required ($usage)" >&2
+    exit 1
+  fi
+  validate_path_in_project "$kit"
+  check_python3
+  local aimi_dir_abs
+  aimi_dir_abs="$(cd "$AIMI_DIR" 2>/dev/null && pwd)" || aimi_dir_abs="$PWD/$AIMI_DIR"
+  if [ "$have_slug" -eq 1 ]; then
+    python3 -I "$(_aimi_script_py prototype_kit.py)" "$mode" "$kit" --aimi-dir "$aimi_dir_abs" --slug "$slug"
+  else
+    python3 -I "$(_aimi_script_py prototype_kit.py)" "$mode" "$kit" --aimi-dir "$aimi_dir_abs"
+  fi
+}
+
+cmd_inspect_prototype_kit() { _prototype_kit_verb inspect-prototype-kit inspect "$@"; }
+cmd_import_prototype_kit() { _prototype_kit_verb import-prototype-kit import "$@"; }
 
 # ============================================================================
 # validate-outline: check an outline's produces/consumes contract, derive waves
@@ -17072,6 +17186,37 @@ cmd_usage_validation_get() {
   python3 "$(_aimi_tasks_py)" usage-validation-get "${op_args[@]}"
 }
 
+# The audit findings a plan left open (metadata.auditOpen), for /aimi:execute's
+# Open Audit Findings step. A read: no lock, nothing written, one crossing into
+# tasks.py. It refuses without python3 and exits 1 naming the file when the key
+# is present but not an array, because an unreadable list read as "nothing
+# open" would start a run the operator never got to decide on.
+cmd_audit_open() {
+  local tasks_file="" usage="Usage: aimi-cli.sh audit-open [--tasks-file <path>]"
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks-file) shift; tasks_file="${1:-}" ;;
+      *)
+        echo "Error: audit-open: unknown flag: $1" >&2
+        echo "$usage" >&2
+        exit 1
+        ;;
+    esac
+    [ $# -gt 0 ] && shift
+  done
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+
+  check_python3
+  python3 "$(_aimi_tasks_py)" audit-open --tasks-file "$tasks_file"
+}
+
 # The gate outcome of one usage validation, computed from the validator's last
 # usage_validation_verdict block (stdin), the required answer and the evidence
 # directory. A read: no lock, nothing written, one crossing into
@@ -18041,7 +18186,7 @@ COMMANDS:
                               prints the entry. Refuses (writes nothing) in agent
                               mode, on a malformed id, with no matching entry, or with
                               an empty --reason. Idempotent: a repeat call is a no-op.
-    apply-audit-patches --staging-dir <dir> [--result <path>] [--annotate-deferred --reason <text> [--agent-deferral]]
+    apply-audit-patches --staging-dir <dir> [--result <path>] [--annotate-deferred --reason <text> [--agent-deferral]] | --resolve <resolutions.json>
                               Validate and apply the cross-story auditor's patches to the
                               staged NN-*.json story files in one crossing: one read and one
                               atomic write per affected file, every refusal decided before
@@ -18056,6 +18201,12 @@ COMMANDS:
                               {annotated, oqDecisions}. --agent-deferral (only with
                               --annotate-deferred) keeps the unresolved marker and adds no
                               reason text.
+                              --resolve <resolutions.json> (alone) appends each confirmed
+                              criterion of {"resolutions": [{message, stories, criterion}]}
+                              to the acceptanceCriteria of the staged stories it names, with
+                              a resolved note; an entry without a usable criterion adds the
+                              unresolved marker only. Prints {resolvedStories, openFindings,
+                              duplicates, refused, oqDecisions}; a repeat run changes nothing.
     validate-outline --outline <path>
                               Check an outline.json array's produces/consumes contract
                               ([ext:]<kind>:<name>, kind sym|path|cli|http; ext: only in
@@ -18676,6 +18827,22 @@ COMMANDS:
                               {status:"absent", recipe:null} for none, and
                               {status:"untrusted", recipe:null} for a config tracked by git.
                               Refuses a stored entry that fails validation; needs python3.
+    inspect-prototype-kit <path>
+                              Print {kind, htmlFiles, markdownFiles, otherFiles, refused, qualifies}
+                              for a folder or .zip prototype kit. Writes nothing; needs python3.
+    import-prototype-kit <path> [--slug <s>]
+                              Copy a qualifying kit into .aimi/sources/<slug>-<hash8>/ and print
+                              {dir, htmlFiles, markdownFiles, otherFiles, reused}. Refuses the whole
+                              kit, writing nothing, on any unsafe member; needs python3.
+    usage-recipe-sources --project <key> [--project <key>]...
+                              Print {repositories:[{project, sources:[{kind, path}]}]}: the
+                              files of each repository that may state how it comes up (readme,
+                              contributing, claude-md, agents-md, makefile, justfile,
+                              package-scripts, compose, devcontainer, workflow), in that kind
+                              order, paths sorted. Reads no file content (package.json only
+                              for its scripts/workspaces keys); writes nothing. Refuses a
+                              missing, repeated or invalid key and a key outside the layout;
+                              needs python3.
     usage-env-up --run <key> --repo <project>[=<branch>]... [--restart]
                               Bring the product up from the recorded usage recipe
                               (usage-recipe-get), detached, one repository after
@@ -19448,6 +19615,12 @@ COMMANDS:
                               surfaces, charters, specs}. skipKind is
                               disabled-by-operator (AIMI_USAGE_VALIDATION=off),
                               unable-to-evaluate, not-applicable or null. Needs python3.
+    audit-open [--tasks-file <path>]
+                              Read-only. The audit findings a plan left open
+                              (metadata.auditOpen). Prints {count, findings:
+                              [{message, stories[]}]}; count 0 and an empty list
+                              when the key is absent. Exits 1 naming the file when
+                              the key is present but not an array.
     usage-validation-get --feature <slug> --phase <id> | [--tasks-file <path>]
                               Read-only. Where a run's usage-validation record lives
                               and the record: a phase-scoped tasks file (the
@@ -19919,6 +20092,9 @@ main() {
     deps-recipe-record) shift; cmd_deps_recipe_record "$@" ;;
     usage-recipe-record) shift; cmd_usage_recipe_record "$@" ;;
     usage-recipe-get) shift; cmd_usage_recipe_get "$@" ;;
+    usage-recipe-sources) shift; cmd_usage_recipe_sources "$@" ;;
+    inspect-prototype-kit) shift; cmd_inspect_prototype_kit "$@" ;;
+    import-prototype-kit) shift; cmd_import_prototype_kit "$@" ;;
     usage-env-up) shift; cmd_usage_env_up "$@" ;;
     usage-env-status) shift; cmd_usage_env_status "$@" ;;
     usage-env-down) shift; cmd_usage_env_down "$@" ;;
@@ -19939,6 +20115,7 @@ main() {
     roadmap-record-usage-validation) shift; cmd_roadmap_record_usage_validation "$@" ;;
     usage-validation-required) shift; cmd_usage_validation_required "$@" ;;
     usage-validation-get) shift; cmd_usage_validation_get "$@" ;;
+    audit-open) shift; cmd_audit_open "$@" ;;
     usage-validation-verdict) shift; cmd_usage_validation_verdict "$@" ;;
     write-review)         shift; cmd_write_review "$@" ;;
     validate-contracts)    shift; cmd_validate_contracts "$@" ;;
