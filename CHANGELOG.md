@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.167.0] - 2026-11-23
+
+A project that never declared stage-aware verification is now told about it at the first wave that runs two or more of its stories side by side.
+
+### Added
+- `/aimi:execute` shows one line per project and run when a wave holds two or more of that project's stories and the project has no `verifyStage` entry in `.aimi/config.json`. The line says that checks sharing one test database, container or port can collide, names the key to add and the `AIMI_VERIFY_STAGE` value those checks read, and says that an entry of `false` turns the line off. It asks nothing and writes nothing.
+
+### Changed
+- `verify-stage-declared` prints `{project, staged, declared}`. `declared` is true when the project has an entry, `false` included, so an explicit `false` reads as an answer rather than as never declared.
+- Step 4 of `/aimi:execute` reads the declaration once per project and run, before the worktrees are created, instead of while the worker prompts are written.
+
 ## [1.166.0] - 2026-11-23
 
 Five things a real planning and execution run met: a merge refused after Resolve, an outline edit that changed nothing, a plan written against a branch behind origin without a word, metadata that could only be written by rewriting the whole tasks file, and end-to-end suites colliding when a wave ran them side by side.
