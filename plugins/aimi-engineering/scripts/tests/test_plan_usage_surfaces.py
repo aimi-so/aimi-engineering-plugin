@@ -136,6 +136,14 @@ def test_usage_surfaces_text_contracts():
     assert "mobile-viewport" in TEXT and "recommended" in TEXT
 
 
+def test_usage_surfaces_web_bullet_is_the_screen_story_rule():
+    web = [l for l in TEXT.splitlines() if l.startswith("- **`web`**")]
+    assert len(web) == 1
+    assert "is_screen_story" in web[0] and "scripts/usage_validation.py" in web[0]
+    assert "`visual`" in web[0] and "`test`" in web[0] and "loopback URL" in web[0]
+    assert "whose `verification.strategy` is `visual` and whose `verification.url`" not in TEXT
+
+
 def test_usage_surfaces_router_wiring():
     plan = PLAN.read_text(encoding="utf-8")
     i = plan.index("### Usage Surfaces and Usage Recipe")
