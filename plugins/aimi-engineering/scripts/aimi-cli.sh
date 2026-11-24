@@ -17511,6 +17511,65 @@ cmd_usage_validation_get() {
   python3 "$(_aimi_tasks_py)" usage-validation-get "${op_args[@]}"
 }
 
+# The completed screen stories no visual check or usage validation covered: a
+# story that changes a screen, completed, with no visual verdict, in a run whose
+# usage validation was skipped or never recorded. A read: no lock, nothing
+# written, one crossing into unverified_screens.py. It refuses without python3,
+# because a count of 0 that is only a missing interpreter would read as nothing
+# unverified. Flag handling is usage-validation-get's, flag for flag.
+cmd_unverified_screens() {
+  local feature="" phase_id="" tasks_file="" have_feature=0 have_phase=0 have_tasks=0
+  local usage="Usage: aimi-cli.sh unverified-screens (--feature <slug> --phase <id> | [--tasks-file <path>])"
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) have_feature=1; shift; feature="${1:-}" ;;
+      --phase) have_phase=1; shift; phase_id="${1:-}" ;;
+      --tasks-file) have_tasks=1; shift; tasks_file="${1:-}" ;;
+      *)
+        echo "Error: unverified-screens: unknown flag: $1" >&2
+        echo "$usage" >&2
+        exit 1
+        ;;
+    esac
+    [ $# -gt 0 ] && shift
+  done
+
+  if { [ "$have_feature" -eq 1 ] || [ "$have_phase" -eq 1 ]; } && [ "$have_tasks" -eq 1 ]; then
+    echo "Error: unverified-screens: --tasks-file cannot be combined with --feature/--phase" >&2
+    echo "$usage" >&2
+    exit 1
+  fi
+  if [ "$have_feature" -ne "$have_phase" ]; then
+    echo "Error: unverified-screens: --feature and --phase must be given together" >&2
+    echo "$usage" >&2
+    exit 1
+  fi
+
+  local op="" op_args=()
+  if [ "$have_feature" -eq 1 ]; then
+    _roadmap_validate_feature "$feature" unverified-screens
+    _roadmap_validate_phase_id "$phase_id" "unverified-screens"
+    local roadmap_path
+    roadmap_path=$(_roadmap_require "unverified-screens" "$feature")
+    op="phase"
+    op_args=(--roadmap "$roadmap_path" --feature "$feature" --phase "$phase_id")
+  else
+    if [ -n "$tasks_file" ]; then
+      tasks_file=$(resolve_path "$tasks_file")
+      validate_path_in_project "$tasks_file"
+    else
+      tasks_file=$(get_tasks_file)
+    fi
+    op="files"
+    op_args=(--tasks-file "$tasks_file" --project-root "$PROJECT_ROOT")
+  fi
+
+  # One crossing for both forms; a reader, so no lock.
+  check_python3
+  python3 "$(_aimi_script_py unverified_screens.py)" "$op" "${op_args[@]}"
+}
+
 # The audit findings a plan left open (metadata.auditOpen), for /aimi:execute's
 # Open Audit Findings step. A read: no lock, nothing written, one crossing into
 # tasks.py. It refuses without python3 and exits 1 naming the file when the key
@@ -19992,6 +20051,14 @@ COMMANDS:
                               Prints {scope (phase|flat), feature, phase, record};
                               record is null when none is stored. Exits 1 when the
                               roadmap or the phase cannot be read. Needs python3.
+    unverified-screens --feature <slug> --phase <id> | [--tasks-file <path>]
+                              Read-only. The completed screen stories with no visual
+                              verdict in a run whose usage validation was skipped or
+                              never recorded. Prints {count, scope (phase|flat),
+                              feature, phase, visualGate, usageValidation, reason,
+                              stories[]}; count 0 with a reason when a usage record is
+                              passed or failing, or the phase visual gate is passed or
+                              accepted. Needs python3.
     usage-validation-verdict --required-file <path> --evidence-dir <dir> [--reproduced <key>]... [--accepted <key>]...
                               Read-only. Reads the validator's final message on stdin,
                               takes only its LAST fenced usage_validation_verdict
@@ -20481,6 +20548,7 @@ main() {
     roadmap-record-usage-validation) shift; cmd_roadmap_record_usage_validation "$@" ;;
     usage-validation-required) shift; cmd_usage_validation_required "$@" ;;
     usage-validation-get) shift; cmd_usage_validation_get "$@" ;;
+    unverified-screens) shift; cmd_unverified_screens "$@" ;;
     audit-open) shift; cmd_audit_open "$@" ;;
     usage-validation-verdict) shift; cmd_usage_validation_verdict "$@" ;;
     write-review)         shift; cmd_write_review "$@" ;;
