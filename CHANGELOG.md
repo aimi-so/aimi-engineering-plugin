@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.168.0] - 2026-11-24
+
+A screen built from a prototype that has no `data-view` sections is sliced and cited like one that has, a kit's handoff documents travel from the plan to the story worker, and a run that completed screen stories nobody checked against the running product is no longer closed or published without a question.
+
+### Added
+- `index-prototype-anchors <file>`, a read-only verb that lists the anchors of a prototype with no `data-view` section as `<kind>:<name>` lines in document order: `view`, `id` (on a section, main, article or div), `tab` (a `role=tabpanel`) and `heading` (`h1` to `h3`). The logic is in `scripts/prototype_anchors.py`.
+- `extract-prototype-sections` accepts those lines as anchors (`id:`, `tab:`, `heading:`) and slices from the raw file text, so a slice is the bytes on disk. Bare and `view:` anchors keep the awk path and still run without `python3`.
+- `unverified-screens`, a read-only verb (`scripts/unverified_screens.py`) that lists each completed screen story with no visual verdict when the run's usage validation was skipped or never recorded. A stored usage record of passed or failing, or a phase visual gate of passed or accepted, answers count 0 with a reason.
+- A run-end step of `/aimi:execute` (`commands/references/execute/run-end-unverified-screens.md`) that asks about unverified screen stories once, before the phase publish question, before any flat container step and before the inline Next Steps. In picker mode the operator chooses Stop, the default, or Continue; Stop withholds publishing only. In agent mode nothing is asked and the report gains an Unverified Screen Stories section.
+- `metadata.prototypeHandoffPaths`, the optional list of an imported prototype kit's markdown handoff documents (`AIMI_ROOT`-relative, under `.aimi/sources/`). `validate-tasks` rule R29 checks it, `get-story-context` projects it, and the story worker's step 0b reads each document next to the prototype as data, keeping the acceptance criteria as the contract and reporting each disagreement.
+- Each story expander receives `prototypeHandoffSectionBlock`, the heading sections of the kit handoff its outline entry draws on (capped at 20 KB), plus every handoff path for on-demand reading.
+
+### Changed
+- `extract-sections` matches level 1 ATX headings and setext headings when given `--all-headings`; the default scan is unchanged.
+- `/aimi:plan` builds its per-outline-entry prototype slice from `index-prototype-anchors`, so the `no-view-anchors` degradation now applies only to a file with no anchor of any kind.
+- A story that changes a screen sets `verification.url` whatever its verification strategy except `api`, and a criterion that restates prototype content cites its location whatever the strategy; the citation accepts the kind-tagged index entries.
+- A test story that carries a `/`-prefixed path or a loopback url is a screen story, the same as a visual one, so its web usage surface is declared.
+
+### Fixed
+- A prototype built from id containers, tab panels or headings no longer reaches only its first outline entry in whole while every later screen story receives the path alone.
+
 ## [1.167.0] - 2026-11-23
 
 A project that never declared stage-aware verification is now told about it at the first wave that runs two or more of its stories side by side.

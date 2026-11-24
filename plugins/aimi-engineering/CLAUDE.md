@@ -17,12 +17,12 @@ area live under `docs/dev/`; read the one that matches what you are about to cha
 | `docs/dev/cli-path-resolution.md` | a resolution layer or line in `commands/references/cli-path-resolution.md`, or `hooks/auto-approve-cli.sh` |
 | `docs/dev/story-lifecycle.md` | `remove-story`, `set-verification`, `acknowledge-*`, `judge-verification`, `triage-verify`, `split-detect` |
 | `docs/dev/planning-verbs.md` | `story-merge`, `apply-audit-patches`, `validate-outline`/`validate-staging`/`outline-shift`, `plan_checks.py`, advisory smells |
-| `docs/dev/cli-verbs.md` | the research and spec-derivation verbs, `check-version`, `slugify`, `detect-design-bundle` |
+| `docs/dev/cli-verbs.md` | the research and spec-derivation verbs, `check-version`, `slugify`, `detect-design-bundle`, `index-prototype-anchors` and the kind-tagged anchors of `extract-prototype-sections`, `extract-sections --all-headings` |
 | `docs/dev/roadmap.md` | a `roadmap-*` verb, `roadmap.py`, or the `roadmap.json` shape |
 | `docs/dev/review.md` | `commands/review.md` or an agent under `agents/review/` (why the request is read as it is, why these reviewers, the shared closing sections) |
-| `docs/dev/story-executor.md` | `skills/story-executor/SKILL.md`, the worker's brief, or how a command spawns it |
+| `docs/dev/story-executor.md` | `skills/story-executor/SKILL.md`, the worker's brief, or how a command spawns it; `metadata.prototypeHandoffPaths` and how step 0b reads the handoff beside a prototype |
 | `docs/dev/tasks-schema.md` | the `tasks.json` shape or a validator over it |
-| `docs/dev/usage-validation.md` | the usage-validation gate: `commands/references/execute/*usage-validation*.md`, the `usage-*` verbs, `aimi-usage-validator`, `AIMI_USAGE_VALIDATION`, the `usageValidation` records |
+| `docs/dev/usage-validation.md` | the usage-validation gate: `commands/references/execute/*usage-validation*.md`, the `usage-*` verbs, `aimi-usage-validator`, `AIMI_USAGE_VALIDATION`, the `usageValidation` records, `unverified-screens` and the run-end Unverified Screen Stop |
 | `docs/dev/jq-census.md` | a `jq` call in `aimi-cli.sh` or under `commands/` (the principle stays below) |
 
 ## Versioning Requirements
