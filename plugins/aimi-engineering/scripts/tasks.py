@@ -2232,8 +2232,17 @@ def spec_contains(spec_path, needle, section, normalize):
     return needle_bytes in body
 
 
-def confined_spec_path(project_root, relative):
+def confined_spec_path(project_root, relative, subtree=None):
     """Resolve a spec path against PROJECT_ROOT and REFUSE one that escapes it.
+
+    `subtree`, when given, narrows the boundary from the project root to one
+    directory beneath it (a path relative to PROJECT_ROOT, such as
+    ".aimi/sources"): the resolved path must then be that directory or lie
+    under its realpath, so a symlink inside the subtree that points elsewhere
+    in the project is refused as an escape too. The default None is the project
+    root and leaves every existing caller's answer exactly as it was. The
+    comparison stays in this one function so that no caller grows a prefix test
+    of its own.
 
     THE ONE PLACE THIS IS DECIDED, and it is decided rather than left. A tasks
     file is a document /aimi:plan wrote, but it is also a file a human edits and
@@ -2268,7 +2277,7 @@ def confined_spec_path(project_root, relative):
             resolved = os.path.join(os.path.realpath(parent), os.path.basename(path))
         else:
             resolved = path
-    root = os.path.realpath(project_root)
+    root = os.path.realpath(project_root if subtree is None else project_root + "/" + subtree)
     return path, resolved == root or resolved.startswith(root + os.sep)
 
 
@@ -2552,6 +2561,41 @@ def prototype_superseded_shape_errors(superseded):
                     where + " has unknown key \"" + str(key)
                     + "\" (allowed: path, decision, note)"
                 )
+
+    return problems
+
+
+def prototype_handoff_paths_shape_errors(handoff_paths):
+    """`metadata.prototypeHandoffPaths`'s shape, for R29. Returns a list of
+    suffixes.
+
+    The key lists the handoff documents of an imported prototype kit, each an
+    AIMI_ROOT-relative path under `.aimi/sources/`. It is omitted-when-empty
+    like its siblings: ABSENT is valid and skipped by the caller, and `[]` gets
+    a message of its own telling the writer to omit the key. Unlike the
+    siblings an explicit `null` is NOT the same as absent -- the caller reads
+    presence with `in` -- so it arrives here and is refused as not an array.
+
+    Well-formed means a non-empty array of non-empty strings, each ending in
+    `.md`. Where a path points is the CALLER's job, since it needs
+    project_root and decides through confined_spec_path with the
+    `.aimi/sources` subtree; this helper judges shape only.
+    """
+    if jq_type(handoff_paths) != "array":
+        return [" is not an array (expected [\".aimi/sources/<kit>/<file>.md\", …])"]
+
+    if not handoff_paths:
+        return [
+            " is an empty array — omit the key entirely when the kit has no handoff"
+        ]
+
+    problems = []
+    for index, entry in enumerate(handoff_paths):
+        where = "[" + str(index) + "]"
+        if not isinstance(entry, str) or not entry:
+            problems.append(where + " is not a non-empty string")
+        elif not entry.endswith(".md"):
+            problems.append(where + " does not end in .md: " + entry)
 
     return problems
 
@@ -3567,6 +3611,39 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
                     errors.append(
                         at + ".stories must be a non-empty array of staged idx"
                         " strings (NN or _audit)"
+                    )
+
+    # R29 -- metadata.prototypeHandoffPaths's shape and path confinement.
+    # Appended AFTER R28 for R17's reason: a rule below the last one can only
+    # add lines after everything already recorded, so a tasks file without the
+    # key validates byte for byte as before. An ERROR, R21's reasoning held: the
+    # key has one writer (/aimi:plan Phase 4), so a malformed value is the
+    # plugin having written a record its reader cannot parse.
+    #
+    # PRESENCE decides, read with `in` the way R28 reads its key, so an explicit
+    # null is refused where R21 and R22 accept it: this key is a path list the
+    # executor is told to open, and a null that quietly passed would hand it
+    # nothing to open without saying so.
+    #
+    # Every entry is confined to .aimi/sources/ -- the one directory the kit
+    # import writes into -- through confined_spec_path's subtree argument and
+    # never a prefix test of this rule's own, so the realpath rule stays decided
+    # in one place and a symlink out of .aimi/sources/ is caught as well as a
+    # ../ path. archive-task's cleanup tuple is deliberately NOT extended with
+    # this key: a handoff is a kit document, and archiving a plan must leave it.
+    if isinstance(doc0_metadata, dict) and "prototypeHandoffPaths" in doc0_metadata:
+        handoff_paths = doc0_metadata["prototypeHandoffPaths"]
+        for problem in prototype_handoff_paths_shape_errors(handoff_paths):
+            errors.append(tasks_file + ": metadata.prototypeHandoffPaths" + problem)
+        if isinstance(handoff_paths, list):
+            for index, given in enumerate(handoff_paths):
+                if not isinstance(given, str) or not given:
+                    continue
+                _resolved, inside = confined_spec_path(project_root, given, ".aimi/sources")
+                if not inside:
+                    errors.append(
+                        tasks_file + ": metadata.prototypeHandoffPaths[" + str(index)
+                        + "] escapes .aimi/sources/: " + given
                     )
 
     return errors
@@ -5710,12 +5787,20 @@ def op_validate_tasks(argv):
 # the key is deliberately absent from archive-task's cleanup tuple -- its
 # `path` always names an entry of metadata.prototypePaths, which archive-task
 # already confines and removes.
+#
+# metadata.prototypeHandoffPaths joined the tuple because the executor is
+# meant to read a kit's handoff document next to the prototype it describes,
+# and a key outside this projection reaches it as null. Each entry is already
+# confined to .aimi/sources/ by validate-tasks (R29) before a story runs. It is
+# deliberately absent from archive-task's cleanup tuple: a handoff belongs to
+# the imported kit, not to the plan, so archiving a plan leaves it on disk.
 STORY_CONTEXT_METADATA_KEYS = (
     "designBundle",
     "designTokens",
     "prototypePaths",
     "prototypeDropped",
     "prototypeSuperseded",
+    "prototypeHandoffPaths",
 )
 
 
