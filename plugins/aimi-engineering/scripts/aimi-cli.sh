@@ -115,7 +115,7 @@ find_aimi_root() {
 # bare positional arguments of the verbs in _PATH_ARG_POSITIONAL_VERBS (never
 # the value of a flag); a story id, a reason or a branch name is never touched.
 _PATH_ARG_FLAGS=" --tasks-file --file --staging-dir --outline --result --output --old --new --input --tasks --spec --prototype --phase-dir --root --bundle --from --to --previous-file --review --dir --brainstorm-path --required-file --evidence-dir --resolve "
-_PATH_ARG_POSITIONAL_VERBS=" archive-task research-lookup extract-sections extract-prototype-sections measure-command-file inspect-prototype-kit import-prototype-kit "
+_PATH_ARG_POSITIONAL_VERBS=" archive-task research-lookup extract-sections extract-prototype-sections index-prototype-anchors measure-command-file inspect-prototype-kit import-prototype-kit "
 _rebase_invocation_relative_args() {
   local verb="$1"; shift
   local prev="" arg candidate
@@ -14687,6 +14687,64 @@ _EXTRACT_SECTIONS_KEY_AWK='function mkey(s) {
 }
 '
 
+# The section scan behind extract-sections --all-headings. The default scan above is
+# a one-line-at-a-time program and stays exactly as it is; this one reads the whole
+# file first because a setext heading is only known from the line AFTER its text.
+# Headings it adds: a level 1 ATX heading, and a setext heading (a text line
+# underlined by a line of only = for level 1 or only - for level 2). Never a heading:
+# a line inside a ``` or ~~~ fence, a line of a leading YAML front matter block (its
+# --- delimiters included), and a line already used as the underline of a heading.
+# A setext heading closes a section of the same or lower rank, and its section starts
+# at its text line, exactly as an ATX heading's starts at its # line.
+_EXTRACT_SECTIONS_ALL_AWK='
+{ lines[NR] = $0 }
+END {
+  target = ENVIRON["AIMI_ES_TARGET"]
+  n = NR
+  fm_end = 0
+  if (n >= 1 && lines[1] ~ /^---[[:space:]]*$/) {
+    for (j = 2; j <= n; j++) {
+      if (lines[j] ~ /^(---|\.\.\.)[[:space:]]*$/) { fm_end = j; break }
+    }
+  }
+  in_fence = 0
+  consumed = 0
+  for (i = 1; i <= n; i++) {
+    line = lines[i]
+    lvl[i] = 0
+    setext[i] = 0
+    if (i <= fm_end) continue
+    if (consumed) { consumed = 0; continue }
+    if (line ~ /^[[:space:]]*(```|~~~)/) { in_fence = !in_fence; continue }
+    if (in_fence) continue
+    if (line ~ /^#+[[:space:]]/) {
+      line_copy = line
+      level = 0
+      while (substr(line_copy, 1, 1) == "#") { level++; line_copy = substr(line_copy, 2) }
+      lvl[i] = level
+      continue
+    }
+    if (line ~ /[^[:space:]]/ && i < n) {
+      if (lines[i + 1] ~ /^[ ]*=+[[:space:]]*$/) { lvl[i] = 1; setext[i] = 1; consumed = 1 }
+      else if (lines[i + 1] ~ /^[ ]*-+[[:space:]]*$/) { lvl[i] = 2; setext[i] = 1; consumed = 1 }
+    }
+  }
+  in_section = 0; match_level = 0; matched_done = 0
+  for (i = 1; i <= n; i++) {
+    level = lvl[i]
+    if (in_section && level > 0 && level <= match_level) in_section = 0
+    if (!in_section && !matched_done && level >= 1) {
+      heading_text = setext[i] ? lines[i] : substr(lines[i], level + 1)
+      if (mkey(heading_text) == target) {
+        in_section = 1; matched_done = 1; match_level = level
+      }
+    }
+    if (in_section) print lines[i]
+  }
+  exit (matched_done ? 0 : 1)
+}
+'
+
 # Usage: _extract_sections_match_key <text>
 # Prints the match key of one anchor or heading text (see extract-sections).
 _extract_sections_match_key() {
@@ -14717,22 +14775,30 @@ _extract_sections_match_key() {
 # compared by its key.
 # Path confinement mirrors research-lookup: resolve_path + validate_path_in_project.
 # Missing file -> error + exit 1. Missing <file>/--anchors arg -> usage + exit 1.
+# --all-headings (opt-in) also matches a level 1 ATX heading and setext headings, for a
+# kit handoff document that is not written in ## sections; see _EXTRACT_SECTIONS_ALL_AWK.
+# Without it the scan, and so the output, is what it always was.
 cmd_extract_sections() {
   local file_path=""
   local anchors_raw=""
+  local all_headings=0
 
   while [ $# -gt 0 ]; do
     case "$1" in
       --anchors)
         if [ $# -lt 2 ]; then
-          echo "Usage: aimi-cli.sh extract-sections <file> --anchors \"<heading titles>\"" >&2
+          echo "Usage: aimi-cli.sh extract-sections <file> --anchors \"<heading titles>\" [--all-headings]" >&2
           exit 1
         fi
         anchors_raw="$2"
         shift 2
         ;;
+      --all-headings)
+        all_headings=1
+        shift
+        ;;
       -*)
-        echo "Usage: aimi-cli.sh extract-sections <file> --anchors \"<heading titles>\"" >&2
+        echo "Usage: aimi-cli.sh extract-sections <file> --anchors \"<heading titles>\" [--all-headings]" >&2
         exit 1
         ;;
       *)
@@ -14743,7 +14809,7 @@ cmd_extract_sections() {
   done
 
   if [ -z "$file_path" ] || [ -z "$anchors_raw" ]; then
-    echo "Usage: aimi-cli.sh extract-sections <file> --anchors \"<heading titles>\"" >&2
+    echo "Usage: aimi-cli.sh extract-sections <file> --anchors \"<heading titles>\" [--all-headings]" >&2
     exit 1
   fi
 
@@ -14791,6 +14857,15 @@ $anchor"
     # lines and all) and reports match status via its own exit code -- this avoids
     # a $(...) capture, which would silently swallow trailing blank lines. The key
     # reaches awk through ENVIRON because -v interprets backslash escapes.
+    if [ "$all_headings" -eq 1 ]; then
+      if AIMI_ES_TARGET="$anchor_key" awk "$_EXTRACT_SECTIONS_KEY_AWK$_EXTRACT_SECTIONS_ALL_AWK" "$resolved_file"; then
+        :
+      else
+        unmatched_anchors="$unmatched_anchors
+$anchor"
+      fi
+      continue
+    fi
     if AIMI_ES_TARGET="$anchor_key" awk "$_EXTRACT_SECTIONS_KEY_AWK"'
       BEGIN { in_section = 0; match_level = 0; matched_done = 0; in_fence = 0; target = ENVIRON["AIMI_ES_TARGET"] }
       {
@@ -14858,7 +14933,14 @@ $anchor"
 # stderr; a run whose anchors match nothing prints empty output, still exit 0. A file
 # with no data-view attribute at all likewise prints empty output at exit 0.
 # Anchors containing shell metacharacters ($ ` " \) are rejected with a warning on
-# stderr and skipped -- defense in depth, mirroring extract-sections.
+# stderr and skipped -- defense in depth, mirroring extract-sections. The check runs on
+# the whole anchor, so it applies after a kind prefix as well.
+# A prototype with no data-view section is sliced by the kind-tagged anchors that
+# index-prototype-anchors prints: `id:<id>` and `tab:<name>` print the element from its
+# opening tag through its matching closing tag (to end of file when unclosed), and
+# `heading:<text>` prints raw text from the heading's opening tag to the next h1-h6 of
+# the same or a higher level. Those cross into prototype_anchors.py and refuse at exit
+# 1 through check_python3 without python3; a bare anchor and `view:<name>` never do.
 # Path confinement mirrors extract-sections: resolve_path + validate_path_in_project.
 # Missing file -> error + exit 1. Missing <file>/--anchors arg -> usage + exit 1.
 cmd_extract_prototype_sections() {
@@ -14904,7 +14986,7 @@ cmd_extract_prototype_sections() {
   # Split --anchors on newlines only; trim and lowercase each entry; skip blanks.
   # Extract each anchor's <section data-view="X"> block (first matching section only)
   # in request order.
-  local anchor anchor_lc unmatched_anchors=""
+  local anchor anchor_lc kind match_name slice_rc unmatched_anchors=""
   while IFS= read -r anchor; do
     anchor=$(printf '%s' "$anchor" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
     [ -z "$anchor" ] && continue
@@ -14919,7 +15001,37 @@ cmd_extract_prototype_sections() {
         continue ;;
     esac
 
-    anchor_lc=$(printf '%s' "$anchor" | tr '[:upper:]' '[:lower:]')
+    # An anchor is bare (a data-view name), `view:<name>` (the same, spelled out) or
+    # kind-tagged: `id:`, `tab:` or `heading:` followed by a name that
+    # index-prototype-anchors printed. The first two stay on the awk scan below, so
+    # they run without python3; a kind-tagged one is sliced by prototype_anchors.py.
+    kind="" ; match_name="$anchor"
+    case "$anchor" in
+      id:*|tab:*|heading:*) kind="${anchor%%:*}"; match_name="${anchor#*:}" ;;
+      view:*) match_name="${anchor#view:}" ;;
+    esac
+    match_name=$(printf '%s' "$match_name" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    if [ -z "$match_name" ]; then
+      unmatched_anchors="$unmatched_anchors
+$anchor"
+      continue
+    fi
+
+    if [ -n "$kind" ]; then
+      check_python3
+      slice_rc=0
+      python3 -I "$(_aimi_script_py prototype_anchors.py)" extract "$resolved_file" "$kind" "$match_name" || slice_rc=$?
+      if [ "$slice_rc" -eq 1 ]; then
+        unmatched_anchors="$unmatched_anchors
+$anchor"
+      elif [ "$slice_rc" -ne 0 ]; then
+        echo "Error: extract-prototype-sections: could not slice $anchor" >&2
+        exit 1
+      fi
+      continue
+    fi
+
+    anchor_lc=$(printf '%s' "$match_name" | tr '[:upper:]' '[:lower:]')
 
     # awk streams matched section lines straight to stdout (byte-for-byte, blank
     # lines and all) and reports match status via its own exit code -- this avoids
@@ -15891,6 +16003,51 @@ cmd_validate_staging() {
 cmd_slugify() {
   check_python3
   python3 "$(_aimi_script_py slug.py)" "$@"
+}
+
+# Usage: index-prototype-anchors <file>
+# Print one kind-tagged anchor per line (view:, id:, tab:, heading:) for a prototype HTML
+# file, in document order, every line one extract-prototype-sections --anchors accepts.
+# The kinds, the naming of a tab panel and the left-out anchors are prototype_anchors.py's
+# (docs/dev/cli-verbs.md). A file with no anchor prints nothing at exit 0.
+# Path confinement mirrors the extract verbs: resolve_path + validate_path_in_project on
+# the ARGUMENT before python3 starts. Missing file or argument -> error/usage, exit 1.
+# Needs python3 and refuses without it. No lock: it only reads.
+cmd_index_prototype_anchors() {
+  local file_path=""
+  local usage="Usage: aimi-cli.sh index-prototype-anchors <file>"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -*)
+        echo "$usage" >&2
+        exit 1
+        ;;
+      *)
+        if [ -n "$file_path" ]; then
+          echo "$usage" >&2
+          exit 1
+        fi
+        file_path="$1"
+        shift
+        ;;
+    esac
+  done
+
+  if [ -z "$file_path" ]; then
+    echo "$usage" >&2
+    exit 1
+  fi
+
+  if [ ! -f "$file_path" ]; then
+    echo "Error: File not found: $file_path" >&2
+    exit 1
+  fi
+
+  local resolved_file
+  resolved_file=$(resolve_path "$file_path")
+  validate_path_in_project "$resolved_file"
+  check_python3
+  python3 -I "$(_aimi_script_py prototype_anchors.py)" index "$resolved_file"
 }
 
 # ============================================================================
@@ -19153,10 +19310,13 @@ COMMANDS:
                               Path confinement mirrors research-lookup (validate_path_in_project
                               on the ARGUMENT, before the file is opened); missing file or
                               missing <path> arg -> error/usage on stderr, exit 1.
-    extract-sections <file> --anchors "<titles>"
+    extract-sections <file> --anchors "<titles>" [--all-headings]
                               Print only the requested sections (any heading level 2 or
                               deeper; h1 is not matchable) of a research .md file,
                               concatenated verbatim in request order.
+                              --all-headings also matches a level 1 ATX heading and setext
+                              headings (a text line underlined by = or -); front matter and
+                              fenced lines are never headings. Without it nothing changes.
                               Each section spans its matching heading up to the next
                               heading of the same-or-higher level (or EOF) -- an h2
                               anchor includes nested h3/h4 lines and stops at the next
@@ -19169,10 +19329,21 @@ COMMANDS:
                               Path confinement mirrors research-lookup (resolve_path +
                               validate_path_in_project); missing file or missing
                               <file>/--anchors arg -> error/usage on stderr, exit 1.
+    index-prototype-anchors <file>
+                              Print one kind-tagged anchor per line, in document order, for
+                              a prototype HTML file: view:<data-view>, id:<id> (section,
+                              main, article, div), tab:<name> (role=tabpanel) and
+                              heading:<text> (h1-h3). Each line is accepted verbatim by
+                              extract-prototype-sections --anchors. A file with no anchor
+                              prints nothing, exit 0. Needs python3.
     extract-prototype-sections <file> --anchors "<view names>"
                               Print only the requested <section data-view="X"> blocks
                               of a prototype HTML file, concatenated verbatim in
-                              request order. Each block spans its opening
+                              request order. An anchor may also be kind-tagged (id:, tab:,
+                              heading:, or view:) as index-prototype-anchors prints it;
+                              id: and tab: print the element, heading: runs to the next
+                              heading of the same or higher level. Bare and view: anchors
+                              need no python3; the other kinds do. Each block spans its opening
                               <section ... data-view="X" ...> through its matching
                               </section>, tracked by tag depth.
                               --anchors accepts newline-separated view names; matching
@@ -20272,6 +20443,7 @@ main() {
     research-gc)       cmd_research_gc ;;
     extract-sections)  shift; cmd_extract_sections "$@" ;;
     extract-prototype-sections) shift; cmd_extract_prototype_sections "$@" ;;
+    index-prototype-anchors) shift; cmd_index_prototype_anchors "$@" ;;
     detect-design-bundle) shift; cmd_detect_design_bundle "$@" ;;
     import-design-bundle) shift; cmd_import_design_bundle "$@" ;;
     bundle-prototype-status)   shift; cmd_bundle_prototype_status "$@" ;;
