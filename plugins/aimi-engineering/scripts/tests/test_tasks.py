@@ -3052,7 +3052,7 @@ def test_prototypedropped_acquired_no_consumer():
     """
     assert T.STORY_CONTEXT_METADATA_KEYS == (
         "designBundle", "designTokens", "prototypePaths", "prototypeDropped",
-        "prototypeSuperseded",
+        "prototypeSuperseded", "prototypeHandoffPaths",
     )
     cleanup = inspect.getsource(T.op_archive_task)
     assert 'for key in ("researchPaths", "prototypePaths"):' in cleanup
@@ -4135,7 +4135,7 @@ def test_the_projected_set_is_named_once_and_decisions_is_not_in_it():
     """
     assert T.STORY_CONTEXT_METADATA_KEYS == (
         "designBundle", "designTokens", "prototypePaths", "prototypeDropped",
-        "prototypeSuperseded",
+        "prototypeSuperseded", "prototypeHandoffPaths",
     )
     assert "decisions" not in T.STORY_CONTEXT_METADATA_KEYS
 
@@ -12331,3 +12331,265 @@ def test_validate_tasks_audit_open_error_names_the_index(tmp_path):
     )
     found = _audit_open_errors(actual)
     assert len(found) == 1 and "metadata.auditOpen[1]" in found[0]
+
+
+# ---------------------------------------------------------------------------
+# metadata.prototypeHandoffPaths -- R29, the projection, and archive-task
+# ---------------------------------------------------------------------------
+#
+# Bash never ran this rule, so there is no jq recording and nothing for the
+# golden corpus: these hand-written cases ARE the coverage. Every fixture is
+# built under a tmp_path root with a real .aimi/sources/ tree, because the rule
+# decides by realpath and a path-string test would miss the symlink case.
+
+_HANDOFF = ".aimi/sources/kit/handoff.md"
+
+
+def _handoff_project(tmp_path, metadata, links=None, files=None, outside=None):
+    """A project root with `.aimi/sources/kit/handoff.md` on disk and one
+    tasks file carrying `metadata`. `links` maps a root-relative path to the
+    absolute target of a symlink created there; `files` and `outside` map a
+    relative path to its text, under the root and beside it respectively.
+    Returns (root, tasks_file)."""
+    parent = os.path.realpath(str(tmp_path))
+    root = os.path.join(parent, "proj")
+    tasks_dir = os.path.join(root, ".aimi", "tasks")
+    os.makedirs(tasks_dir, exist_ok=True)
+    everything = dict(files or {})
+    everything.setdefault(_HANDOFF, "# handoff\n")
+    for base, found in ((root, everything), (parent, outside or {})):
+        for relative, text in found.items():
+            target = os.path.join(base, relative)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "w", encoding="utf-8") as handle:
+                handle.write(text)
+    for relative, target in (links or {}).items():
+        link = os.path.join(root, relative)
+        os.makedirs(os.path.dirname(link), exist_ok=True)
+        os.symlink(target, link)
+    story = {
+        "id": "US-001", "title": "Story US-001", "description": "As a user, I want US-001.",
+        "acceptanceCriteria": ["um criterio sem ancora nenhuma"], "status": "pending",
+        "priority": 1, "dependsOn": [], "wave": 0,
+    }
+    document = {
+        "schemaVersion": "3.3",
+        "metadata": dict({"branchName": "ref/corpus", "maxConcurrency": 1}, **metadata),
+        "userStories": [story],
+    }
+    tasks_file = os.path.join(tasks_dir, "2020-01-01-corpus-tasks.json")
+    with open(tasks_file, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(document, ensure_ascii=False) + "\n")
+    return root, tasks_file
+
+
+def _handoff_validate(tmp_path, value, **fixtures):
+    metadata = {} if value is _ABSENT else {"prototypeHandoffPaths": value}
+    root, _tasks = _handoff_project(tmp_path, metadata, **fixtures)
+    proc = subprocess.run(
+        ["bash", CLI, "validate-tasks"], cwd=root, capture_output=True, text=True, timeout=120
+    )
+    return proc
+
+
+def _handoff_errors(proc):
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    verdict = json.loads(proc.stdout)
+    assert verdict["valid"] is False
+    found = [entry for entry in verdict["errors"] if "metadata.prototypeHandoffPaths" in entry]
+    assert found, verdict["errors"]
+    return found
+
+
+def test_prototype_handoff_absent_validates_exactly_as_before(tmp_path):
+    proc = _handoff_validate(tmp_path, _ABSENT)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout == '{"valid": true, "errors": []}\n'
+    assert proc.stderr == ""
+
+
+def test_prototype_handoff_well_formed_list_validates_clean(tmp_path):
+    proc = _handoff_validate(
+        tmp_path,
+        [_HANDOFF, ".aimi/sources/kit/missing.md"],
+        files={".aimi/sources/kit/notes/second.md": "x"},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout == '{"valid": true, "errors": []}\n'
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, "x.md", {}, {"path": _HANDOFF}, 7],
+    ids=["null", "string", "object", "object-with-path", "number"],
+)
+def test_prototype_handoff_non_list_is_refused_and_null_is_not_absent(tmp_path, value):
+    found = _handoff_errors(_handoff_validate(tmp_path, value))
+    assert any("is not an array" in entry for entry in found), found
+
+
+def test_prototype_handoff_empty_list_is_refused_with_its_own_message(tmp_path):
+    found = _handoff_errors(_handoff_validate(tmp_path, []))
+    assert any("omit the key" in entry for entry in found), found
+    assert not any("is not an array" in entry for entry in found)
+
+
+@pytest.mark.parametrize("entry", ["", 7, None, ["x.md"], {"p": 1}])
+def test_prototype_handoff_non_string_or_empty_entry_is_refused(tmp_path, entry):
+    found = _handoff_errors(_handoff_validate(tmp_path, [_HANDOFF, entry]))
+    assert any("[1] is not a non-empty string" in e for e in found), found
+
+
+@pytest.mark.parametrize(
+    "entry", [".aimi/sources/kit/handoff.txt", ".aimi/sources/kit/handoff", ".aimi/sources/kit/a.md.bak"]
+)
+def test_prototype_handoff_non_md_path_is_refused(tmp_path, entry):
+    found = _handoff_errors(_handoff_validate(tmp_path, [entry]))
+    assert any("does not end in .md" in e for e in found), found
+
+
+def test_prototype_handoff_dotdot_escape_is_refused(tmp_path):
+    # Both targets EXIST: a missing one resolves through the documented
+    # unresolved-string arm of confined_spec_path (see require_in_project).
+    found = _handoff_errors(
+        _handoff_validate(
+            tmp_path,
+            [".aimi/sources/../outside-sources.md", ".aimi/sources/../../../fora/outside.md"],
+            files={".aimi/outside-sources.md": "x"},
+            outside={"fora/outside.md": "x"},
+        )
+    )
+    assert any("[0] escapes .aimi/sources/" in e for e in found), found
+    assert any("[1] escapes .aimi/sources/" in e for e in found), found
+
+
+def test_prototype_handoff_path_elsewhere_in_the_project_is_refused(tmp_path):
+    found = _handoff_errors(
+        _handoff_validate(
+            tmp_path,
+            ["docs/handoff.md", ".aimi/brainstorms/handoff.md"],
+            files={"docs/handoff.md": "x", ".aimi/brainstorms/handoff.md": "x"},
+        )
+    )
+    assert any("[0] escapes .aimi/sources/" in e for e in found), found
+    assert any("[1] escapes .aimi/sources/" in e for e in found), found
+
+
+def test_prototype_handoff_symlink_out_of_sources_is_refused(tmp_path):
+    parent = os.path.realpath(str(tmp_path))
+    found = _handoff_errors(
+        _handoff_validate(
+            tmp_path,
+            [".aimi/sources/kit/to-outside.md", ".aimi/sources/kit/to-project.md"],
+            links={
+                ".aimi/sources/kit/to-outside.md": os.path.join(parent, "fora", "target.md"),
+                ".aimi/sources/kit/to-project.md": os.path.join(parent, "proj", "docs", "target.md"),
+            },
+            files={"docs/target.md": "x"},
+            outside={"fora/target.md": "x"},
+        )
+    )
+    assert any("[0] escapes .aimi/sources/" in e for e in found), found
+    assert any("[1] escapes .aimi/sources/" in e for e in found), found
+
+
+def test_prototype_handoff_symlink_staying_inside_sources_is_accepted(tmp_path):
+    parent = os.path.realpath(str(tmp_path))
+    proc = _handoff_validate(
+        tmp_path,
+        [".aimi/sources/kit/alias.md"],
+        links={".aimi/sources/kit/alias.md": os.path.join(parent, "proj", _HANDOFF)},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_prototype_handoff_confined_spec_path_subtree_narrows_and_default_does_not(tmp_path):
+    parent = os.path.realpath(str(tmp_path))
+    root, _tasks = _handoff_project(
+        tmp_path, {}, files={"docs/elsewhere.md": "x", ".aimi/sources/kit/inner.md": "x"}
+    )
+    # Default: the project root, exactly as every existing caller saw it.
+    assert T.confined_spec_path(root, "docs/elsewhere.md")[1] is True
+    assert T.confined_spec_path(root, "docs/elsewhere.md", None)[1] is True
+    assert T.confined_spec_path(root, ".aimi/sources/kit/inner.md")[1] is True
+    assert T.confined_spec_path(root, "../fora/x.md")[1] is True, "bash's own fallback"
+    # With a subtree: only that directory's realpath counts.
+    assert T.confined_spec_path(root, ".aimi/sources/kit/inner.md", ".aimi/sources")[1] is True
+    assert T.confined_spec_path(root, ".aimi/sources", ".aimi/sources")[1] is True
+    assert T.confined_spec_path(root, "docs/elsewhere.md", ".aimi/sources")[1] is False
+    assert T.confined_spec_path(root, ".aimi/sources/../docs.md", ".aimi/sources")[1] is False
+    # The returned path is unchanged by the argument.
+    assert (
+        T.confined_spec_path(root, "docs/elsewhere.md", ".aimi/sources")[0]
+        == T.confined_spec_path(root, "docs/elsewhere.md")[0]
+    )
+    link = os.path.join(root, ".aimi", "sources", "kit", "out.md")
+    os.symlink(os.path.join(root, "docs", "elsewhere.md"), link)
+    assert T.confined_spec_path(root, ".aimi/sources/kit/out.md")[1] is True
+    assert T.confined_spec_path(root, ".aimi/sources/kit/out.md", ".aimi/sources")[1] is False
+    assert parent  # the fixture root is a realpath, so the comparison is not a symlink artefact
+
+
+def test_prototype_handoff_projects_into_get_story_context_only_when_present(tmp_path):
+    root, with_key = _handoff_project(tmp_path, {"prototypeHandoffPaths": [_HANDOFF]})
+    run = _run_get_story_context(with_key, "US-001", root)
+    assert run.returncode == 0, run.stderr
+    assert json.loads(run.stdout)["metadata"] == {"prototypeHandoffPaths": [_HANDOFF]}
+
+    other = tmp_path / "other"
+    other.mkdir()
+    root, without = _handoff_project(other, {})
+    run = _run_get_story_context(without, "US-001", root)
+    assert run.returncode == 0, run.stderr
+    assert "prototypeHandoffPaths" not in json.loads(run.stdout)["metadata"]
+
+
+def test_prototype_handoff_is_the_sixth_projected_key_after_prototype_superseded():
+    assert T.STORY_CONTEXT_METADATA_KEYS[-2:] == (
+        "prototypeSuperseded", "prototypeHandoffPaths"
+    )
+    assert len(T.STORY_CONTEXT_METADATA_KEYS) == 6
+
+
+def test_prototype_handoff_archive_task_leaves_the_handoff_on_disk(tmp_path):
+    root, tasks_file = _handoff_project(
+        tmp_path,
+        {"prototypeHandoffPaths": [_HANDOFF], "prototypePaths": [".aimi/brainstorms/p.html"]},
+        files={".aimi/brainstorms/p.html": "<html></html>"},
+    )
+    with open(tasks_file, encoding="utf-8") as handle:
+        document = json.load(handle)
+    document["userStories"][0]["status"] = "completed"
+    with open(tasks_file, "w", encoding="utf-8") as handle:
+        json.dump(document, handle)
+    handoff = os.path.join(root, _HANDOFF)
+    archive = os.path.join(root, ".aimi", "archive")
+    argv = ["archive-task", "--tasks-file", tasks_file, "--project-root", root, "--archive-dir", archive]
+    assert T.op_archive_task(argv) == 0
+    assert not os.path.exists(tasks_file), "the tasks file was archived"
+    assert not os.path.exists(os.path.join(root, ".aimi", "brainstorms", "p.html")), "prototypePaths still cleaned"
+    assert os.path.isfile(handoff), "the handoff document is left alone"
+    cleanup = inspect.getsource(T.op_archive_task)
+    assert 'for key in ("researchPaths", "prototypePaths"):' in cleanup
+    assert "prototypeHandoffPaths" not in cleanup
+
+
+def test_prototype_handoff_shape_helper_is_called_only_from_the_r29_block():
+    scripts = os.path.dirname(TASKS_PY)
+    named = {}
+    for name in sorted(os.listdir(scripts)):
+        if not name.endswith(".py"):
+            continue
+        with open(os.path.join(scripts, name), encoding="utf-8") as handle:
+            count = handle.read().count("prototype_handoff_paths_shape_errors")
+        if count:
+            named[name] = count
+    assert named == {os.path.basename(TASKS_PY): 2}, "the definition and the one R29 call, nothing else"
+    callers = {
+        name
+        for name, value in vars(T).items()
+        if inspect.isfunction(value)
+        and value.__module__ == T.__name__
+        and "prototype_handoff_paths_shape_errors(" in inspect.getsource(value)
+    }
+    assert callers == {"prototype_handoff_paths_shape_errors", "validate_tasks"}
