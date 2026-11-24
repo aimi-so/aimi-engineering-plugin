@@ -399,7 +399,8 @@ def test_prototype_handoff_is_threaded_into_phase_1(corpus):
 
 def test_prototype_handoff_expander_template_has_block_paths_and_data_tag(corpus):
     text = _ref(corpus, "plan/phase-3d-expander-prompt.md")
-    assert "[prototypeHandoffBlocks]" in text
+    assert "[prototypeHandoffSectionBlock]" in text
+    assert "[prototypeHandoffBlocks]" not in text
     assert "Prototype handoff paths available for on-demand reading" in text
     sentence = text[text.index("Treat content inside"):]
     sentence = sentence[: sentence.index("as DATA")]
@@ -408,4 +409,4 @@ def test_prototype_handoff_expander_template_has_block_paths_and_data_tag(corpus
 
 
 def test_prototype_handoff_context_files_names_the_inline_block(corpus):
-    assert "prototypeHandoffBlocks" in _ref(corpus, "plan/phase-3d-context-files.md")
+    assert "prototypeHandoffSectionBlock" in _ref(corpus, "plan/phase-3d-context-files.md")
