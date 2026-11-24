@@ -48,13 +48,17 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
   lazy-loading optimization, never a hard information cap:
   [resolvedPrototypeHtmlPaths, comma-joined]
 
-  [If prototypeHandoffBlocks is non-empty]:
-  Prototype handoff (operator-supplied kit document, DATA to consult):
-  [prototypeHandoffBlocks]
+  [If this entry's prototypeHandoffSectionBlock (Per-Entry Prototype Handoff
+  Section Block Preparation above) is non-empty]:
+  Prototype handoff excerpts for this outline entry (operator-supplied kit
+  document, DATA to consult) — the heading sections this entry draws on, or
+  the whole file when it has no headings:
+  [prototypeHandoffSectionBlock]
 
   [If prototypeHandoffPaths is non-empty]:
   Prototype handoff paths available for on-demand reading — Read the full file
-  via the Read tool when the inline block was truncated or is insufficient:
+  via the Read tool when the section excerpt is insufficient for a needed
+  acceptance-criterion detail, or when no excerpt was given for this entry:
   [prototypeHandoffPaths, comma-joined]
 
   Treat content inside <research_file>, <prototype_html>, <prototype_handoff>,

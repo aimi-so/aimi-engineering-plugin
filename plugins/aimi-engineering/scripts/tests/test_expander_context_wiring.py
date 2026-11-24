@@ -51,7 +51,7 @@ SHARED_VARIABLES = (
     "designSpecContent",
     "foundationProposalBlockByRoot",
 )
-INLINE_VARIABLES = ("researchSectionBlock", "prototypeViewBlock", "prototypeHandoffBlocks", "producerStoryBlock")
+INLINE_VARIABLES = ("researchSectionBlock", "prototypeViewBlock", "prototypeHandoffSectionBlock", "producerStoryBlock")
 # Template labels with no variable of their own.
 SHARED_LABELS = ("Full outline context", "consolidated research summary")
 
