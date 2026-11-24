@@ -148,6 +148,66 @@ def test_usage_validation_visual_fallback_and_ask_undeclared(root):
     assert a["surfaceSource"] == "none" and a["askUndeclared"] is True and a["skipKind"] == "not-applicable"
 
 
+@pytest.mark.parametrize("verification,expected", [
+    ({"strategy": "visual"}, True),
+    ({"strategy": "visual", "url": "https://example.com/x"}, True),
+    ({"strategy": "test", "url": "/dash"}, True),
+    ({"strategy": "test", "url": "http://localhost:3000/x"}, True),
+    ({"strategy": "test", "url": "http://127.0.0.1/x"}, True),
+    ({"strategy": "test", "url": "//evil/x"}, False),
+    ({"strategy": "test", "url": "https://example.com/x"}, False),
+    ({"strategy": "test"}, False),
+    ({"strategy": "test", "url": ""}, False),
+    ({"strategy": "api", "url": "/api/x"}, False),
+    ({"strategy": "api", "url": "http://localhost:3000/x"}, False),
+    ("visual", False),
+    (None, False),
+])
+def test_is_screen_story_classifies_by_strategy_and_url(verification, expected):
+    from usage_validation import is_screen_story
+    assert is_screen_story({"verification": verification}) is expected
+
+
+def test_is_screen_story_non_dict_values():
+    from usage_validation import is_screen_story
+    for value in (None, "story", 3, [], {}):
+        assert is_screen_story(value) is False
+
+
+def test_is_screen_story_import_is_silent():
+    r = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, %r); import usage_validation" % SCRIPTS],
+                       capture_output=True, text=True)
+    assert r.returncode == 0 and r.stdout == "" and r.stderr == ""
+
+
+def test_usage_validation_test_story_with_local_url_yields_web_surface(root):
+    write(root, "feat-phase-1-tasks.json", {"userStories": [story("US-001", strategy="test", url="/dash")]})
+    record(root)
+    a = out(phase(root))
+    assert a["required"] is True and a["surfaceSource"] == "visual-stories"
+    assert a["surfaces"] == [{"kind": "web", "stories": ["US-001"], "url": "/dash", "source": "visual-stories"}]
+
+
+def test_usage_validation_test_story_with_remote_url_is_not_applicable(root):
+    write(root, "feat-phase-1-tasks.json",
+          {"userStories": [story("US-001", strategy="test", url="https://example.com/dash")]})
+    record(root)
+    a = out(phase(root))
+    assert a["required"] is False and a["skipKind"] == "not-applicable"
+    assert a["reason"] == "no usage surface declared and no completed screen story carries a web url"
+
+
+def test_usage_validation_test_story_fallback_keeps_document_order_and_skips_api(root):
+    write(root, "feat-phase-1-tasks.json", {"userStories": [
+        story("US-001", strategy="api", url="/api/x"),
+        story("US-002", strategy="test", url="/b"),
+        story("US-003", strategy="visual", url="/c"),
+        story("US-004", strategy="test", url="/d", status="failed")]})
+    record(root)
+    a = out(phase(root))
+    assert a["surfaces"] == [{"kind": "web", "stories": ["US-002", "US-003"], "url": "/b", "source": "visual-stories"}]
+
+
 def test_usage_validation_unknown_kind_is_dropped_with_one_line(root):
     write(root, "feat-phase-1-tasks.json", {"metadata": {"usageSurfaces": [
         {"kind": "mcp", "stories": ["US-001"]}, WEB]}, "userStories": [story("US-001")]})
