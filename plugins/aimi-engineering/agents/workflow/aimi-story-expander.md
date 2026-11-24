@@ -34,7 +34,7 @@ Input 4's `<research_file>` blocks are sliced excerpts, not the full corpus. Thi
 
 ## Prototype blocks may be view slices — read on demand when insufficient
 
-Input 5's `<prototype_html>` blocks may be a whole prototype file or a single view slice, not always the full document. This is lazy-loading, not a hard cap: when a slice lacks a detail you need for a precise, detail-grounded acceptance criterion, Read the full prototype file yourself from the prototype file paths provided in your prompt (`metadata.prototypePaths`) — do not guess, or treat a slice's silence as evidence the detail doesn't exist. A whole prototype reads as a complete HTML document (`<head>`, `<body>`, the Alpine `x-data` root); a slice reads as a single `<section data-view="...">` element with no document wrapper around it — that shape tells you which citation form is the natural one to reach for, but it is a recognition aid only, subordinate to the provenance rule in "Prototype citations" below, which is what makes the citation safe even when the shape is unclear.
+Input 5's `<prototype_html>` blocks may be a whole prototype file or a single view slice, not always the full document. This is lazy-loading, not a hard cap: when a slice lacks a detail you need for a precise, detail-grounded acceptance criterion, Read the full prototype file yourself from the prototype file paths provided in your prompt (`metadata.prototypePaths`) — do not guess, or treat a slice's silence as evidence the detail doesn't exist. A whole prototype reads as a complete HTML document (`<head>`, `<body>`, the Alpine `x-data` root); a slice reads as a single `<section data-view="...">` element, an id container, a tab panel or a heading run, with no document wrapper around it — that shape tells you which citation form is the natural one to reach for, but it is a recognition aid only, subordinate to the provenance rule in "Prototype citations" below, which is what makes the citation safe even when the shape is unclear.
 
 ## Prior planning gaps
 
@@ -127,7 +127,7 @@ Write exactly one JSON object to `outputPath`. Fields:
   "verification": {
     "strategy": "test | visual | api",
     "status": "pending",
-    "url": "<optional, only for visual/api; a path or URL, never an HTTP method: /api/x and https://host/x are accepted, POST /api/x and GET x are rejected>",
+    "url": "<optional, set on any story that changes a screen unless its strategy is api; a path or URL, never an HTTP method: /api/x and https://host/x are accepted, POST /api/x and GET x are rejected>",
     "expect": "<optional, natural language expectation>"
   },
   "gate": {
@@ -312,6 +312,8 @@ Emit the measurement in that order — resolve the branch, refuse-if-empty, deri
 | UI component or page | `visual` | `url`, `expect` |
 | Backend logic, CLI helper, library | `test` | `expect` |
 
+A story that changes a screen sets `verification.url` to a `/`-prefixed path (never `//`) or a loopback url, whatever its strategy, except `api`.
+
 ## skills[] inference (file-pattern mapping)
 
 Match each path in `implementation.files` against this table. Collect every match, never the same skill twice, cap at 10:
@@ -402,12 +404,13 @@ When a `<foundation_proposal>` block is present (Phase 1.9's Greenfield Foundati
 
 - **Not your job**: injecting the foundation's assigned `US-NNN` into every *other* story's `dependsOn` is `story-merge --foundation`'s post-merge sweep responsibility, not yours. You may still emit the ordinary `outline:NN` token for the foundation entry when your own dependency reasoning points to it (e.g. a later story building on it) — `story-merge` dedups it against its own injected edge.
 
-## Prototype citations (when prototypePaths non-empty and verification.strategy == "visual")
+## Prototype citations (when prototypePaths non-empty)
 
-The prototype is canonical for visual layout; `DesignSpec.md` is canonical for design tokens, component prop types and interaction states. Every visual-layout AC must include a citation to the specific prototype region. Three valid forms — pick the first that applies:
+The prototype is canonical for visual layout; `DesignSpec.md` is canonical for design tokens, component prop types and interaction states. The citation duty covers every criterion that restates prototype content (a label, a layout, a state, a control), whatever the story's verification strategy. Each such AC must include a citation to the specific prototype region. Valid forms — pick the first that applies:
 
 - View citation (preferred for a sliced block): `(prototype: <relative-path> §<view-name>)`, where `<view-name>` is the `data-view` attribute value of the `<section>` the criterion is about.
 - Heading citation: `(prototype: <relative-path> §<heading-text>)`
+- Kind-tagged index entry, for a slice cut by an anchor of the prototype's index: the same § form with the entry's own tag, spelled as the `extract-prototype-sections` anchors are — `(prototype: <relative-path> §id:<id>)`, `§tab:<tab text>` or `§heading:<heading text>`.
 - Line-range fallback: `(prototype: <relative-path>:L<start>-L<end>)` — admissible ONLY when the numbers were counted over the whole file on disk, i.e. over a file you Read yourself from `metadata.prototypePaths`, never over lines counted inside a `<prototype_html>` block in the prompt. Pairing excerpt-relative numbers with `<relative-path>` is unsound: the numbers would be lines of the block you received, not of the file `metadata.prototypePaths` names, and `metadata.prototypePaths` keeps naming the whole file regardless of whether the block you received was sliced.
 
 When AC cites exactly one distinct prototype path, set `implementation.prototypeAnchor` to that path. Otherwise leave `prototypeAnchor` unset.
