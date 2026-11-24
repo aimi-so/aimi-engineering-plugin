@@ -276,6 +276,7 @@ Use the built-in tools for efficient searching:
 - **Read tool**: For reading file contents once located
 - For AST-based code patterns: `ast-grep --lang ruby -p 'pattern'` or `ast-grep --lang typescript -p 'pattern'`
 - Check multiple variations of common file names
+- Describe the code as it is in the working tree. Never read another ref to do it (`git show origin/...`, `git diff origin/...`, a checkout of another branch): the plan records the working tree's HEAD as its base, and a finding taken from another ref describes code the executor will not find.
 - When the caller provides paths, run all Grep and Glob calls with those paths constrained first. Only broaden to repo-wide search if the scoped search returns no results AND the caller's question cannot be answered from scoped findings alone.
 
 **Migration-aware existence checks:**

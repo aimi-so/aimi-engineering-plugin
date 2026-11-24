@@ -53,7 +53,7 @@ These are invoked by commands, not by you.
 
 ---
 
-## Agents (27)
+## Agents (28)
 
 ### Research (8)
 
@@ -68,7 +68,7 @@ These are invoked by commands, not by you.
 | `aimi-foundation-architect` | Proposes a stack-adaptive Clean Architecture foundation for new repositories |
 | `aimi-spec-deriver` | Extracts entities and HTTP endpoints from a repository as evidence-backed records |
 
-### Review (10)
+### Review (11)
 
 | Agent | What it does |
 |-------|--------------|
@@ -81,6 +81,7 @@ These are invoked by commands, not by you.
 | `aimi-agent-native-reviewer` | Whether an agent can still do and know what a change lets a person do and know |
 | `aimi-data-migration-reviewer` | Migrations, backfills, schema drift and deploy-window breaks, in any migration tool |
 | `aimi-deployment-verification-agent` | Whether a risky data change has the checks, queries and rollback it needs |
+| `aimi-usage-validator` | Walks a run's charters through the running product as a persona and returns an evidence-backed verdict block |
 | `aimi-cross-story-auditor` | Audits staged stories for drift between them; writes its patches to the result file it is given |
 
 Every review agent but the auditor ends with the same two sections, how it works and what it returns, so `/aimi:review` can merge and check their findings. See `plugins/aimi-engineering/docs/dev/review.md`.

@@ -107,6 +107,16 @@ Count each status from the JSON:
 - Pending: P
 ```
 
+### Usage Validation
+
+When the `status` JSON carries a top-level `usageValidation`, print one line under Progress and nothing otherwise. In the Phase Detail View the record is the phase's own `usageValidation` from its `roadmap-get` answer instead, since a phase run records it on the roadmap, not in the tasks file:
+
+```
+Usage validation: passed
+Usage validation: FAILING — [reason] (rounds: [rounds], open findings: [count of findings with status open])
+Usage validation: skipped ([kind]) — [reason]
+```
+
 ### Execution Waves
 
 Group stories into waves using topological level assignment:
@@ -169,6 +179,11 @@ Only show stories that have dependents (skip leaf nodes with no downstream).
 
 ### Next Steps
 
+If that record's `status` is `failing`, lead Next Steps with this notice, before any other line:
+```
+Usage validation is failing. /aimi:execute re-validates it. /aimi:open-pr would publish a run whose usage validation is failing.
+```
+
 If there are pending or in_progress stories:
 ```
 Next: Run /aimi:execute to continue execution.
@@ -179,7 +194,9 @@ If there are failed stories:
 Failed stories detected. /aimi:execute does not run them again. To run one again, set it back to pending.
 ```
 
-If all stories complete or skipped:
+If all stories complete or skipped and usage validation is failing, print `All stories ran ([completed]/[total]), but usage validation is failing.` instead of the block below, and keep its two Run lines.
+
+If all stories complete or skipped otherwise:
 ```
 All stories complete! ([completed]/[total])
 
@@ -237,7 +254,8 @@ For each phase, in the order returned by `roadmap-get` (numeric):
      ```
      Show progress as `[completed]/[total]` from the returned counts.
    - If it does NOT appear, the phase is **outline only** — show the literal marker `outline only` instead of a done/total figure.
-5. **Blockers** (only when `phase.status` is neither `completed` nor `cancelled`, and `phase.dependsOn` is non-empty): from the phases array already fetched, list every id in `phase.dependsOn` whose corresponding phase has a `status` that is neither `completed` nor `cancelled`, as `Blocked by: Phase [id] ([name], [status])` — a cancelled dependency satisfies `dependsOn` the same as a completed one, so it is never listed here. Omit this line entirely when every dependency is `completed` or `cancelled` (or `dependsOn` is empty).
+5. **Usage validation** (only when `phase.usageValidation` is present): append ` · usage validation: [phase.usageValidation.status]` to the Status line, upper-cased as `FAILING` when it is `failing`.
+6. **Blockers** (only when `phase.status` is neither `completed` nor `cancelled`, and `phase.dependsOn` is non-empty): from the phases array already fetched, list every id in `phase.dependsOn` whose corresponding phase has a `status` that is neither `completed` nor `cancelled`, as `Blocked by: Phase [id] ([name], [status])` — a cancelled dependency satisfies `dependsOn` the same as a completed one, so it is never listed here. Omit this line entirely when every dependency is `completed` or `cancelled` (or `dependsOn` is empty).
 
 ### Sample Output
 
@@ -246,7 +264,7 @@ For each phase, in the order returned by `roadmap-get` (numeric):
 
 **Branch context:** feat/notification-center
 
-**Phase 1: Foundations** — completed
+**Phase 1: Foundations** — completed · usage validation: passed
   Progress: 4/4 stories done
 
 **Phase 2: Delivery Channels** — in_progress
@@ -317,7 +335,7 @@ Construct the phase's expected tasks path exactly as in the Roadmap Summary's st
   $AIMI_CLI init-session --file [phase-tasks-path]
   $AIMI_CLI status
   ```
-  Follow Step 2's Header, Progress Summary, Execution Waves, Dependency Graph, and Next Steps rendering exactly as documented above, scoped to this phase's stories only — except every wave heading is labeled `Phase [id] · Wave [n]` instead of a bare `Wave [n]` (see the Sample Output above), and its Gate/Verification columns render this phase's own gate states.
+  Follow Step 2's Header, Progress Summary, Usage Validation (from `phase.usageValidation`), Execution Waves, Dependency Graph, and Next Steps rendering exactly as documented above, scoped to this phase's stories only — except every wave heading is labeled `Phase [id] · Wave [n]` instead of a bare `Wave [n]` (see the Sample Output above), and its Gate/Verification columns render this phase's own gate states.
 
 ### Example Invocation
 

@@ -61,6 +61,10 @@ import time
 # one rule and nothing else, and both files import it from there.
 from sanitize import rm_sanitize, rm_sanitize_report
 
+# The usage-validation record (vocabulary, checks, build) is shared with
+# tasks.py's flat writer and owned by neither: usage_record.py holds it.
+import usage_record
+
 # THE TWO RULERS, NOW THAT THE TWO HALVES ARE TWO FIELDS.
 #
 # The description gets rm_sanitize above. The identity gets NOTHING: it is
@@ -4397,7 +4401,9 @@ def _completed_gate_refusals(roadmap_path, doc, phase_id):
             phase_id,
             "no tasks file resolved (tried " + tried + " and " + _phase_dir_path(roadmap_path, phase) + ")",
         )
-        return _completed_gate_visual_refusal(roadmap_path, doc, phase_id, phase)
+        return _completed_gate_visual_refusal(
+            roadmap_path, doc, phase_id, phase
+        ) + _completed_gate_usage_refusal(roadmap_path, doc, phase_id, phase)
 
     lines = []
     # The evidence half of the gate is a PHASE-AGGREGATE question -- a split
@@ -4493,7 +4499,11 @@ def _completed_gate_refusals(roadmap_path, doc, phase_id):
                 " count above zero (" + counts + "); a human records why with"
                 " acknowledge-evidence"
             )
-    return lines + _completed_gate_visual_refusal(roadmap_path, doc, phase_id, phase)
+    return (
+        lines
+        + _completed_gate_visual_refusal(roadmap_path, doc, phase_id, phase)
+        + _completed_gate_usage_refusal(roadmap_path, doc, phase_id, phase)
+    )
 
 
 def op_set_status(argv):
@@ -4830,6 +4840,97 @@ def op_record_visual_gate(argv):
     return 0
 
 
+def _completed_gate_usage_refusal(roadmap_path, doc, phase_id, phase):
+    """The phase-level usage-validation line for the completed gate, or [].
+
+    A stored `failing` record refuses first, whatever the requirement says: a
+    phase whose recipe disappeared, whose config.json became tracked or whose
+    switch was turned off after the real usage run found severe problems must
+    not close with them open. The way out is a decision written with
+    roadmap-record-usage-validation (passed, or a skip a person chose).
+
+    Otherwise the requirement decides: one line when usage validation is owed
+    (usage_validation_requirement answers required) and no passed or skipped
+    record is stored. An absent, malformed or unrecognised record reads as none
+    recorded.
+
+    usage_validation is imported here, never at module scope: it imports this
+    module at its own module scope. A requirement that cannot be computed
+    (Exception or SystemExit, the recipe reader exits 1 on a hand-edited
+    config) draws one advisory and returns [], neither a refusal nor silent.
+    The stored reason is never echoed.
+    """
+    record = phase.get("usageValidation")
+    status = record.get("status") if isinstance(record, dict) else None
+    if status == "failing":
+        return [
+            "  phase " + _num(phase_id) + ": usage validation recorded failing -- the real "
+            "usage run found problems still open; resolve them and re-record with "
+            "roadmap-record-usage-validation (passed, or skipped with a kind and a reason)"
+        ]
+
+    try:
+        import usage_validation
+
+        # The predicate advises about unreadable members itself; the gate's own
+        # per-member loop already said so, so its stderr is discarded.
+        with contextlib.redirect_stderr(io.StringIO()):
+            requirement = usage_validation.usage_validation_requirement(
+                roadmap_path, doc, phase
+            )
+        required = bool(requirement.get("required"))
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 -- degrade audibly, never refuse on an unknown
+        _completed_gate_advise(
+            phase_id, "the usage-validation requirement -- " + type(exc).__name__
+        )
+        return []
+    if not required or status in ("passed", "skipped"):
+        return []
+    return [
+        "  phase " + _num(phase_id) + ": owes usage validation of the delivered surface "
+        "and none is recorded -- record one with roadmap-record-usage-validation"
+    ]
+
+
+def op_record_usage_validation(argv):
+    """The locked write of a phase's usage-validation verdict. Replaces the
+    whole phases[].usageValidation object, except that a stored failing record
+    is kept over an unable-to-evaluate skip and the answer says `kept`. The
+    record's vocabulary, its checks and its build are usage_record.py's,
+    shared with tasks.py's flat writer; every vocabulary rule runs before the
+    document is read, so a refusal never opens roadmap.json."""
+    prefix = "Error: roadmap-record-usage-validation: "
+    path = _flag(argv, "--roadmap")
+    phase_raw = _flag(argv, "--phase")
+    if not path or phase_raw is None:
+        die(
+            "Usage: roadmap.py record-usage-validation --roadmap <path> --phase <id> "
+            "--status <passed|failing|skipped> [--kind <k>] [--reason <text>] "
+            "[--review <path>] [--rounds <n>] [--findings-json <json>]"
+        )
+    request = usage_record.parse_request(argv, prefix)
+
+    doc = read_doc(path, "roadmap-record-usage-validation")
+    phase_id = jq_numbers(json.loads(phase_raw))
+    matches = [p for p in (doc.get("phases") or []) if p.get("id") == phase_id]
+    if not matches:
+        die(prefix + "phase " + phase_raw + " not found in " + path)
+
+    decisions = [usage_record.build_record(request, phase.get("usageValidation")) for phase in matches]
+    if decisions[0][0] == "keep":
+        # A stored failing record survives an unable-to-evaluate skip; the
+        # document is not written (usage_record.py's docstring says why).
+        answer = usage_record.kept_answer(decisions[0][1], request)
+        _emit(dict({"phase": phase_id}, **answer))
+        return 0
+    for phase, (action, record) in zip(matches, decisions):
+        if action == "write":
+            phase["usageValidation"] = record
+    write_doc_atomically(path, doc)
+    _emit({"phase": phase_id, "usageValidation": matches[0]["usageValidation"]})
+    return 0
+
+
 def op_claim(argv):
     """The locked check-and-set: release what is stale, then choose.
 
@@ -5117,6 +5218,7 @@ _OPS = {
     "phase-overlap": op_phase_overlap,
     "record-visual-gate": op_record_visual_gate,
     "visual-gate-required": op_visual_gate_required,
+    "record-usage-validation": op_record_usage_validation,
 }
 
 # The aimi-cli.sh verb each op serves, for the ops whose names differ. Every
@@ -5136,6 +5238,7 @@ _VERB_FOR_OP = {
     "write-handoff": "roadmap-write-handoff",
     "record-visual-gate": "roadmap-record-visual-gate",
     "visual-gate-required": "roadmap-visual-gate-required",
+    "record-usage-validation": "roadmap-record-usage-validation",
     "init-validate": "roadmap-init",
     "init-write": "roadmap-init",
     "amend-validate": "roadmap-amend-phase",

@@ -77,6 +77,7 @@ while IFS= read -r REPO_TOPLEVEL; do
     MERGE_TARGET_ROOT="$REPO_TOPLEVEL"
   fi
 
+  echo "PRE_MERGE_SHA=$(git -C "$MERGE_TARGET_ROOT" rev-parse "$PHASE_BRANCH") $REPO_TOPLEVEL"
   cd "$MERGE_TARGET_ROOT"
   if ! $WORKTREE_MGR merge-all "$@" --into "$PHASE_BRANCH"; then
     MERGE_CONFLICT_TOPLEVEL="$REPO_TOPLEVEL"
@@ -228,9 +229,34 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
 ```
 
+### Integrated Split Check
+
+Reached once the merge block above has exited 0, including after an in-place resolution re-ran it, and before **Clean Up Split Worktrees**. Merging clean, or resolving in place, does not show that one repository's split stories still work together, so check each repository's merged branch the way Step 4 checks a wave. The procedure is `commands/references/execute/wave-reconcile.md`: read it by that path before the first check. This top-level orchestrator never evaluates the Step 4 entry that reads it, so the router carries no Read line for this section.
+
+Order: repositories in `MERGE_REPO_TOPLEVELS` order, then within a repository one check per split file in `SPLIT_PLAN` order. Each check runs the procedure once per file, because story ids restart in every split file and one `wave-verify-commands` call takes one tasks file. Hand it:
+
+- `group_key` is the repository toplevel; `merge_cwd` is that repository's `MERGE_TARGET_ROOT`; `merge_target` is `$PHASE_BRANCH`.
+- `base_sha` is that repository's `PRE_MERGE_SHA` line from the merge block (after an in-place re-run it is the re-run's tip, so the diff stat may be shorter).
+- `WAVE_TASKS_FILE` is the member's own `.file`. Tasks.json `wave` is never read.
+- `merged_stories` are that file's `completed` stories (`$AIMI_CLI status --tasks-file <.file>`), each with its split branch as its worktree name.
+- Evidence comes from each story's persisted `.verification.evidence`, read with `$AIMI_CLI get-story <id> --tasks-file <.file>`: the sub-orchestrators' result payloads are not in this orchestrator's memory.
+- `label` names the repository and the split file, since the procedure uses it in its log path and in a reconcile commit subject.
+
+The skip rule fires only for a single-story file whose split branch tip tree equals `HEAD^{tree}` with evidence exit 0; never for a multi-story file, nor for a repository holding two files.
+
+Every check ends in one printed line naming the repository and the file: `passed`, `skipped`, or `reconciled after N rounds`. When a check in a repository ended reconciled, run that repository's other files' checks once more afterwards, because the reconcile commits changed the branch they had passed on. Each file's rounds stay bounded by the procedure's own limit, and the repeat is a single pass. Otherwise Clean Up Split Worktrees follows.
+
+**INTEGRATION CHECK FAILED.** The procedure's integration stop runs, with the repository and file named, and Phase Completion is not reached. It differs from a Step 4 wave and from the MERGE CONFLICT stop above:
+
+- Every split story is already complete in its own file, so no story state changes.
+- The split worktrees and branches are kept; Clean Up Split Worktrees does not run.
+- The claim release belongs to the stop itself; none is added here.
+- The report lists the repositories already checked and those not yet checked.
+- A re-run re-issues every merge ("Already up to date") and repeats the checks.
+
 ### Clean Up Split Worktrees
 
-Only reached once **every** repository's `merge-all` call above has succeeded. Iterates per repository — stopping each split's own dev server, then removing its worktree — never a single flat loop over every active split branch with CWD fixed at one repository's path:
+Only reached once **every** repository's `merge-all` call above has succeeded and the **Integrated Split Check** has ended without the stop. Iterates per repository — stopping each split's own dev server, then removing its worktree — never a single flat loop over every active split branch with CWD fixed at one repository's path:
 
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)

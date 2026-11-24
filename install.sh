@@ -396,8 +396,8 @@ The model SELECTION must happen at the LLM-orchestrator layer using the question
    - "Modelo para tarefas de pesquisa/leitura (research)?" — suggested default: an Anthropic Haiku model id from `opencode models`
    - "Modelo para revisão e análise (review)?" — suggested default: an Anthropic Opus model id
    - "Modelo para tarefas de design (design)?" — suggested default: an Anthropic Sonnet model id
-   - "Modelo para tarefas de workflow (workflow)?" — suggested default: an Anthropic Sonnet model id
-   - "Modelo para sub-orquestradores de execução (executor)?" — suggested default: an Anthropic Sonnet model id
+   - "Modelo para tarefas de workflow, incluindo sub-orquestradores de execução (workflow)?" — suggested default: an Anthropic Sonnet model id
+   - "Modelo para os workers de story que editam código (executor)?" — suggested default: an Anthropic Sonnet model id
 3. Run `$AIMI_CLI detect-models --research <chosen_research> --review <chosen_review> --design <chosen_design> --workflow <chosen_workflow> --executor <chosen_executor>` with the user'\''s picks to write the config.
 4. Re-run `$AIMI_CLI resolve-models` to refresh the model variables.
 
@@ -426,9 +426,15 @@ Some spawn sites also carry an effort annotation, either bracketed `[effort: <AG
 - Never append the variant to the model string and never pass an `effort` argument; aimi-task has only `variant`.
 - If aimi-task reports a variant failure, report it to the user. Do not retry the spawn without the variant.
 
-For `Task(subagent_type="general", model: ...)` spawns (the parallel sub-orchestrators and per-story executor of /aimi:execute), route through **aimi-task** using `$EXECUTOR_MODEL` as the model, since the native `task` tool ignores per-call `model:` arguments:
+For `Task(subagent_type="general", model: ...)` spawns of /aimi:execute, route through **aimi-task**, since the native `task` tool ignores per-call `model:` arguments. Take the model and variant from the category the spawn'\''s own `model:` annotation names: `AGENT_MODELS.workflow` (the split sub-orchestrators) uses `$WORKFLOW_MODEL` and `$WORKFLOW_EFFORT`; `AGENT_MODELS.executor` (the story workers) uses `$EXECUTOR_MODEL` and `$EXECUTOR_EFFORT`:
 
 ```
+aimi-task(
+  subagent_type="general",
+  model="[$WORKFLOW_MODEL, omit if inherit]",
+  variant="[$WORKFLOW_EFFORT, omit if inherit or when model is omitted]",
+  prompt="[original task prompt]"
+)
 aimi-task(
   subagent_type="general",
   model="[$EXECUTOR_MODEL, omit if inherit]",
@@ -471,6 +477,9 @@ REFERENCE_ALLOWLIST_FULL=(
   # plan/*.md is a glob so split files added later need no edit here; they
   # carry inline CLI resolution moved out of plan.md.
   "plan/*.md"
+  # brainstorm/*.md carries the brainstorm steps and phases moved out of
+  # brainstorm.md, pickers and inline CLI resolution included.
+  "brainstorm/*.md"
   # execute/*.md carries the execute flow moved out of execute.md, pickers and
   # inline CLI resolution included; the glob needs no edit for later splits.
   "execute/*.md"

@@ -9,6 +9,7 @@
 wave = 1
 DESIGN_REVIEW_BUFFERS = {}  # key: story_id, value: {title, output}; populated by post-merge design reviewer
 CONSOLE_BUFFER = {}         # key: story_id, value: ATTRIBUTION object; populated by post-merge console capture (see Console Error Attribution section)
+STAGE = {}                  # key: group_key, value: verify-stage-declared's answer, read once per run (see Stage Declaration)
 
 # WAVE_TASKS_FILE — this run's own tasks file (PHASE_TASKS_PATH in phase mode, else TASKS_PATH,
 # both already resolved here, a split sub-orchestrator's included). Every CLI call in this
@@ -141,6 +142,23 @@ while true:
             project_roots[group_key] = AIMI_ROOT / group_key  (resolve to absolute path)
 
     # ========================================
+    # STAGE DECLARATION — once per group per run
+    # ========================================
+    # Stories of one wave verify side by side, and a worktree does not isolate a test database,
+    # a fixed container name or a port. A project that declared verifyStage leaves those checks
+    # to the integrated check after the merge; one that never answered is told how, once.
+    for group_key in project_groups:
+        project = "." if group_key == "DEFAULT" else group_key
+        if group_key not in STAGE:
+            STAGE[group_key] = $AIMI_CLI verify-stage-declared --project [project]   # {"project","staged","declared"}
+            # A non-zero exit: show its line and store {staged: false, declared: true}, so no notice
+            # is added on top of a refusal.
+        n = len(project_groups[group_key])
+        if STAGE[group_key].declared is false and n >= 2 and not STAGE[group_key].noticed:
+            STAGE[group_key].noticed = true   # the first wave with two or more of its stories, once per run
+            Report: "[group_key]: [n] stories run their checks at the same time, each in its own worktree. Checks that share one test database, container or port can collide. To run those once, after this wave's merge: add {\"verifyStage\": {\"[project]\": true}} to .aimi/config.json, and make those checks exit 0 early when AIMI_VERIFY_STAGE is worktree. {\"[project]\": false} turns this notice off."
+
+    # ========================================
     # DERIVE EXEC_ROOT / EXEC_BRANCH PER PROJECT GROUP — see container-execution.md's
     # Execution Context. The only PHASE_MODE/CONTAINER_MODE check in the loop; every
     # consumer below reads EXEC_ROOT[group_key]/EXEC_BRANCH[group_key].
@@ -265,6 +283,7 @@ while true:
                 - VISUAL_VERIFICATION = post-merge  ← every worktree story: the dev server cannot see
                   worktree changes, so visual verification runs after merge-all instead
                 - HEADED_MODE: never for a worktree story, for the same reason
+                - VERIFY_STAGE = worktree  ← only when STAGE[wt.group_key].staged is true (Stage Declaration above)
         )
 
     # All Tasks return in the same turn. Collect results.
@@ -433,6 +452,7 @@ while true:
     # Merge successful worktrees grouped by project.
     # Each project group merges independently into its own repo's branch.
 
+    integrated_checks = []
     if len(succeeded_stories) > 0:
         # Group succeeded stories by project
         succeeded_by_project = {}
@@ -461,10 +481,12 @@ while true:
             unresolved_reason = "merge did not start"   # merge-all printed git's own reason, no conflicted file
             while merge_result is non-zero and `git -C [merge_cwd] diff --name-only --diff-filter=U` lists files:
                 conflicted = that list
+                Run bookkeeping-resolve.md's pass now, before any judgment: it resolves declared files, may stop, and leaves
+                judged = conflicted minus its resolved paths.
                 involved = the story merge-all stopped at, plus each story of this wave already merged into
                            [merge_target] whose implementation.files names a file in conflicted
                 Read each involved story with `$AIMI_CLI get-story [id] --tasks-file [WAVE_TASKS_FILE]`.
-                Edit each conflicted file in [merge_cwd] so it keeps what every involved story adds; their
+                Edit each [judged] file in [merge_cwd] so it keeps what every involved story adds; their
                 acceptanceCriteria are what the result must satisfy. Stage nothing yet.
                 Run each involved story's implementation.verify from [merge_cwd] (from the project's
                 subfolder inside it when the project is a subfolder of a larger repository).
@@ -513,6 +535,15 @@ while true:
                     $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
 
                 STOP execution.
+
+            # Integrated Wave Check
+            # Read wave-reconcile.md; hand it label "wave [wave]", group_key, merge_cwd, merge_target,
+            # base_sha[group_key], merged_stories = this group's `stories` with their worktree names
+            # (never tasks.json `wave`), WAVE_TASKS_FILE, AIMI_ROOT, PLAN_DISC, result_payload_by_id,
+            # other_groups (from succeeded_by_project and group_key), and machine_resolved.
+            # The integration stop STOPs there: none of this group's stories is marked complete.
+            status = wave-reconcile.md's procedure
+            integrated_checks.append("[group_key]: [status]")
 
             # Merges succeeded for this project group — mark stories complete
             for full_story in stories:
@@ -765,7 +796,13 @@ Output your full structured review under the heading '## Design Implementation R
         wave_summary += ", [len(action_gates)] action gate(s) pending"
     if len(verify_gates) > 0:
         wave_summary += ", [len(verify_gates)] verify gate(s) pending"
+    if len(integrated_checks) > 0:
+        wave_summary += "; integrated check: " + "; ".join(integrated_checks)
     Report: wave_summary
     wave += 1
 ```
 
+
+### Integrated Wave Check
+
+The check runs per project group, right after that group's merge and before that group's `mark-complete` loop, because a stop leaves the group's stories `in_progress` for the re-verify. `wave-verify-commands` lists the commands and `commands/references/execute/wave-reconcile.md` holds the skip rule, the union, the rounds and the stop. The in-place conflict loop's own verifies do not replace it.

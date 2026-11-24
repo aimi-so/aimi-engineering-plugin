@@ -95,7 +95,7 @@ else:
     $WORKTREE_MGR remove [FINALIZE_WORKTREE]
 ```
 
-**The commit is separate and trivially reversible.** It is the branch's last commit, its subject is `metadata.finalize.commitSubject` and nothing else, and `FINALIZE_COMMIT` carries its sha into the report so a reader has the one argument `git revert` needs. No story commit is touched, amended, reordered or rewritten by any path in this section — the executor above is told so explicitly, and this section never calls anything that could.
+**The commit is separate and trivially reversible.** Its subject is `metadata.finalize.commitSubject` and nothing else; usage-validation fix commits may follow it on the branch, and `FINALIZE_COMMIT` still names the one sha a reader needs for `git revert`, carried into the report. No story commit is touched, amended, reordered or rewritten by any path in this section — the executor above is told so explicitly, and this section never calls anything that could.
 
 **Nothing here can fail the run, and that is a rule rather than a default.** `FINALIZE_STATUS` takes exactly one of `ran`, `skipped` or `failed`; `failed` is reported and never propagated to `/aimi:execute`'s own exit status, and no branch of this section aborts the command. By the time it runs, every story has already been executed, verified and merged: turning a whole completed run red over a version bump would throw away work that is finished and correct, and would leave the operator with a branch that is fine and a command that says otherwise. A `failed` finalize is a line in the report and a worktree left in place to retry from.
 

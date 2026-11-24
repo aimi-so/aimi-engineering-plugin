@@ -1173,8 +1173,8 @@ GATE_LITERALS
 #
 # install.sh runs the full command-body rewrite, which is what turns the
 # picker's tool name into OpenCode's equivalent, over a command body and over
-# the subtrees named in REFERENCE_ALLOWLIST_FULL (references/plan/ and
-# references/execute/). Every other reference file gets at most the
+# the subtrees named in REFERENCE_ALLOWLIST_FULL (references/plan/,
+# references/execute/ and references/brainstorm/). Every other reference file gets at most the
 # host-literal rewrite or none. A picker is therefore placed in a command body
 # or in one of those subtrees, never in another reference file. That is why
 # story 05 moved this one question up into the command body, and why 11a
@@ -1211,7 +1211,7 @@ CONTAINER_LITERALS
 
   assert_no_findings "$(printf '%s' "$body")" \
     "Check 11a — the flat-container push question lives in execute.md's completion branch" \
-    "A picker belongs in a command body or in a REFERENCE_ALLOWLIST_FULL subtree (references/plan/, references/execute/); elsewhere install.sh does not run the full rewrite and it can reach OpenCode naming a tool that host does not have."
+    "A picker belongs in a command body or in a REFERENCE_ALLOWLIST_FULL subtree (references/plan/, references/execute/, references/brainstorm/); elsewhere install.sh does not run the full rewrite and it can reach OpenCode naming a tool that host does not have."
 
   region="$(md_section "$ref" "$CONTAINER_PUSH_REF_SECTION")"
   if [ -z "$region" ]; then
@@ -1395,19 +1395,19 @@ check_references_carry_no_picker() {
     find "$COMMANDS_DIR/references" -name '*.md' | sort | while IFS= read -r f; do
       rel="${f##*/}"
       [ "$rel" = "$PICKER_LITERAL_EXEMPT" ] && continue
-      # references/plan/ and references/execute/ are the subtrees install.sh
+      # references/plan/, references/execute/ and references/brainstorm/ are the subtrees install.sh
       # runs through the full command-body translation (REFERENCE_ALLOWLIST_FULL),
       # so a picker there is rewritten for OpenCode like one in a command body.
       # Placement policy: a picker lives in a command body or in one of those.
       case "$f" in
-        "$COMMANDS_DIR"/references/plan/*|"$COMMANDS_DIR"/references/execute/*) continue ;;
+        "$COMMANDS_DIR"/references/plan/*|"$COMMANDS_DIR"/references/execute/*|"$COMMANDS_DIR"/references/brainstorm/*) continue ;;
       esac
       grep -nF '**AskUserQuestion**' "$f" 2>/dev/null | cut -c1-160 | sed "s|^|references/$rel:|"
     done
   )"
   assert_no_findings "$findings" \
     "Check 14 — no reference file carries picker markup (interactivity.md defines the literal and is exempt)" \
-    "A picker may live in a command body or in a REFERENCE_ALLOWLIST_FULL subtree (references/plan/, references/execute/); this file is in neither. Move it into a command body."
+    "A picker may live in a command body or in a REFERENCE_ALLOWLIST_FULL subtree (references/plan/, references/execute/, references/brainstorm/); this file is in neither. Move it into a command body."
 }
 
 # ---------------------------------------------------------------------------

@@ -2,6 +2,110 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.167.0] - 2026-11-23
+
+A project that never declared stage-aware verification is now told about it at the first wave that runs two or more of its stories side by side.
+
+### Added
+- `/aimi:execute` shows one line per project and run when a wave holds two or more of that project's stories and the project has no `verifyStage` entry in `.aimi/config.json`. The line says that checks sharing one test database, container or port can collide, names the key to add and the `AIMI_VERIFY_STAGE` value those checks read, and says that an entry of `false` turns the line off. It asks nothing and writes nothing.
+
+### Changed
+- `verify-stage-declared` prints `{project, staged, declared}`. `declared` is true when the project has an entry, `false` included, so an explicit `false` reads as an answer rather than as never declared.
+- Step 4 of `/aimi:execute` reads the declaration once per project and run, before the worktrees are created, instead of while the worker prompts are written.
+
+## [1.166.0] - 2026-11-23
+
+Five things a real planning and execution run met: a merge refused after Resolve, an outline edit that changed nothing, a plan written against a branch behind origin without a word, metadata that could only be written by rewriting the whole tasks file, and end-to-end suites colliding when a wave ran them side by side.
+
+### Added
+- `patch-metadata --tasks-file <path> [--from <patch.json>] [--remove <key>]...`, which merges the top-level keys of a JSON object into a tasks file's `metadata` in one crossing inside the lock. It refuses a `branchName` outside the branch pattern and a changed or removed `baseRef`, `pluginVersion`, `roadmapPath` or `phase` the file already holds, and writes nothing when no key changes.
+- `branch-divergence [--branch <name>] [--project <path>]`, a read-only verb that reports how a local branch stands against `origin/<name>` as the last fetch left it, with the commit counts on each side. It never contacts the remote.
+- Stage-aware verification, for a project whose end-to-end checks share one test database, fixed container names or a fixed port. The project declares `{"verifyStage": {"<project key>": true}}` in `.aimi/config.json` and its own command leaves itself out when `AIMI_VERIFY_STAGE` is `worktree`. `/aimi:execute` exports `worktree` to that project's parallel story workers and `merged` in the integrated wave check, and never skips that check for a declared project. `verify-stage-declared` is the reader. See `plugins/aimi-engineering/docs/dev/execute-wave-loop.md` § Stage-aware verification.
+- `/aimi:plan` reads that verb right after its fetch. When the local branch is behind or has diverged, it asks whether to fast-forward, continue or stop (one log line in agent mode) before any research runs. The step lives in `commands/references/plan/step-0-branch-freshness.md`.
+
+### Changed
+- `/aimi:plan` Phase 4 writes metadata through `patch-metadata` and no longer rewrites the tasks file with the Write tool.
+- `outline-shift` lists a kept story for re-expansion when its own `summary` changed, compared as words. Editing only a summary at the gate used to report an empty shift.
+- Edit Outline After Expansion returns to the gate that offered it, with its findings as they were, when the edit changed nothing a story reads, instead of auditing identical stories again.
+- `aimi-codebase-researcher` describes the working tree only and never reads another ref, since the plan records the working tree's HEAD as its base.
+
+### Fixed
+- `story-merge` no longer refuses a run directory after the Unresolved Gate's Resolve option. `audit-resolutions.json`, which Resolve writes there and `apply-audit-patches --resolve` leaves behind, is now skipped as a sidecar.
+
+## [1.165.0] - 2026-11-19
+
+Planning stays faithful to what the operator handed over and decided: a named prototype kit travels from brainstorm into the plan, audit findings are resolved one at a time or reported as open, and a story's files stay inside its own repository.
+
+### Added
+- `inspect-prototype-kit` and `import-prototype-kit` (`scripts/prototype_kit.py`): a zip or folder the brainstorm argument names is checked member by member before anything is written, then copied into `.aimi/sources/<slug>/`; the operator's original is never recorded.
+- The brainstorm records a kit's HTML under `prototype:` and its markdown handoff under the new `prototypeHandoff:` frontmatter key, and `/aimi:plan` loads `prototypeHandoff` as untrusted data for the Phase 1 researchers and the Pass 2 expanders.
+- `commands/brainstorm.md` is a router over `commands/references/brainstorm/`, with `scripts/tests/test_brainstorm_wiring.py` and `scripts/tests/brainstorm_text.py` pinning it, and `brainstorm/*.md` joins the OpenCode reference translation allowlist.
+- `usage-recipe-sources`, which lists each repository's own files that may state how its product comes up, so the recipe confirmation proposes a step from the file that states it and asks an open question only for a step no file states.
+- `apply-audit-patches --resolve`, a mode that appends an operator-confirmed criterion to each story an audit finding names; a finding left open stays open.
+- `metadata.auditOpen` and the `audit-open` verb, which lists the audit findings a plan left open; `/aimi:execute` shows them at the start and asks whether to run anyway.
+- The Prototype-First Options rule in `commands/references/user-communication.md`: a question whose options include the prototype's behaviour recommends it as option A.
+- Cross-repository `implementation.files` entries are an error in `validate-tasks` and a refusal in `story-merge` when the `.aimi` root is not a git repository and the stories tag two or more projects.
+
+### Changed
+- The Phase 3d.5 Unresolved Gate offers Resolve and Defer as open in place of Defer with reason.
+- The split sub-orchestrators of `/aimi:execute` now run on the `workflow` model category instead of `executor`; the story workers they spawn still read `executor`. A user whose `workflow` model is weaker than their `executor` model will see the sub-orchestrators that coordinate a split run on that weaker model, while story workers keep the stronger one. Run `/aimi:setup-models` to change either.
+- `/aimi:setup-models` words the `workflow` question as covering execution sub-orchestrators and the `executor` question as story workers that edit code.
+
+### Fixed
+- A story worker reads a prototype the plan recorded in `metadata.prototypeDropped` instead of refusing to open it. A `no-view-anchors` entry names a single-file prototype the plan did read and still lists in `prototypePaths`, and the worker had been told never to open that path, so screen stories were built from the acceptance criteria's restatement of the prototype rather than from the prototype. The worker now reads such a prototype in full as its layout reference, reads an `aggregate-cap` one in full and reports where the criteria disagree with it, and still never opens a path named only in the record.
+
+## [1.164.0] - 2026-11-17
+
+Files that every story touches by design, such as a changelog or a version manifest, no longer serialize a wave or stop its merge when the project declares them and a rule can reconcile them.
+
+### Added
+- `bookkeeping-declared`, a read-only verb that prints a project's declared bookkeeping paths and rules from the untracked `.aimi/config.json`.
+- `bookkeeping-resolve`, a writer that resolves declared, conflicted files mid-merge by rule (`union-lines`, `max-version`, `sum-delta`, `size-step`), writing all resolved files in one pass or none and leaving unclaimed files conflicted.
+- `commands/references/execute/bookkeeping-resolve.md`, the step that runs the resolver before the judgment loop of the wave merge and reports each resolution.
+- `docs/dev/bookkeeping.md`, and a section in `docs/dev/execute-wave-loop.md` on the loop ordering.
+
+### Changed
+- `wave_contention` and the cross-story auditor ignore declared bookkeeping paths when deciding which stories share a file.
+- The reconcile loop is told which files were machine-resolved and does not hand-edit them.
+
+## [1.163.0] - 2026-11-17
+
+A clean merge of a wave is now checked as a whole before any of its stories is marked complete, so two stories that merge without a conflict but break each other are caught at the wave that caused it.
+
+### Added
+- The integrated wave check: after each project group's merge, `/aimi:execute` runs the union of the merged stories' verify commands on the merged tree, in Step 4, after a paired split merge, and on resume.
+- `wave-verify-commands`, which prints the deduplicated verify commands of a set of stories with the stories that own each.
+- The INTEGRATION CHECK FAILED stop, which prints `PRE_RECONCILE_SHA` and its reset command, keeps the group's worktrees and branches, and leaves the stories `in_progress`.
+- Up to 2 reconcile rounds with a flaky-command filter, and a re-verify on resume for stories an integration stop left merged but unchecked.
+- `docs/dev/execute-wave-loop.md` gains an Integrated wave verification section.
+
+### Changed
+- A story merged in a wave is marked complete only after the integrated check passes or is skipped for a lone verified story.
+
+## [1.162.0] - 2026-11-15
+
+A run that delivered a usable surface is now judged by using it. After a phase's Phase Visual Gate, or after a flat run's Finalize, a validator brings the product up from a recorded recipe and walks each acceptance criterion through it with proof for what it reports.
+
+### Added
+- `aimi-usage-validator`, a review-category agent that walks usage charters as a persona and answers with a `usage_validation_verdict` block. Every finding of severity 3 or 4 cites a saved artifact.
+- `roadmap-record-usage-validation` and the `phases[].usageValidation` record, plus `usage-validation-record` and `metadata.usageValidation` for a flat run; `usage-validation-required` and `usage-validation-verdict` decide whether validation is owed and what its outcome is.
+- `usage-recipe-record` and `usage-recipe-get` store how a product comes up; `usage-env-up`, `usage-env-status` and `usage-env-down` run and stop it. `/aimi:plan` declares `metadata.usageSurfaces` and asks for the recipe once per project.
+- The skip kinds `not-applicable`, `unable-to-evaluate` and `disabled-by-operator`, and the `AIMI_USAGE_VALIDATION=off` switch, which records `disabled-by-operator`.
+- `docs/dev/usage-validation.md` documents the flow, the verbs, the records and the answer to the new-gate question.
+- `usage-validation-get` prints where a run's usage record lives and the record itself (`{scope, feature, phase, record}`); the gate, Step 5 and `/aimi:open-pr` read it instead of their own queries.
+- The verdict lists a severe finding with no evidence file under `unevidenced`, capped at severity 2: it never blocks and goes to a person.
+
+### Changed
+- Both usage record writers (`roadmap-record-usage-validation`, `usage-validation-record`, sharing `scripts/usage_record.py`) keep a stored `failing` record against a `skipped` or `unable-to-evaluate` one and answer `{"kept":"failing",...}`, and the completed-phase gate keeps refusing a failing phase whether or not it still owes validation.
+- `usage-env-down` and the detached runner no longer trust `.aimi/state/usage-env/<run>.json`: the manager comes from the wrapper, the cleanup steps are re-read from the trusted recipe, paths are confined, a git-tracked state file is refused (by `usage-env-status` too) and the runner pid is checked before a signal. `usage-env-up` reads the recipe in-process, validates `--repo` paths and waits up to 480 seconds.
+- One loopback rule (`is_loopback_origin` in `usage_recipe.py`) decides every origin; `usage-env-status` prints `origins`, each repository's `loginUrl` and `originsRefused`. `worktree-manager.sh serve status` answers `{running, port, pid, command}`.
+- A phase's usage fix round merges into the phase container, not the toplevel. The validator gets `WORKDIRS` (each project's checkout and recipe `cli` command) for cli charters, the fix executor gets `PROJECT_GUIDELINES`, and a failing record leads the `/aimi:open-pr` body.
+- `/aimi:status` shows a phase's usage validation in its phase view and its roadmap row, and does not print "All stories complete!" while usage validation is failing.
+- `roadmap-set-status --status completed` refuses a phase that owes usage validation with no `passed` or `skipped` record; `archive-task` refuses a failing flat run; `/aimi:execute` Step 5 holds the push on a failing record and `/aimi:open-pr` prints the stored verdict.
+- `hooks/auto-approve-cli.sh` admits the read-only `usage-recipe-get`, `usage-env-status`, `usage-validation-required`, `usage-validation-verdict` and `usage-validation-get`; the verbs that run a recipe command or write state still prompt.
+- `test-install-opencode.sh` pins the validator's OpenCode install: an explicit permission block, no `tools` key, and its Chrome tool pattern dropped with a skip warning.
+- README and `docs/agents-and-skills.md` counts, and `docs/commands.md` (a Usage validation subsection under `/aimi:execute`), follow the files on disk.
+
 ## [1.161.0] - 2026-11-13
 
 Each agent category can carry a reasoning effort beside its model, delivered at every spawn. Unset means `inherit`, so a `models.json` written before this release behaves exactly as before.

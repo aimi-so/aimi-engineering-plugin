@@ -85,8 +85,8 @@ For each active split file (loop over PHASE_ACTIVE_SPLIT_FILES, all Task( calls 
 
 Task(
     subagent_type: "general-purpose",
-    model: <AGENT_MODELS.executor when not "inherit">,
-    effort: <AGENT_EFFORTS.executor when not "inherit">,
+    model: <AGENT_MODELS.workflow when not "inherit">,
+    effort: <AGENT_EFFORTS.workflow when not "inherit">,
     description: "Execute split for phase [PHASE_ID]: [split_file basename]",
     prompt: [
         SPAWNED_SPLIT_TASK=phase-split-sub-orchestrator

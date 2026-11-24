@@ -21,6 +21,9 @@ PENDING=$($AIMI_CLI count-pending --tasks-file "$RUN_TASKS_FILE")
 echo "PENDING=$PENDING"
 if [ "$PENDING" != "0" ]; then
   $AIMI_CLI validate-deps --tasks-file "$RUN_TASKS_FILE" || echo "VALIDATE_DEPS=failed"
+elif [ "$PHASE_MODE" != "true" ]; then
+  USAGE_STORED=$($AIMI_CLI usage-validation-get --tasks-file "$RUN_TASKS_FILE" | jq -r '.record.status // "none"' 2>/dev/null) || USAGE_STORED="none"
+  echo "USAGE_STORED=${USAGE_STORED:-none}"
 fi
 ```
 
@@ -57,6 +60,15 @@ loop (nothing to execute) and continuing straight to phase verification.
 
 This mirrors an already-supported route rather than inventing a new one: Phase-Mode Paired Split already continues to Phase Completion with `PHASE_ACTIVE_COUNT` of `0` — every member already completed, nothing spawned — precisely because Phase Completion is what re-runs the pending-count and creates-verification checks. This branch extends that same behavior to the non-split path. Condition 4 is belt-and-braces: a split phase's top-level orchestrator never reaches Step 3 at all (Step 1.7 routes `PHASE_SPLIT_MODE=true` to Phase-Mode Paired Split instead of Step 2), so the load-bearing conditions here are 3 and 5.
 
+**Re-validate branch — a flat run whose usage validation is stored `failing` with nothing left to execute.** Evaluate it right after the Re-verify branch and before the release-and-STOP below. It fires only when `count-pending` returned `0`, `PHASE_MODE=false` and the block above printed `USAGE_STORED=failing`. A `passed`, `skipped` or absent record keeps the release-and-STOP path unchanged, and a phase's Re-verify branch is untouched. When it fires, report the block below, then **skip Validate Dependencies, Steps 3.1 to 3.4, the wave loop, Post-Loop Cleanup and Finalize**, and continue into the **Flat Usage Validation Step**, which runs again with the server restarted. This block counts as the Re-verify block for every `Applies when:` line that names it.
+
+```
+Plan has 0 pending stories but its usage validation is recorded failing.
+
+Re-validating instead of stopping. Skipping the wave loop (nothing to
+execute) and running usage validation again.
+```
+
 **When `PHASE_MODE=true` and `$PHASE_ID` is set** (this session itself ran Step 1.7 — never true inside a Phase-Mode Paired Split sub-orchestrator, which never learns `$PHASE_ID`), release the claim first (see Release the Claim on Abort):
 
 ```bash
@@ -89,6 +101,8 @@ Dependency validation failed:
 
 Fix the dependency graph in the tasks file and re-run /aimi:execute.
 ```
+
+When Step 1 echoed a non-empty INTEGRATED_UNCHECKED, run the Integrated Re-verify on Resume section of `commands/references/execute/step-1-execution-mode.md` here, resolving `$WORKTREE_MGR` as Step 3.1 does. It runs here because it needs the claim, the branches Step 2 set up and `$WORKTREE_MGR`, and it must end before Step 4's first `list-ready`: that verb skips an `in_progress` story that `count-pending` still counts, so the wave loop would read it as a deadlock. Use the re-read `count-pending` for the start report below.
 
 Report start:
 ```

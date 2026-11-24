@@ -5202,3 +5202,293 @@ def test_phase_relevance_text_is_empty_for_a_bad_document_or_an_unknown_phase(tm
 
 def test_phase_relevance_text_is_empty_without_a_roadmap(tmp_path):
     assert R.phase_relevance_text(str(tmp_path / "roadmap.json"), "phase-1") == ""
+
+
+# ---------------------------------------------------------------------------
+# usage validation: roadmap-record-usage-validation and the completed gate
+# ---------------------------------------------------------------------------
+
+_UV_WEB = {"kind": "web", "stories": ["US-001"], "url": "/dash"}
+
+
+def _uv_cli(root, env, *args):
+    return subprocess.run(["bash", os.path.join(SCRIPTS, "aimi-cli.sh"), *args], cwd=root,
+                          capture_output=True, text=True, timeout=120, env=env)
+
+
+def _uv_fixture(tmp_path, recipe=True, record=None, surfaces=True, env_extra=None):
+    """A phase that owes usage validation when `recipe` and `surfaces` hold.
+    Asserts `required` itself, so a closes-case cannot pass vacuously."""
+    stories = [dict(_story("US-001", "passed"), verification={
+        "strategy": "visual", "status": "passed", "url": "/dash", "evidence": {"discriminating": 1}})]
+    root, env, feature = _gate_fixture(
+        tmp_path, stories,
+        metadata_extra={"usageSurfaces": [_UV_WEB] if surfaces else []},
+        phase_extra={"usageValidation": record} if record is not None else None,
+    )
+    env = dict(env)
+    env.pop("AIMI_USAGE_VALIDATION", None)
+    env.update(env_extra or {})
+    if recipe:
+        r = _uv_cli(root, env, "usage-recipe-record", "--project", ".", "--serve", "npm run dev", "--ready", "/")
+        assert r.returncode == 0, r.stderr
+    answer = _uv_cli(root, env, "usage-validation-required", "--feature", feature, "--phase", "1")
+    assert answer.returncode == 0, answer.stderr
+    owed = json.loads(answer.stdout)["required"]
+    return root, env, feature, owed
+
+
+def _uv_record(root, env, feature, *flags, phase="1"):
+    return _uv_cli(root, env, "roadmap-record-usage-validation", "--feature", feature,
+                   "--phase", phase, *flags)
+
+
+def _uv_phase(root, feature):
+    with open(os.path.join(root, ".aimi", "tasks", feature, "roadmap.json"), encoding="utf-8") as handle:
+        return json.load(handle)["phases"][0]
+
+
+def _uv_bytes(root, feature):
+    with open(os.path.join(root, ".aimi", "tasks", feature, "roadmap.json"), "rb") as handle:
+        return handle.read()
+
+
+def test_usage_validation_owed_with_no_record_refuses_even_with_force(tmp_path):
+    root, env, feature, owed = _uv_fixture(tmp_path)
+    assert owed is True
+    for force in (False, True):
+        proc = _close(root, env, feature, force=force)
+        assert proc.returncode != 0
+        assert "roadmap-record-usage-validation" in proc.stderr
+        assert "none is recorded" in proc.stderr
+        assert "failing" not in proc.stderr
+        assert _stored_status(root, feature) == "in_progress"
+
+
+def test_usage_validation_recorded_failing_refuses_in_other_words(tmp_path):
+    root, env, feature, owed = _uv_fixture(
+        tmp_path, record={"status": "failing", "reason": "SECRET-REASON", "rounds": 1, "recordedAt": "2020-01-01T00:00:00Z"})
+    assert owed is True
+    proc = _close(root, env, feature, force=True)
+    assert proc.returncode != 0
+    assert "recorded failing" in proc.stderr and "roadmap-record-usage-validation" in proc.stderr
+    assert "none is recorded" not in proc.stderr
+    assert "SECRET-REASON" not in proc.stderr
+    assert _stored_status(root, feature) == "in_progress"
+
+
+def test_usage_validation_closes_once_passed_or_skipped_is_recorded_through_the_verb(tmp_path):
+    for flags in (("--status", "passed"),
+                  ("--status", "skipped", "--kind", "unable-to-evaluate", "--reason", "no browser")):
+        root, env, feature, owed = _uv_fixture(tmp_path / flags[1])
+        assert owed is True
+        assert _close(root, env, feature).returncode != 0
+        rec = _uv_record(root, env, feature, *flags)
+        assert rec.returncode == 0, rec.stderr
+        proc = _close(root, env, feature)
+        assert proc.returncode == 0, proc.stderr
+        assert _stored_status(root, feature) == "completed"
+
+
+_NOT_OWED = [
+    ("no-recipe", {"recipe": False}),
+    ("no-surface", {"surfaces": False}),
+    ("switch-off", {"env_extra": {"AIMI_USAGE_VALIDATION": "off"}}),
+]
+
+
+@pytest.mark.parametrize("label,kwargs", _NOT_OWED)
+@pytest.mark.parametrize("record", [
+    None,
+    {"status": "passed", "rounds": 0},
+    {"status": "skipped", "kind": "not-applicable", "reason": "x"},
+    {"status": "bogus"},
+])
+def test_a_phase_not_owing_usage_validation_closes_unless_failing_is_recorded(tmp_path, label, kwargs, record):
+    root, env, feature, owed = _uv_fixture(tmp_path, record=record, **kwargs)
+    assert owed is False
+    proc = _close(root, env, feature)
+    assert proc.returncode == 0, proc.stderr
+    assert _stored_status(root, feature) == "completed"
+
+
+@pytest.mark.parametrize("label,kwargs", _NOT_OWED)
+def test_a_recorded_failing_refuses_completed_whatever_the_requirement_says(tmp_path, label, kwargs):
+    """A stored failing record is checked before the requirement: a phase whose
+    recipe disappeared, whose surfaces were dropped or whose switch was turned
+    off after the real usage run found severe problems cannot close with those
+    problems open. The way out is a human decision written with the verb."""
+    root, env, feature, owed = _uv_fixture(
+        tmp_path, record={"status": "failing", "reason": "SECRET-REASON", "rounds": 1}, **kwargs)
+    assert owed is False
+    for force in (False, True):
+        proc = _close(root, env, feature, force=force)
+        assert proc.returncode != 0
+        assert "recorded failing" in proc.stderr and "SECRET-REASON" not in proc.stderr
+        assert _stored_status(root, feature) == "in_progress"
+    rec = _uv_record(root, env, feature, "--status", "skipped", "--kind", "disabled-by-operator", "--reason", "decided")
+    assert rec.returncode == 0, rec.stderr
+    assert _close(root, env, feature).returncode == 0
+    assert _stored_status(root, feature) == "completed"
+
+
+def test_a_recorded_failing_refuses_even_when_the_requirement_cannot_be_computed(monkeypatch, capsys):
+    import usage_validation
+
+    def boom(*_a):
+        raise SystemExit(1)
+
+    monkeypatch.setattr(usage_validation, "usage_validation_requirement", boom)
+    lines = R._completed_gate_usage_refusal("/x/roadmap.json", {}, 1, {"id": 1, "usageValidation": {"status": "failing"}})
+    assert len(lines) == 1 and "recorded failing" in lines[0]
+    assert "could not judge" not in capsys.readouterr().err
+
+
+def test_record_keeps_a_stored_failing_record_over_an_unable_to_evaluate_skip(tmp_path):
+    root, env, feature, _ = _uv_fixture(tmp_path, recipe=False)
+    first = _uv_record(root, env, feature, "--status", "failing", "--reason", "open bug",
+                       "--findings-json", json.dumps({"a:1:H1": {"status": "open"}}))
+    assert first.returncode == 0, first.stderr
+    before = _uv_bytes(root, feature)
+    kept = _uv_record(root, env, feature, "--status", "skipped", "--kind", "unable-to-evaluate", "--reason", "env down")
+    assert kept.returncode == 0, kept.stderr
+    answer = json.loads(kept.stdout)
+    assert answer["kept"] == "failing" and answer["phase"] == 1
+    assert answer["usageValidation"]["status"] == "failing" and answer["usageValidation"]["reason"] == "open bug"
+    assert _uv_bytes(root, feature) == before
+
+
+@pytest.mark.parametrize("flags", [
+    ("--status", "passed"),
+    ("--status", "failing", "--reason", "new"),
+    ("--status", "skipped", "--kind", "disabled-by-operator", "--reason", "decided"),
+    ("--status", "skipped", "--kind", "not-applicable", "--reason", "nothing to use"),
+])
+def test_record_overwrites_a_stored_failing_record_with_a_judged_or_chosen_verdict(tmp_path, flags):
+    root, env, feature, _ = _uv_fixture(tmp_path, recipe=False)
+    assert _uv_record(root, env, feature, "--status", "failing", "--reason", "open bug").returncode == 0
+    proc = _uv_record(root, env, feature, *flags)
+    assert proc.returncode == 0, proc.stderr
+    assert "kept" not in json.loads(proc.stdout)
+    assert _uv_phase(root, feature)["usageValidation"]["status"] == flags[1]
+
+
+def test_an_uncomputable_requirement_draws_an_advisory_and_does_not_refuse(tmp_path, monkeypatch, capsys):
+    import usage_validation
+
+    def boom(*_a):
+        raise SystemExit(1)
+
+    monkeypatch.setattr(usage_validation, "usage_validation_requirement", boom)
+    assert R._completed_gate_usage_refusal("/x/roadmap.json", {}, 1, {"id": 1}) == []
+    err = capsys.readouterr().err
+    assert err.count("Advisory: roadmap-set-status: phase 1 completed-gate could not judge") == 1
+
+    def raises(*_a):
+        raise ValueError("nope")
+
+    monkeypatch.setattr(usage_validation, "usage_validation_requirement", raises)
+    assert R._completed_gate_usage_refusal("/x/roadmap.json", {}, 1, {"id": 1}) == []
+    assert "could not judge" in capsys.readouterr().err
+
+
+def test_gate_refusal_is_called_at_both_return_sites():
+    import inspect as _inspect
+    assert _inspect.getsource(R._completed_gate_refusals).count("_completed_gate_usage_refusal(") == 2
+
+
+def test_record_usage_validation_shape_defaults_and_overwrite(tmp_path):
+    root, env, feature, _ = _uv_fixture(tmp_path, recipe=False)
+    first = _uv_record(root, env, feature, "--status", "passed")
+    assert first.returncode == 0, first.stderr
+    record = _uv_phase(root, feature)["usageValidation"]
+    assert list(record) == ["status", "rounds", "recordedAt"] and record["rounds"] == 0
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", record["recordedAt"])
+    assert json.loads(first.stdout) == {"phase": 1, "usageValidation": record}
+    second = _uv_record(root, env, feature, "--status", "skipped", "--kind", "not-applicable",
+                        "--reason", "no ui", "--review", "r.md", "--rounds", "2")
+    assert second.returncode == 0, second.stderr
+    record = _uv_phase(root, feature)["usageValidation"]
+    assert list(record) == ["status", "kind", "reason", "review", "rounds", "recordedAt"]
+    assert record["rounds"] == 2 and record["kind"] == "not-applicable"
+
+
+@pytest.mark.parametrize("flags,needle", [
+    (["--bogus"], "unknown flag: --bogus"),
+    ([], "--status"),
+    (["--status", "nope"], "--status"),
+    (["--status", "passed", "--kind", "not-applicable"], "--kind"),
+    (["--status", "skipped"], "--kind"),
+    (["--status", "skipped", "--kind", "bad", "--reason", "r"], "--kind"),
+    (["--status", "failing"], "--reason"),
+    (["--status", "skipped", "--kind", "not-applicable", "--reason", "  "], "--reason"),
+    (["--status", "passed", "--rounds", ""], "--rounds"),
+    (["--status", "passed", "--rounds", "x"], "--rounds"),
+    (["--status", "passed", "--rounds", "-1"], "--rounds"),
+    (["--status", "passed", "--findings-json", "{bad"], "--findings-json"),
+    (["--status", "passed", "--findings-json", '{"k":{"status":"accepted"}}'], "--findings-json"),
+    (["--status", "passed", "--findings-json", '{"-bad":{"status":"open"}}'], "--findings-json"),
+    (["--status", "passed", "--review", "../../etc/passwd"], ""),
+])
+def test_record_usage_validation_refusals_leave_the_roadmap_byte_identical(tmp_path, flags, needle):
+    root, env, feature, _ = _uv_fixture(tmp_path, recipe=False)
+    before = _uv_bytes(root, feature)
+    proc = _uv_record(root, env, feature, *flags)
+    assert proc.returncode == 1
+    assert needle in proc.stderr
+    if "--bogus" in flags or "--review" not in flags:
+        assert "Error: roadmap-record-usage-validation:" in proc.stderr
+    assert _uv_bytes(root, feature) == before
+
+
+def test_record_usage_validation_refuses_bad_phase_ids(tmp_path):
+    root, env, feature, _ = _uv_fixture(tmp_path, recipe=False)
+    before = _uv_bytes(root, feature)
+    proc = _uv_record(root, env, feature, "--status", "passed", phase="abc")
+    assert proc.returncode == 1 and "numeric phase id" in proc.stderr
+    proc = _uv_record(root, env, feature, "--status", "passed", phase="9")
+    assert proc.returncode == 1
+    assert "phase 9 not found in " + os.path.join(root, ".aimi", "tasks", feature, "roadmap.json") in proc.stderr
+    assert _uv_bytes(root, feature) == before
+
+
+def test_record_usage_validation_findings_merge_carries_accepted_only(tmp_path):
+    root, env, feature, _ = _uv_fixture(tmp_path, recipe=False)
+    first = _uv_record(root, env, feature, "--status", "failing", "--reason", "r", "--findings-json", json.dumps({
+        "a:1:H1": {"status": "accepted", "reason": "known"},
+        "b:1:H2": {"status": "open"},
+        "c:1:H3": {"status": "fixed"}}))
+    assert first.returncode == 0, first.stderr
+    second = _uv_record(root, env, feature, "--status", "failing", "--reason", "r2", "--findings-json", json.dumps({
+        "d:1:H4": {"status": "open"}}))
+    assert second.returncode == 0, second.stderr
+    findings = _uv_phase(root, feature)["usageValidation"]["findings"]
+    assert list(findings) == ["d:1:H4", "a:1:H1"]
+    assert findings["a:1:H1"] == {"status": "accepted", "reason": "known"}
+    third = _uv_record(root, env, feature, "--status", "passed", "--findings-json", "{}")
+    assert list(_uv_phase(root, feature)["usageValidation"]["findings"]) == ["a:1:H1"]
+    assert third.returncode == 0
+    wiped = _uv_record(root, env, feature, "--status", "passed", "--findings-json",
+                       json.dumps({"a:1:H1": {"status": "fixed"}}))
+    assert _uv_phase(root, feature)["usageValidation"]["findings"] == {"a:1:H1": {"status": "fixed"}}
+    assert wiped.returncode == 0
+
+
+def test_record_usage_validation_caps_entries_and_sanitizes_reason(tmp_path):
+    root, env, feature, _ = _uv_fixture(tmp_path, recipe=False)
+    many = {"k" + str(i): {"status": "open"} for i in range(250)}
+    proc = _uv_record(root, env, feature, "--status", "passed", "--findings-json", json.dumps(many))
+    assert proc.returncode == 0, proc.stderr
+    assert len(_uv_phase(root, feature)["usageValidation"]["findings"]) == 200
+    proc = _uv_record(root, env, feature, "--status", "failing", "--reason", "a" * 3000)
+    assert proc.returncode == 0
+    assert len(_uv_phase(root, feature)["usageValidation"]["reason"]) <= 2000
+
+
+def test_record_usage_validation_is_registered_and_listed_in_help(tmp_path):
+    assert R._VERB_FOR_OP["record-usage-validation"] == "roadmap-record-usage-validation"
+    assert R._OPS["record-usage-validation"] is R.op_record_usage_validation
+    helped = _uv_cli(str(tmp_path), dict(os.environ), "help").stdout
+    line = next(l for l in helped.splitlines() if "roadmap-record-usage-validation" in l)
+    for flag in ("--feature", "--phase", "--status", "--kind", "--reason", "--review", "--rounds", "--findings-json"):
+        assert flag in line

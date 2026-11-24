@@ -306,6 +306,74 @@ def test_get_story_context_is_approved(line):
     assert run_hook(line), f"a get-story-context shape was not auto-approved:\n  {line}"
 
 
+BOOKKEEPING_DECLARED_SHAPES = [
+    "$AIMI_CLI bookkeeping-declared",
+    "$AIMI_CLI bookkeeping-declared --project .",
+    "${AIMI_CLI} bookkeeping-declared --project web",
+]
+
+
+@pytest.mark.parametrize("line", BOOKKEEPING_DECLARED_SHAPES)
+def test_bookkeeping_declared_is_approved(line):
+    """The reader verb is approved with and without flags."""
+    assert run_hook(line), f"a bookkeeping-declared shape was not auto-approved:\n  {line}"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "$AIMI_CLI verify-stage-declared",
+        "$AIMI_CLI verify-stage-declared --project .",
+        "${AIMI_CLI} branch-divergence",
+        "$AIMI_CLI branch-divergence --project /repo",
+    ],
+)
+def test_the_two_read_only_execution_readers_are_approved(line):
+    assert run_hook(line), f"a read-only verb shape was not auto-approved:\n  {line}"
+
+
+def test_patch_metadata_is_a_writer_and_keeps_prompting():
+    assert not run_hook("$AIMI_CLI patch-metadata --tasks-file t.json --from p.json")
+
+
+# The read-only usage-validation verbs are approved bare; the ones that run a
+# recipe command or write state are not (see ADVERSARIAL below).
+USAGE_READ_VERBS = [
+    "usage-recipe-get --project .",
+    "usage-recipe-sources --project .",
+    "usage-recipe-sources --project api --project web",
+    "usage-env-status --run run-1",
+    "usage-validation-required --tasks-file .aimi/tasks.json",
+    "usage-validation-verdict --required-file .aimi/r.json --evidence-dir .aimi/ev",
+    "usage-validation-get --tasks-file .aimi/tasks.json",
+    "usage-validation-get --feature f --phase 1",
+    "usage-validation-get",
+    "audit-open --tasks-file .aimi/tasks.json",
+    "audit-open",
+    "inspect-prototype-kit .aimi/kit",
+]
+
+
+@pytest.mark.parametrize("call", USAGE_READ_VERBS)
+def test_usage_read_only_verbs_are_approved(call):
+    assert run_hook("$AIMI_CLI " + call), f"read-only usage verb not approved: {call}"
+
+
+USAGE_PROMPTING_VERBS = [
+    "import-prototype-kit .aimi/kit --slug kit",
+    "usage-recipe-record --project . --serve 'npm run dev' --ready /",
+    "usage-env-up --run run-1 --repo .",
+    "usage-env-down --run run-1",
+    "usage-validation-record --status passed",
+    "roadmap-record-usage-validation --feature f --phase 1 --status passed",
+]
+
+
+@pytest.mark.parametrize("call", USAGE_PROMPTING_VERBS)
+def test_usage_writing_verbs_still_prompt(call):
+    assert not run_hook("$AIMI_CLI " + call), f"a usage verb that runs or writes was approved: {call}"
+
+
 # Older spellings that older installs may still carry. The hook keeps matching
 # them on purpose; a fix for today's text must not un-approve yesterday's.
 LEGACY_FORMS = [
@@ -387,6 +455,10 @@ ADVERSARIAL = [
     pytest.param(
         "$AIMI_CLI deps-recipe-record --project . --command 'make setup'",
         id="deps-recipe-record-is-a-human-decision-verb",
+    ),
+    pytest.param(
+        "$AIMI_CLI usage-recipe-record --project . --serve 'npm run dev' --ready /",
+        id="usage-recipe-record-is-a-human-decision-verb",
     ),
     pytest.param("mkdir -p /etc/aimi", id="mkdir-outside-the-aimi-dir"),
     pytest.param("$AIMI_CLI status; cat /etc/shadow", id="whitelisted-subcommand-then-chain"),

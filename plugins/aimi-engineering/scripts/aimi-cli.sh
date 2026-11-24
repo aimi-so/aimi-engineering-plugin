@@ -114,8 +114,8 @@ find_aimi_root() {
 # Only the values of the flags in _PATH_ARG_FLAGS are candidates, plus the
 # bare positional arguments of the verbs in _PATH_ARG_POSITIONAL_VERBS (never
 # the value of a flag); a story id, a reason or a branch name is never touched.
-_PATH_ARG_FLAGS=" --tasks-file --file --staging-dir --outline --result --output --old --new --input --tasks --spec --prototype --phase-dir --root --bundle --from --to --previous-file --review --dir --brainstorm-path "
-_PATH_ARG_POSITIONAL_VERBS=" archive-task research-lookup extract-sections extract-prototype-sections measure-command-file "
+_PATH_ARG_FLAGS=" --tasks-file --file --staging-dir --outline --result --output --old --new --input --tasks --spec --prototype --phase-dir --root --bundle --from --to --previous-file --review --dir --brainstorm-path --required-file --evidence-dir --resolve "
+_PATH_ARG_POSITIONAL_VERBS=" archive-task research-lookup extract-sections extract-prototype-sections measure-command-file inspect-prototype-kit import-prototype-kit "
 _rebase_invocation_relative_args() {
   local verb="$1"; shift
   local prev="" arg candidate
@@ -2834,6 +2834,63 @@ cmd_acknowledge_evidence() {
   printf '%s\n' "$out"
 }
 
+# Record the run-level usage-validation verdict on metadata.usageValidation.
+# Unlike acknowledge-evidence it has no agent-mode refusal: an unattended run
+# must be able to record its own verdict. Every vocabulary rule is tasks.py's
+# and runs before the document is read; only --review is confined here, ahead
+# of the lock, the way every path that arrives as a CLI argument is.
+# Usage: usage-validation-record --status <passed|failing|skipped> [flags] [--tasks-file <path>]
+cmd_usage_validation_record() {
+  local tasks_file positional=() remaining=() op_args=() review=""
+  local args=("$@")
+  local i=0 n=${#args[@]}
+  while [ "$i" -lt "$n" ]; do
+    case "${args[$i]}" in
+      --status|--kind|--reason|--rounds|--findings-json)
+        op_args+=("${args[$i]}")
+        i=$((i + 1))
+        op_args+=("${args[$i]:-}")
+        ;;
+      --review)
+        i=$((i + 1))
+        review="${args[$i]:-}"
+        ;;
+      *) remaining+=("${args[$i]}") ;;
+    esac
+    i=$((i + 1))
+  done
+  _parse_positional_tasks_file tasks_file positional "${remaining[@]}"
+
+  if [ "${#positional[@]}" -gt 0 ]; then
+    echo "Usage: aimi-cli.sh usage-validation-record --status <passed|failing|skipped> [--kind <kind>] [--reason <text>] [--review <path>] [--rounds <n>] [--findings-json <json>] [--tasks-file <path>]" >&2
+    exit 1
+  fi
+
+  if [ -n "$review" ]; then
+    validate_path_in_project "$review"
+    op_args+=(--review "$review")
+  fi
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+
+  # One crossing, inside the lock.
+  check_python3
+  local out
+  out=$(
+    (
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" usage-validation-record \
+        --tasks-file "$tasks_file" "${op_args[@]}"
+    ) 200>"${tasks_file}.lock"
+  ) || exit $?
+  printf '%s\n' "$out"
+}
+
 # Persist a --container/--inline override onto metadata.execution.
 # execute.md and next.md call this after resolving a session-level override so
 # a later re-invocation without the flag continues in the same mode instead of
@@ -2881,6 +2938,71 @@ cmd_set_execution_mode() {
     _lock "${tasks_file}.lock"
     python3 "$(_aimi_tasks_py)" set-execution-mode \
       --tasks-file "$tasks_file" --mode "$mode"
+  ) 200>"${tasks_file}.lock"
+}
+
+# Merge the top-level keys of a JSON object into a tasks file's metadata.
+# Usage: patch-metadata --tasks-file <path> [--from <patch.json>] [--remove <key>]...
+#
+# /aimi:plan Phase 4 used to rewrite the whole tasks.json with the Write tool
+# to change a handful of metadata keys, which meant re-emitting every story the
+# merge had just validated. This sends only the keys that change.
+#
+# --tasks-file is required and never falls back to the current-tasks pointer:
+# the caller is a planner that has just written the file and knows its path,
+# and the pointer can still name an older plan.
+cmd_patch_metadata() {
+  local usage="Usage: aimi-cli.sh patch-metadata --tasks-file <path> [--from <patch.json>] [--remove <key>]..."
+  local tasks_file="" patch_file="" op_args=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks-file) shift; tasks_file="${1:-}" ;;
+      --from)       shift; patch_file="${1:-}" ;;
+      --remove)
+        shift
+        if [ -z "${1:-}" ]; then
+          echo "Error: patch-metadata: --remove needs a key" >&2
+          echo "$usage" >&2
+          exit 1
+        fi
+        op_args+=(--remove "$1")
+        ;;
+      *)
+        echo "Error: patch-metadata: unknown argument: $1" >&2
+        echo "$usage" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -z "$tasks_file" ] || { [ -z "$patch_file" ] && [ "${#op_args[@]}" -eq 0 ]; }; then
+    echo "$usage" >&2
+    exit 1
+  fi
+
+  tasks_file=$(resolve_path "$tasks_file")
+  validate_path_in_project "$tasks_file"
+  if [ ! -f "$tasks_file" ]; then
+    echo "Error: patch-metadata: tasks file does not exist: $tasks_file" >&2
+    exit 1
+  fi
+  if [ -n "$patch_file" ]; then
+    validate_path_in_project "$patch_file"
+    if [ ! -f "$patch_file" ]; then
+      echo "Error: patch-metadata: patch file does not exist: $patch_file" >&2
+      exit 1
+    fi
+    op_args+=(--from "$patch_file")
+  fi
+
+  # One crossing, inside the lock: the patch is read, judged against the
+  # document, written and reported by the single call.
+  check_python3
+  (
+    _lock "${tasks_file}.lock"
+    python3 "$(_aimi_tasks_py)" patch-metadata \
+      --tasks-file "$tasks_file" "${op_args[@]}"
   ) 200>"${tasks_file}.lock"
 }
 
@@ -12006,6 +12128,371 @@ cmd_deps_recipe_record() {
   return "$rc"
 }
 
+# verify-stage-declared [--project <key>]
+#
+# Prints whether a project key declared stage-aware verification in
+# <AIMI_ROOT>/.aimi/config.json, as one JSON line {project, staged, declared};
+# declared is true when the key has an entry at all, false included. A pure
+# reader: no lock, one crossing into scripts/verify_stage.py, which owns the
+# document rules. /aimi:execute reads it to decide whether a parallel story
+# worker gets AIMI_VERIFY_STAGE=worktree, whether the integrated wave check
+# may be skipped, and whether to suggest the declaration.
+cmd_verify_stage_declared() {
+  local project="."
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project)
+        if [ $# -lt 2 ]; then
+          echo "Error: verify-stage-declared: --project requires a value" >&2
+          echo "Usage: aimi-cli.sh verify-stage-declared [--project <key>]" >&2
+          exit 1
+        fi
+        project="$2"; shift 2 ;;
+      *)
+        echo "Error: verify-stage-declared: unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh verify-stage-declared [--project <key>]" >&2
+        exit 1 ;;
+    esac
+  done
+
+  check_python3
+
+  local config="$AIMI_DIR/config.json"
+  validate_path_in_project "$config"
+
+  python3 "$(_aimi_script_py verify_stage.py)" declared --config "$config" --project "$project"
+}
+
+# bookkeeping-declared [--project <key>]
+#
+# Prints one project key's effective bookkeeping declaration from
+# <AIMI_ROOT>/.aimi/config.json as one JSON line. A pure reader: no lock, one
+# crossing into scripts/bookkeeping_declared.py, which owns the document rules.
+# It refuses without the interpreter rather than answering an empty declaration,
+# because an empty answer would read as "nothing is declared". --project is a
+# value, not a path, and stays out of _PATH_ARG_FLAGS.
+cmd_bookkeeping_declared() {
+  local project="."
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project)
+        if [ $# -lt 2 ]; then
+          echo "Error: bookkeeping-declared: --project requires a value" >&2
+          echo "Usage: aimi-cli.sh bookkeeping-declared [--project <key>]" >&2
+          exit 1
+        fi
+        project="$2"; shift 2 ;;
+      *)
+        echo "Error: bookkeeping-declared: unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh bookkeeping-declared [--project <key>]" >&2
+        exit 1 ;;
+    esac
+  done
+
+  check_python3
+
+  local config="$AIMI_DIR/config.json"
+  validate_path_in_project "$config"
+
+  python3 "$(_aimi_script_py bookkeeping_declared.py)" declared --config "$config" --project "$project"
+}
+
+# bookkeeping-resolve [--project <key>] [--root <dir>]
+#
+# In a repository mid-merge, resolves the declared bookkeeping files of one
+# project key by their declared rule and rewrites them in the working tree,
+# printing {resolved, unclaimed, refused}. One crossing into
+# scripts/bookkeeping_resolve.py, which owns the rules. A writer with no honest
+# degrade, so a missing interpreter refuses before anything is read or written.
+# It writes only inside --root and no .aimi/ state, so it takes no lock, and it
+# stages nothing. --project is a value; --root is a path, rebased onto the
+# caller by main() and confined here with the config path.
+cmd_bookkeeping_resolve() {
+  local project="." root=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project)
+        if [ $# -lt 2 ]; then
+          echo "Error: bookkeeping-resolve: --project requires a value" >&2
+          echo "Usage: aimi-cli.sh bookkeeping-resolve [--project <key>] [--root <dir>]" >&2
+          exit 1
+        fi
+        project="$2"; shift 2 ;;
+      --root)
+        if [ $# -lt 2 ]; then
+          echo "Error: bookkeeping-resolve: --root requires a value" >&2
+          echo "Usage: aimi-cli.sh bookkeeping-resolve [--project <key>] [--root <dir>]" >&2
+          exit 1
+        fi
+        root="$2"; shift 2 ;;
+      *)
+        echo "Error: bookkeeping-resolve: unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh bookkeeping-resolve [--project <key>] [--root <dir>]" >&2
+        exit 1 ;;
+    esac
+  done
+
+  if [ -z "$root" ]; then
+    root=$(_caller_project_dir)
+    [ -n "$root" ] || root="$PWD"
+  fi
+  root=$(resolve_path "$root")
+  validate_path_in_project "$root"
+
+  check_python3
+
+  local config="$AIMI_DIR/config.json"
+  validate_path_in_project "$config"
+
+  python3 "$(_aimi_script_py bookkeeping_resolve.py)" resolve \
+    --config "$config" --root "$root" --project "$project"
+}
+
+# usage-recipe-record --project <key> (--serve <cmd> | --cli <cmd>) [flags]
+# usage-recipe-get --project <key>
+# usage-recipe-sources --project <key> [--project <key>]...
+#
+# The usage recipe is how a person confirmed the whole product comes up for
+# real-usage validation, stored at usage.recipe[<key>] of
+# <AIMI_ROOT>/.aimi/config.json beside dependencies.install[<key>]. Bash owns
+# the flag shapes, check_python3 and the lock; scripts/usage_recipe.py owns the
+# document rules and makes the read-merge-write in ONE crossing inside the
+# lock `deps-recipe-record` takes, so records for different keys, and a record
+# racing a deps-recipe-record, all survive. Both verbs refuse without python3:
+# for the reader an `absent` answer would read as "no recipe recorded" and make
+# validation skip as if the person had declined. None of the flag values is a
+# path, so none is in _PATH_ARG_FLAGS.
+_usage_recipe_flags() {
+  # $1 = verb, $2 = "record" or "get"; remaining args are the caller's flags.
+  # Fills the global array _USAGE_RECIPE_ARGS with the python argv tail.
+  local verb="$1" mode="$2"; shift 2
+  _USAGE_RECIPE_ARGS=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project) ;;
+      --serve|--cli|--setup|--cleanup|--port|--ready|--login|--login-url|--browser|--external-services)
+        if [ "$mode" != "record" ]; then
+          echo "Error: $verb: unknown flag: $1" >&2
+          exit 1
+        fi ;;
+      *)
+        echo "Error: $verb: unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh $verb --project <key>$([ "$mode" = record ] && echo ' (--serve <cmd> | --cli <cmd>) [--setup <cmd>]... [--cleanup <cmd>]... [--port <n>] [--ready <url>] [--login none|manual] [--login-url <url>] [--browser agent-browser|chrome] [--external-services <text>]')" >&2
+        exit 1 ;;
+    esac
+    if [ $# -lt 2 ]; then
+      echo "Error: $verb: $1 requires a value" >&2
+      exit 1
+    fi
+    _USAGE_RECIPE_ARGS+=("$1" "$2")
+    shift 2
+  done
+}
+
+cmd_usage_recipe_record() {
+  _usage_recipe_flags usage-recipe-record record "$@"
+  check_python3
+
+  local config="$AIMI_DIR/config.json"
+  validate_path_in_project "$config"
+
+  local rc=0
+  (
+    _lock "${config}.lock"
+    python3 "$(_aimi_script_py usage_recipe.py)" record --config "$config" \
+      ${_USAGE_RECIPE_ARGS[@]+"${_USAGE_RECIPE_ARGS[@]}"}
+  ) 200>"${config}.lock" || rc=$?
+  return "$rc"
+}
+
+cmd_usage_recipe_get() {
+  _usage_recipe_flags usage-recipe-get get "$@"
+  check_python3
+
+  local config="$AIMI_DIR/config.json"
+  validate_path_in_project "$config"
+
+  python3 "$(_aimi_script_py usage_recipe.py)" get --config "$config" \
+    ${_USAGE_RECIPE_ARGS[@]+"${_USAGE_RECIPE_ARGS[@]}"}
+}
+
+# usage-recipe-sources lists each repository's own files that may state how it
+# comes up. Read-only and decides nothing: no lock, no write, no file content
+# printed. Each <aimi_root>/<key> is confined here before python3 starts (the
+# usage-env-up shape); usage_recipe.py confines again and owns every other rule.
+# Refuses without python3, like usage-recipe-get.
+cmd_usage_recipe_sources() {
+  local -a keys=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project)
+        if [ $# -lt 2 ]; then
+          echo "Error: usage-recipe-sources: --project requires a value" >&2
+          exit 1
+        fi
+        keys+=("$2")
+        shift 2 ;;
+      *)
+        echo "Error: usage-recipe-sources: unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh usage-recipe-sources --project <key> [--project <key>]..." >&2
+        exit 1 ;;
+    esac
+  done
+  if [ "${#keys[@]}" -eq 0 ]; then
+    echo "Error: usage-recipe-sources: at least one --project <key> is required" >&2
+    exit 1
+  fi
+  local aimi_root="${AIMI_DIR%/.aimi}" k k_dir
+  local -a project_args=()
+  for k in "${keys[@]}"; do
+    case "$k" in
+      /*) k_dir="$k" ;;
+      *) k_dir="$aimi_root/$k" ;;
+    esac
+    validate_path_in_project "$k_dir"
+    project_args+=(--project "$k")
+  done
+  check_python3
+  python3 "$(_aimi_script_py usage_recipe.py)" sources --aimi-root "$aimi_root" \
+    "${project_args[@]}"
+}
+
+# usage-env-up --run <key> --repo <project>[=<branch>]... [--restart]
+# usage-env-status --run <key> [--wait <0-480>]
+# usage-env-down --run <key>
+#
+# Bring the product up from the recorded usage recipe, detached, and report on
+# it. Bash owns the flags, check_python3 and the lookup of the worktree manager
+# beside this CLI; scripts/usage_env.py owns every rule after that. All three
+# refuse without python3 (a degraded answer would read as "nothing to bring up")
+# and `up` and `down` refuse when no worktree-manager.sh sits beside the CLI.
+# The manager resolved here is passed to the module on every call that runs it:
+# usage_env.py never reads it, or any command, back from its own state file.
+# --run is a key, not a path. Every --repo value IS a path argument (the
+# module serves from it), so cmd_usage_env_up confines each one with
+# validate_path_in_project before python3 starts.
+_usage_env_manager() {
+  local manager
+  manager=$(_worktree_manager_beside "$_AIMI_SCRIPT_DIR/aimi-cli.sh")
+  if [ -z "$manager" ]; then
+    echo "Error: $1: no worktree-manager.sh beside this CLI ($_AIMI_SCRIPT_DIR); cannot start or stop servers" >&2
+    exit 1
+  fi
+  printf '%s\n' "$manager"
+}
+
+cmd_usage_env_up() {
+  local run="" restart=0
+  local -a repos=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --run|--repo)
+        if [ $# -lt 2 ]; then
+          echo "Error: usage-env-up: $1 requires a value" >&2
+          exit 1
+        fi
+        if [ "$1" = "--run" ]; then run="$2"; else repos+=("$2"); fi
+        shift 2 ;;
+      --restart) restart=1; shift ;;
+      *)
+        echo "Error: usage-env-up: unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh usage-env-up --run <key> --repo <project>[=<branch>]... [--restart]" >&2
+        exit 1 ;;
+    esac
+  done
+  if [ -z "$run" ]; then
+    echo "Error: usage-env-up: --run is required" >&2
+    exit 1
+  fi
+  if [ "${#repos[@]}" -eq 0 ]; then
+    echo "Error: usage-env-up: at least one --repo <project>[=<branch>] is required" >&2
+    exit 1
+  fi
+  # Each --repo value names a directory the module serves from, so each is a
+  # path argument and is confined here, before python3 starts: the project
+  # directory, and <project>/.worktrees/<branch> when a branch is given.
+  # usage_env.py keeps its own _within check on the repository it resolves
+  # as a second layer.
+  local aimi_root="${AIMI_DIR%/.aimi}" r r_project r_dir
+  for r in "${repos[@]}"; do
+    r_project="${r%%=*}"
+    case "$r_project" in
+      /*) r_dir="$r_project" ;;
+      *) r_dir="$aimi_root/$r_project" ;;
+    esac
+    validate_path_in_project "$r_dir"
+    case "$r" in
+      *=*) validate_path_in_project "$r_dir/.worktrees/${r#*=}" ;;
+    esac
+  done
+  check_python3
+  local manager
+  manager=$(_usage_env_manager usage-env-up) || exit 1
+  local -a extra=()
+  [ "$restart" -eq 1 ] && extra+=(--restart)
+  local -a repo_args=()
+  for r in "${repos[@]}"; do repo_args+=(--repo "$r"); done
+  python3 "$(_aimi_script_py usage_env.py)" up --aimi-root "$aimi_root" \
+    --manager "$manager" --run "$run" \
+    "${repo_args[@]}" ${extra[@]+"${extra[@]}"}
+}
+
+cmd_usage_env_status() {
+  local run="" wait_s=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --run|--wait)
+        if [ $# -lt 2 ]; then
+          echo "Error: usage-env-status: $1 requires a value" >&2
+          exit 1
+        fi
+        if [ "$1" = "--run" ]; then run="$2"; else wait_s="$2"; fi
+        shift 2 ;;
+      *)
+        echo "Error: usage-env-status: unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh usage-env-status --run <key> [--wait <0-480>]" >&2
+        exit 1 ;;
+    esac
+  done
+  if [ -z "$run" ]; then
+    echo "Error: usage-env-status: --run is required" >&2
+    exit 1
+  fi
+  check_python3
+  local -a extra=()
+  [ -n "$wait_s" ] && extra+=(--wait "$wait_s")
+  python3 "$(_aimi_script_py usage_env.py)" status --aimi-root "${AIMI_DIR%/.aimi}" --run "$run" \
+    ${extra[@]+"${extra[@]}"}
+}
+
+cmd_usage_env_down() {
+  local run=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --run)
+        if [ $# -lt 2 ]; then
+          echo "Error: usage-env-down: --run requires a value" >&2
+          exit 1
+        fi
+        run="$2"
+        shift 2 ;;
+      *)
+        echo "Error: usage-env-down: unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh usage-env-down --run <key>" >&2
+        exit 1 ;;
+    esac
+  done
+  if [ -z "$run" ]; then
+    echo "Error: usage-env-down: --run is required" >&2
+    exit 1
+  fi
+  check_python3
+  local manager
+  manager=$(_usage_env_manager usage-env-down) || exit 1
+  python3 "$(_aimi_script_py usage_env.py)" down --aimi-root "${AIMI_DIR%/.aimi}" \
+    --manager "$manager" --run "$run"
+}
+
 # Check whether the first-run model-selection prompt should be shown.
 # Echoes exactly one token to stdout:
 #   skip   — models.json already exists OR the marker file already exists
@@ -12456,6 +12943,74 @@ _resolve_branch_base() {
   # jq reader of .base/.reason/.promptNeeded is unaffected.
   printf '{"base":"%s","reason":"%s","currentBranch":"%s","defaultBranch":"%s","promptNeeded":%s,"baseDivergence":"%s"}\n' \
     "$base" "$reason" "$current_branch" "$default_branch" "$prompt_needed" "$divergence"
+}
+
+# How a LOCAL branch stands against its origin counterpart, as one JSON line:
+#   {"branch":"<name>","divergence":"<state>","ahead":<n>,"behind":<n>}
+# <state> is _branch_divergence's answer (none | in-sync | local-ahead |
+# local-behind | diverged) and the two counts are commits on one side only.
+#
+# Usage: branch-divergence [--branch <name>] [--project <path>]
+#
+# Read-only and offline: it compares refs/heads/<name> with
+# refs/remotes/origin/<name> as the last fetch left them and never contacts the
+# remote, so the caller decides when to fetch. /aimi:plan calls it right after
+# its own `git fetch origin`, because the plan records the working tree's HEAD
+# as metadata.baseRef and nothing else said when that tree was behind origin.
+# --branch defaults to the current branch. A detached HEAD, a branch origin
+# does not have, and a current branch whose name this verb will not print all
+# answer "none" with an empty or echoed name: there is nothing to compare.
+cmd_branch_divergence() {
+  local usage="Usage: aimi-cli.sh branch-divergence [--branch <name>] [--project <path>]"
+  local branch="" branch_given=false project_dir=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --branch)  shift; branch="${1:-}"; branch_given=true ;;
+      --project) shift; project_dir="${1:-}" ;;
+      *)
+        echo "Error: branch-divergence: unknown argument: $1" >&2
+        echo "$usage" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  [ -n "$project_dir" ] || project_dir=$(_caller_project_dir)
+  _require_git_repo "$project_dir"
+
+  # The name is printed inside a JSON string by printf and handed to git as a
+  # ref, so it is held to a set with no quote, backslash, space or "..".
+  local safe='^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$'
+  if [ "$branch_given" = true ]; then
+    if ! [[ "$branch" =~ $safe ]] || [[ "$branch" == *..* ]]; then
+      echo "Error: branch-divergence: invalid branch name: $branch" >&2
+      exit 1
+    fi
+  else
+    branch=$(git branch --show-current 2>/dev/null || echo "")
+    if [ -n "$branch" ] && { ! [[ "$branch" =~ $safe ]] || [[ "$branch" == *..* ]]; }; then
+      branch=""
+    fi
+  fi
+
+  local origin_present=false divergence ahead=0 behind=0 counts
+  if [ -n "$branch" ] && git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+    origin_present=true
+  fi
+  divergence=$(_branch_divergence "$branch" "$origin_present")
+  case "$divergence" in
+    local-ahead|local-behind|diverged)
+      counts=$(git rev-list --left-right --count \
+        "refs/heads/$branch...refs/remotes/origin/$branch" 2>/dev/null || echo "")
+      if [[ "$counts" =~ ^([0-9]+)[[:space:]]+([0-9]+)$ ]]; then
+        ahead="${BASH_REMATCH[1]}"
+        behind="${BASH_REMATCH[2]}"
+      fi
+      ;;
+  esac
+  printf '{"branch":"%s","divergence":"%s","ahead":%s,"behind":%s}\n' \
+    "$branch" "$divergence" "$ahead" "$behind"
 }
 
 # CLI wrapper for _resolve_branch_base(): arg-parsing, --project cd and the
@@ -13682,7 +14237,34 @@ cmd_validate_wave_contention() {
   # file, one crossing, and the exit status IS the crossing's own -- unlike
   # validate-waves, this verb's invalid verdict really does exit non-zero.
   check_python3
-  python3 "$(_aimi_tasks_py)" validate-wave-contention --tasks-file "$tasks_file"
+  python3 "$(_aimi_tasks_py)" validate-wave-contention \
+    --tasks-file "$tasks_file" --project-root "$PROJECT_ROOT"
+}
+
+# List the deduplicated implementation.verify commands of the stories a wave
+# merged, keyed on (project, exact command) with the owning story ids.
+# Usage: wave-verify-commands <id>... [--tasks-file <path>]
+cmd_wave_verify_commands() {
+  local tasks_file=""
+  local -a positional=()
+  _parse_positional_tasks_file tasks_file positional "$@"
+
+  local id
+  for id in "${positional[@]+"${positional[@]}"}"; do
+    validate_story_id "$id"
+  done
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+
+  # A pure reader: no lock, no temp file, one crossing. The op checks that
+  # every id exists itself, so there is no per-id validate_story_exists.
+  check_python3
+  python3 "$(_aimi_tasks_py)" wave-verify-commands --tasks-file "$tasks_file" -- "${positional[@]+"${positional[@]}"}"
 }
 
 # Validate tasks file citation fields
@@ -15134,6 +15716,7 @@ cmd_story_merge() {
 # apply-audit-patches: validate and apply the cross-story auditor's patches
 # Usage: aimi-cli.sh apply-audit-patches --staging-dir <dir> [--result <path>]
 #           [--annotate-deferred --reason <text> [--agent-deferral]]
+#        or: aimi-cli.sh apply-audit-patches --staging-dir <dir> --resolve <resolutions.json>
 # ============================================================================
 #
 # Modelled on cmd_story_merge rather than on the tasks.json verbs: there is no
@@ -15144,12 +15727,12 @@ cmd_story_merge() {
 # (the idx lookup, every patch rule, the writes) is audit_patches.py's, behind
 # one crossing.
 cmd_apply_audit_patches() {
-  local usage="usage: aimi-cli.sh apply-audit-patches --staging-dir <dir> [--result <path>] [--annotate-deferred --reason <text> [--agent-deferral]]"
-  local staging_dir="" result_path="" annotate=false reason="" reason_given=false agent_deferral=false
+  local usage="usage: aimi-cli.sh apply-audit-patches --staging-dir <dir> [--result <path>] [--annotate-deferred --reason <text> [--agent-deferral]] | --resolve <resolutions.json>"
+  local staging_dir="" result_path="" annotate=false reason="" reason_given=false agent_deferral=false resolve_path="" resolve_given=false
 
   while [ $# -gt 0 ]; do
     case "$1" in
-      --staging-dir|--result|--reason)
+      --staging-dir|--result|--reason|--resolve)
         if [ $# -lt 2 ]; then
           echo "Error: apply-audit-patches: $1 needs a value ($usage)" >&2
           exit 1
@@ -15158,6 +15741,7 @@ cmd_apply_audit_patches() {
           --staging-dir) staging_dir="$2" ;;
           --result) result_path="$2" ;;
           --reason) reason="$2"; reason_given=true ;;
+          --resolve) resolve_path="$2"; resolve_given=true ;;
         esac
         shift 2
         ;;
@@ -15180,6 +15764,16 @@ cmd_apply_audit_patches() {
     echo "Error: apply-audit-patches: --staging-dir <dir> is required ($usage)" >&2
     exit 1
   fi
+  if [ "$resolve_given" = true ]; then
+    if [ "$annotate" = true ] || [ "$reason_given" = true ] || [ "$agent_deferral" = true ] || [ -n "$result_path" ]; then
+      echo "Error: apply-audit-patches: --resolve cannot be combined with --annotate-deferred, --reason, --agent-deferral or --result ($usage)" >&2
+      exit 1
+    fi
+    if [ -z "$resolve_path" ]; then
+      echo "Error: apply-audit-patches: --resolve needs a non-empty path ($usage)" >&2
+      exit 1
+    fi
+  fi
   if [ "$annotate" = true ] && [ -z "$reason" ]; then
     echo "Error: apply-audit-patches: --annotate-deferred requires a non-empty --reason ($usage)" >&2
     exit 1
@@ -15198,6 +15792,9 @@ cmd_apply_audit_patches() {
   if [ -n "$result_path" ]; then
     validate_path_in_project "$result_path"
   fi
+  if [ -n "$resolve_path" ]; then
+    validate_path_in_project "$resolve_path"
+  fi
 
   if [ ! -d "$staging_dir" ]; then
     echo "Error: apply-audit-patches: staging directory does not exist: $staging_dir" >&2
@@ -15208,6 +15805,9 @@ cmd_apply_audit_patches() {
   local aa_args=(--staging-dir "$staging_dir")
   if [ -n "$result_path" ]; then
     aa_args+=(--result "$result_path")
+  fi
+  if [ -n "$resolve_path" ]; then
+    aa_args+=(--resolve "$resolve_path")
   fi
   if [ "$annotate" = true ]; then
     aa_args+=(--annotate-deferred --reason "$reason")
@@ -15292,6 +15892,60 @@ cmd_slugify() {
   check_python3
   python3 "$(_aimi_script_py slug.py)" "$@"
 }
+
+# ============================================================================
+# inspect-prototype-kit <path> / import-prototype-kit <path> [--slug <s>]
+# ============================================================================
+#
+# Look at a prototype kit (a folder or .zip of HTML screens), and copy a
+# qualifying one into .aimi/sources/<slug>-<hash8>/. Bash owns the flags, the
+# confinement of the kit path (before python3 starts) and check_python3, which
+# refuses rather than degrades: a missing interpreter must not read as "not a
+# kit". Every rule is prototype_kit.py's, behind one crossing. No lock: the
+# copy is placed by an atomic rename and re-importing identical content reuses it.
+_prototype_kit_verb() {
+  local verb="$1" mode="$2"; shift 2
+  local usage="usage: aimi-cli.sh $verb <path>"
+  [ "$mode" = import ] && usage="$usage [--slug <s>]"
+  local kit="" slug="" have_slug=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --slug)
+        if [ "$mode" != import ] || [ $# -lt 2 ]; then
+          echo "Error: $verb: bad --slug ($usage)" >&2
+          exit 1
+        fi
+        slug="$2"; have_slug=1
+        shift 2 ;;
+      -*)
+        echo "Error: $verb: unknown flag: $1 ($usage)" >&2
+        exit 1 ;;
+      *)
+        if [ -n "$kit" ]; then
+          echo "Error: $verb: exactly one path is accepted ($usage)" >&2
+          exit 1
+        fi
+        kit="$1"
+        shift ;;
+    esac
+  done
+  if [ -z "$kit" ]; then
+    echo "Error: $verb: a kit path is required ($usage)" >&2
+    exit 1
+  fi
+  validate_path_in_project "$kit"
+  check_python3
+  local aimi_dir_abs
+  aimi_dir_abs="$(cd "$AIMI_DIR" 2>/dev/null && pwd)" || aimi_dir_abs="$PWD/$AIMI_DIR"
+  if [ "$have_slug" -eq 1 ]; then
+    python3 -I "$(_aimi_script_py prototype_kit.py)" "$mode" "$kit" --aimi-dir "$aimi_dir_abs" --slug "$slug"
+  else
+    python3 -I "$(_aimi_script_py prototype_kit.py)" "$mode" "$kit" --aimi-dir "$aimi_dir_abs"
+  fi
+}
+
+cmd_inspect_prototype_kit() { _prototype_kit_verb inspect-prototype-kit inspect "$@"; }
+cmd_import_prototype_kit() { _prototype_kit_verb import-prototype-kit import "$@"; }
 
 # ============================================================================
 # validate-outline: check an outline's produces/consumes contract, derive waves
@@ -16500,6 +17154,64 @@ cmd_roadmap_record_visual_gate() {
   printf '%s\n' "$out"
 }
 
+# Writes a phase's usage-validation verdict into roadmap.json, in place.
+#
+# cmd_roadmap_record_visual_gate's shape: one crossing, inside the lock. Every
+# vocabulary rule (status, kind, reason, rounds, findings) runs in the op before
+# the document is read; only the flag loop, the phase id and --review's
+# confinement happen here, before the lock. --rounds and --findings-json are
+# passed whenever the flag was given, so an empty value reaches the op and is
+# refused there instead of defaulting.
+cmd_roadmap_record_usage_validation() {
+  local feature="" phase_id="" status="" kind="" reason="" review="" rounds="" findings=""
+  local has_kind=0 has_reason=0 has_rounds=0 has_findings=0
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) shift; feature="${1:-}" ;;
+      --phase) shift; phase_id="${1:-}" ;;
+      --status) shift; status="${1:-}" ;;
+      --kind) shift; kind="${1:-}"; has_kind=1 ;;
+      --reason) shift; reason="${1:-}"; has_reason=1 ;;
+      --review) shift; review="${1:-}" ;;
+      --rounds) shift; rounds="${1:-}"; has_rounds=1 ;;
+      --findings-json) shift; findings="${1:-}"; has_findings=1 ;;
+      *)
+        echo "Error: roadmap-record-usage-validation: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature" "roadmap-record-usage-validation"
+  _roadmap_validate_phase_id "$phase_id" "roadmap-record-usage-validation"
+
+  [ -n "$review" ] && validate_path_in_project "$review"
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_require "roadmap-record-usage-validation" "$feature")
+
+  check_python3
+  local extra_args=()
+  [ "$has_kind" -eq 1 ] && extra_args+=(--kind "$kind")
+  [ "$has_reason" -eq 1 ] && extra_args+=(--reason "$reason")
+  [ -n "$review" ] && extra_args+=(--review "$review")
+  [ "$has_rounds" -eq 1 ] && extra_args+=(--rounds "$rounds")
+  [ "$has_findings" -eq 1 ] && extra_args+=(--findings-json "$findings")
+
+  local out
+  out=$(
+    (
+      _lock "${roadmap_path}.lock"
+      python3 "$(_aimi_roadmap_py)" record-usage-validation \
+        --roadmap "$roadmap_path" --phase "$phase_id" --status "$status" \
+        ${extra_args[@]+"${extra_args[@]}"}
+    ) 200>"${roadmap_path}.lock"
+  ) || exit $?
+  printf '%s\n' "$out"
+}
+
 # Whether a phase owes a visual comparison, derived from its own tasks file(s).
 # Structurally cmd_roadmap_get: a read, so no lock, and ungated by
 # _roadmap_require_contracts (no creates/needs entry is read).
@@ -16527,6 +17239,203 @@ cmd_roadmap_visual_gate_required() {
   check_python3
   python3 "$(_aimi_roadmap_py)" visual-gate-required \
     --roadmap "$roadmap_path" --phase "$phase_id"
+}
+
+# Whether usage validation is owed for a phase or a flat run, with the surfaces,
+# charters and specs to validate and the kind of skip when it is not. A read:
+# no lock, no write, one crossing into usage_validation.py. It refuses without
+# python3, because a gate that cannot evaluate must not degrade into an answer.
+cmd_usage_validation_required() {
+  local feature="" phase_id="" tasks_file="" have_feature=0 have_phase=0 have_tasks=0
+  local usage="Usage: aimi-cli.sh usage-validation-required (--feature <slug> --phase <id> | [--tasks-file <path>])"
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) have_feature=1; shift; feature="${1:-}" ;;
+      --phase) have_phase=1; shift; phase_id="${1:-}" ;;
+      --tasks-file) have_tasks=1; shift; tasks_file="${1:-}" ;;
+      *)
+        echo "Error: usage-validation-required: unknown flag: $1" >&2
+        echo "$usage" >&2
+        exit 1
+        ;;
+    esac
+    [ $# -gt 0 ] && shift
+  done
+
+  if { [ "$have_feature" -eq 1 ] || [ "$have_phase" -eq 1 ]; } && [ "$have_tasks" -eq 1 ]; then
+    echo "Error: usage-validation-required: --tasks-file cannot be combined with --feature/--phase" >&2
+    echo "$usage" >&2
+    exit 1
+  fi
+  if [ "$have_feature" -ne "$have_phase" ]; then
+    echo "Error: usage-validation-required: --feature and --phase must be given together" >&2
+    echo "$usage" >&2
+    exit 1
+  fi
+
+  if [ "$have_feature" -eq 1 ]; then
+    _roadmap_validate_feature "$feature" usage-validation-required
+    _roadmap_validate_phase_id "$phase_id" "usage-validation-required"
+    local roadmap_path
+    roadmap_path=$(_roadmap_require "usage-validation-required" "$feature")
+    check_python3
+    python3 "$(_aimi_script_py usage_validation.py)" required \
+      --roadmap "$roadmap_path" --phase "$phase_id"
+    return $?
+  fi
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+  check_python3
+  python3 "$(_aimi_script_py usage_validation.py)" files --tasks-file "$tasks_file"
+}
+
+# Where a run's usage-validation record lives, and the record: the one reader
+# the commands call instead of branching phase versus flat themselves. A
+# phase-scoped tasks file is followed to its roadmap phase; a flat one answers
+# its own metadata.usageValidation. Prints {scope, feature, phase, record}.
+# A read: no lock, nothing written, one crossing into tasks.py. It refuses
+# without python3 like usage-validation-required and usage-recipe-get: a
+# "none recorded" that is only a missing interpreter would read a failing
+# verdict as no verdict, so the callers print "unknown" on a refusal instead.
+cmd_usage_validation_get() {
+  local feature="" phase_id="" tasks_file="" have_feature=0 have_phase=0 have_tasks=0
+  local usage="Usage: aimi-cli.sh usage-validation-get (--feature <slug> --phase <id> | [--tasks-file <path>])"
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) have_feature=1; shift; feature="${1:-}" ;;
+      --phase) have_phase=1; shift; phase_id="${1:-}" ;;
+      --tasks-file) have_tasks=1; shift; tasks_file="${1:-}" ;;
+      *)
+        echo "Error: usage-validation-get: unknown flag: $1" >&2
+        echo "$usage" >&2
+        exit 1
+        ;;
+    esac
+    [ $# -gt 0 ] && shift
+  done
+
+  if { [ "$have_feature" -eq 1 ] || [ "$have_phase" -eq 1 ]; } && [ "$have_tasks" -eq 1 ]; then
+    echo "Error: usage-validation-get: --tasks-file cannot be combined with --feature/--phase" >&2
+    echo "$usage" >&2
+    exit 1
+  fi
+  if [ "$have_feature" -ne "$have_phase" ]; then
+    echo "Error: usage-validation-get: --feature and --phase must be given together" >&2
+    echo "$usage" >&2
+    exit 1
+  fi
+
+  local op_args=()
+  if [ "$have_feature" -eq 1 ]; then
+    _roadmap_validate_feature "$feature" usage-validation-get
+    _roadmap_validate_phase_id "$phase_id" "usage-validation-get"
+    local roadmap_path
+    roadmap_path=$(_roadmap_require "usage-validation-get" "$feature")
+    op_args=(--roadmap "$roadmap_path" --feature "$feature" --phase "$phase_id")
+  else
+    if [ -n "$tasks_file" ]; then
+      tasks_file=$(resolve_path "$tasks_file")
+      validate_path_in_project "$tasks_file"
+    else
+      tasks_file=$(get_tasks_file)
+    fi
+    op_args=(--tasks-file "$tasks_file" --project-root "$PROJECT_ROOT")
+  fi
+
+  # One crossing for both forms; a reader, so no lock.
+  check_python3
+  python3 "$(_aimi_tasks_py)" usage-validation-get "${op_args[@]}"
+}
+
+# The audit findings a plan left open (metadata.auditOpen), for /aimi:execute's
+# Open Audit Findings step. A read: no lock, nothing written, one crossing into
+# tasks.py. It refuses without python3 and exits 1 naming the file when the key
+# is present but not an array, because an unreadable list read as "nothing
+# open" would start a run the operator never got to decide on.
+cmd_audit_open() {
+  local tasks_file="" usage="Usage: aimi-cli.sh audit-open [--tasks-file <path>]"
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks-file) shift; tasks_file="${1:-}" ;;
+      *)
+        echo "Error: audit-open: unknown flag: $1" >&2
+        echo "$usage" >&2
+        exit 1
+        ;;
+    esac
+    [ $# -gt 0 ] && shift
+  done
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+
+  check_python3
+  python3 "$(_aimi_tasks_py)" audit-open --tasks-file "$tasks_file"
+}
+
+# The gate outcome of one usage validation, computed from the validator's last
+# usage_validation_verdict block (stdin), the required answer and the evidence
+# directory. A read: no lock, nothing written, one crossing into
+# usage_validation.py. Every outcome is an answer at exit 0, a tooling-failed
+# one included; only a bad invocation is refused.
+cmd_usage_validation_verdict() {
+  local required_file="" evidence_dir="" have_required=0 have_evidence=0
+  local -a extra=()
+  local usage="Usage: aimi-cli.sh usage-validation-verdict --required-file <path> --evidence-dir <dir> [--reproduced <key>]... [--accepted <key>]..."
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --required-file) have_required=1; shift; required_file="${1:-}" ;;
+      --evidence-dir) have_evidence=1; shift; evidence_dir="${1:-}" ;;
+      --reproduced|--accepted)
+        if [ $# -lt 2 ]; then
+          echo "Error: usage-validation-verdict: $1 needs a <charterId>:<step>:<heuristic> key" >&2
+          exit 1
+        fi
+        extra+=("$1" "$2")
+        shift
+        ;;
+      *)
+        echo "Error: usage-validation-verdict: unknown flag: $1" >&2
+        echo "$usage" >&2
+        exit 1
+        ;;
+    esac
+    [ $# -gt 0 ] && shift
+  done
+
+  if [ "$have_required" -ne 1 ] || [ -z "$required_file" ] || [ "$have_evidence" -ne 1 ] || [ -z "$evidence_dir" ]; then
+    echo "Error: usage-validation-verdict: --required-file and --evidence-dir are required" >&2
+    echo "$usage" >&2
+    exit 1
+  fi
+
+  required_file=$(resolve_path "$required_file")
+  ( validate_path_in_project "$required_file" ) || {
+    echo "Error: usage-validation-verdict: --required-file escapes the project" >&2
+    exit 1
+  }
+  evidence_dir=$(resolve_path "$evidence_dir")
+  ( validate_path_in_project "$evidence_dir" ) || {
+    echo "Error: usage-validation-verdict: --evidence-dir escapes the project" >&2
+    exit 1
+  }
+
+  check_python3
+  python3 "$(_aimi_script_py usage_validation.py)" verdict \
+    --required-file "$required_file" --evidence-dir "$evidence_dir" ${extra[@]+"${extra[@]}"}
 }
 
 cmd_roadmap_claim() {
@@ -17390,6 +18299,8 @@ USAGE:
 COMMANDS:
     init-session              Initialize execution session, save state
     find-tasks                Find most recent tasks file
+    find-tasks-all            List every tasks file under .aimi/tasks (depth 1-3) as
+                              absolute paths, one per line; exits 1 when none exist
     status [--counts-only] [--tasks-file <path>]
                               Get status summary as JSON
                               --counts-only  Return aggregate counts without userStories array
@@ -17413,7 +18324,7 @@ COMMANDS:
                               --brief  Return only {id, title, priority, dependsOn} per story
     mark-in-progress <id> [--tasks-file <path>]
                               Mark story as in_progress (returns {id, status} JSON)
-    mark-complete <id> [--tasks-file <path>]
+    mark-complete <id> [--evidence <json>] [--tasks-file <path>]
                               Mark story as completed (returns {id, status} JSON)
     mark-failed <id> [notes] [--tasks-file <path>]
                               Mark story as failed (returns {id, status, notes} JSON)
@@ -17443,7 +18354,7 @@ COMMANDS:
                               prints the entry. Refuses (writes nothing) in agent
                               mode, on a malformed id, with no matching entry, or with
                               an empty --reason. Idempotent: a repeat call is a no-op.
-    apply-audit-patches --staging-dir <dir> [--result <path>] [--annotate-deferred --reason <text> [--agent-deferral]]
+    apply-audit-patches --staging-dir <dir> [--result <path>] [--annotate-deferred --reason <text> [--agent-deferral]] | --resolve <resolutions.json>
                               Validate and apply the cross-story auditor's patches to the
                               staged NN-*.json story files in one crossing: one read and one
                               atomic write per affected file, every refusal decided before
@@ -17458,6 +18369,12 @@ COMMANDS:
                               {annotated, oqDecisions}. --agent-deferral (only with
                               --annotate-deferred) keeps the unresolved marker and adds no
                               reason text.
+                              --resolve <resolutions.json> (alone) appends each confirmed
+                              criterion of {"resolutions": [{message, stories, criterion}]}
+                              to the acceptanceCriteria of the staged stories it names, with
+                              a resolved note; an entry without a usable criterion adds the
+                              unresolved marker only. Prints {resolvedStories, openFindings,
+                              duplicates, refused, oqDecisions}; a repeat run changes nothing.
     validate-outline --outline <path>
                               Check an outline.json array's produces/consumes contract
                               ([ext:]<kind>:<name>, kind sym|path|cli|http; ext: only in
@@ -17496,6 +18413,15 @@ COMMANDS:
                               is the phase-aggregate completed-story count; the gate stops
                               honoring it when that count changes. Refuses (writes nothing)
                               in agent mode or with an empty --reason. Idempotent.
+    usage-validation-record --status <passed|failing|skipped> [--kind <not-applicable|unable-to-evaluate|disabled-by-operator>] [--reason <text>] [--review <path>] [--rounds <n>] [--findings-json <json>] [--tasks-file <path>]
+                              Record metadata.usageValidation {status, kind?, reason?, review?,
+                              rounds, findings?, recordedAt} in one locked crossing, replacing
+                              any earlier record, and print it. --kind goes with skipped and
+                              only with it; failing and skipped need a --reason. --findings-json
+                              is {<key>: {status: open|fixed|accepted, reason?}}; accepted
+                              findings of the previous record carry over. A failing record makes
+                              archive-task refuse. Refuses on a phase-scoped tasks file.
+                              Works in agent mode.
     set-execution-mode <container|inline> [--tasks-file <path>]
                               Persist a --container/--inline override onto metadata.execution
                               (returns {execution} JSON). Refuses with non-zero exit on a
@@ -17529,6 +18455,16 @@ COMMANDS:
                               Pass a gate on a story; optionally store selected option
     gate-fail <id> [--tasks-file <path>]
                               Fail a gate on a story
+    patch-metadata --tasks-file <path> [--from <patch.json>] [--remove <key>]...
+                              Merge the top-level keys of the JSON object in <patch.json>
+                              into the tasks file's metadata, each key replacing the
+                              value it names, and delete each --remove key. Refuses a
+                              patch that is not a non-empty object, a key named by both
+                              flags, a branchName outside ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$,
+                              and changing or removing baseRef, pluginVersion,
+                              roadmapPath or phase when the file already holds one.
+                              Prints {patched, unchanged, removed}; writes nothing
+                              when nothing changes.
     update-field <id> <field.path> <value> [--tasks-file <path>]
                               Update a nested field on a story (e.g., verification.status passed).
                               <field.path> must be a dotted chain of identifier segments
@@ -17552,6 +18488,9 @@ COMMANDS:
                               Compute waves from dependsOn, compare to stored wave, report mismatches
     validate-wave-contention [--tasks-file <path>]
                               Refuse a wave whose stories claim the same path in implementation.files
+    wave-verify-commands <id>... [--tasks-file <path>]
+                              List a wave's deduplicated implementation.verify commands as
+                              {command, project, stories} JSON. Read-only, no lock.
     validate-tasks [--tasks-file <path>]
                               Validate tasks file citation fields (schemaVersion guard, no checks yet)
     cascade-skip <id> [--tasks-file <path>]
@@ -18025,6 +18964,28 @@ COMMANDS:
                               (research=fast/haiku, review=powerful/opus,
                               design+workflow+executor=balanced/sonnet).
                               Emits the written JSON on stdout.
+    bookkeeping-declared [--project <key>]
+                              Print one project key's bookkeeping declaration from
+                              .aimi/config.json as one JSON line {project, paths}; paths
+                              maps each declared shared file to its rule. Absence prints
+                              an empty paths; a malformed or git-tracked declaration
+                              exits 1. Read-only (key defaults to ".").
+    verify-stage-declared [--project <key>]
+                              Print whether the project key declared stage-aware
+                              verification (verifyStage in .aimi/config.json) as one JSON
+                              line {project, staged, declared}. Absence prints both
+                              false, an entry of false prints declared true; a
+                              malformed declaration exits 1. Read-only (key defaults
+                              to ".").
+    bookkeeping-resolve [--project <key>] [--root <dir>]
+                              In a repository mid-merge, resolve the project key's
+                              declared bookkeeping files (key defaults to ".", root to
+                              the caller's directory, which must be a repository top
+                              level) by their rule, read from the index stages, and
+                              rewrite them in the working tree without staging them.
+                              Prints {resolved, unclaimed, refused}; an unclaimed file
+                              stays conflicted for judgment, a refused one exits 1 and
+                              nothing is written. Needs python3.
     deps-recipe-record --project <key> --command <cmd>
                               Record the install command a person confirmed for one
                               project key at dependencies.install[<key>] of
@@ -18033,6 +18994,70 @@ COMMANDS:
                               "recorded" or "unchanged". Refuses an unsafe command
                               or key, an unreadable config and a config tracked by
                               git; needs python3.
+    usage-recipe-record --project <key> (--serve <cmd> | --cli <cmd>) [--setup <cmd>]...
+                        [--cleanup <cmd>]... [--port <n>] [--ready <url>]
+                        [--login none|manual] [--login-url <url>]
+                        [--browser agent-browser|chrome] [--external-services <text>]
+                              Record how the whole product comes up at
+                              usage.recipe[<key>] of .aimi/config.json (same key rule as
+                              deps-recipe-record). --serve needs --ready; --port, --ready,
+                              --login, --login-url and --browser need --serve. Commands are
+                              plain (no ; | & $ < > or backtick, at most 512 chars, at most
+                              20 setup and 20 cleanup steps); ready and login url are a
+                              /-path or an http(s) loopback URL; port is 1024-65535. No
+                              default is filled in. Prints {status, project, recipe, config};
+                              status is "recorded" or "unchanged". Needs python3.
+    usage-recipe-get --project <key>
+                              Print {status, project, recipe} for a recorded recipe,
+                              {status:"absent", recipe:null} for none, and
+                              {status:"untrusted", recipe:null} for a config tracked by git.
+                              Refuses a stored entry that fails validation; needs python3.
+    inspect-prototype-kit <path>
+                              Print {kind, htmlFiles, markdownFiles, otherFiles, refused, qualifies}
+                              for a folder or .zip prototype kit. Writes nothing; needs python3.
+    import-prototype-kit <path> [--slug <s>]
+                              Copy a qualifying kit into .aimi/sources/<slug>-<hash8>/ and print
+                              {dir, htmlFiles, markdownFiles, otherFiles, reused}. Refuses the whole
+                              kit, writing nothing, on any unsafe member; needs python3.
+    usage-recipe-sources --project <key> [--project <key>]...
+                              Print {repositories:[{project, sources:[{kind, path}]}]}: the
+                              files of each repository that may state how it comes up (readme,
+                              contributing, claude-md, agents-md, makefile, justfile,
+                              package-scripts, compose, devcontainer, workflow), in that kind
+                              order, paths sorted. Reads no file content (package.json only
+                              for its scripts/workspaces keys); writes nothing. Refuses a
+                              missing, repeated or invalid key and a key outside the layout;
+                              needs python3.
+    usage-env-up --run <key> --repo <project>[=<branch>]... [--restart]
+                              Bring the product up from the recorded usage recipe
+                              (usage-recipe-get), detached, one repository after
+                              another in the order given. <project>=<branch> serves
+                              from <repository>/.worktrees/<branch>; <project> alone
+                              uses the checkout itself. Prints {run,status,stage,state}
+                              with status "starting" at once ("unable-to-evaluate",
+                              reason "no usage recipe recorded", when none is recorded;
+                              {..., reused:true} for a ready run whose servers still run).
+                              --restart serves again without repeating setup steps.
+                              Env: AIMI_USAGE_ENV_STEP_TIMEOUT (900 s),
+                              AIMI_USAGE_ENV_READY_TIMEOUT (300 s). Needs python3.
+    usage-env-status --run <key> [--wait <0-480>]
+                              Print {run,status,stage,reason,repositories:[{project,
+                              status,url,loginUrl}],origins,originsRefused,log}; status is
+                              starting|ready|unable-to-evaluate|failed|down|absent. For a
+                              ready run, origins are the de-duplicated loopback origins of
+                              every server URL and recipe login URL (a relative login URL
+                              joined to its repository's server, as loginUrl) and
+                              originsRefused names every URL that is not http(s) on
+                              localhost, 127.0.0.1 or [::1] without userinfo. Returns as
+                              soon as status leaves "starting" or the wait ends; exit 0 in
+                              every state case. Needs python3.
+    usage-env-down --run <key>
+                              Stop a live runner, run the recorded recipe's cleanup steps
+                              (re-read from the trusted recipe, never the state file's copy),
+                              stop the servers it started. Directories the state file names
+                              must lie inside the layout; a state file git tracks is refused.
+                              Prints {run,status:"down",cleanupFailed,stopped};
+                              {run,status:"absent"} for an unknown run. Needs python3.
     models-prompt-check       Check whether the model-selection prompt should be shown.
                               Per-host decision:
                               - prompt when the config file is missing entirely (always
@@ -18056,6 +19081,12 @@ COMMANDS:
                               Create or checkout branch with deterministic logic.
                               Without --project, acts on the caller's repository; refuses
                               when a git .aimi root is a different repository
+    branch-divergence [--branch <name>] [--project <path>]
+                              How a local branch stands against origin/<name> as the last
+                              fetch left it; read-only, never contacts the remote. Prints
+                              {"branch","divergence","ahead","behind"}; divergence is one
+                              of none, in-sync, local-ahead, local-behind, diverged.
+                              --branch defaults to the current branch.
     resolve-base-branch <name> --default-branch <branch> [--base <branch>] [--project <path>]
                               Decide what branch a new branch or container should be cut
                               from -- no checkout is performed. Prints a single JSON object:
@@ -18080,6 +19111,10 @@ COMMANDS:
                                        also heals a stale or foreign-root GLOBAL cli-path
                                        pointer, reported as globalCli in the JSON
     cleanup-versions          Remove old cached plugin versions, keep latest only
+    prime-cache               Write this script's path into the host's cli-path cache
+                              when none is recorded yet; prints {status, path, host,
+                              version, message}. Exits 0 for ok, already_current and
+                              not_found, 1 for error
     list-archivable           List task files where all stories are completed/skipped (JSON array)
     archive-task <path>       Move completed task file (and linked brainstorm) to .aimi/archive/
     research-lookup [--ignore-missing-cited-paths] <path>
@@ -18748,6 +19783,58 @@ COMMANDS:
                               or re-verified phase carries one record, never two.
                               A phase id absent from roadmap.json is refused,
                               naming the id and the roadmap path.
+    roadmap-record-usage-validation --feature <slug> --phase <id> --status <passed|failing|skipped> [--kind <not-applicable|unable-to-evaluate|disabled-by-operator>] [--reason <text>] [--review <path>] [--rounds <n>] [--findings-json <json>]
+                              Locked read-modify-write. Replaces
+                              phases[].usageValidation whole with {status, kind?,
+                              reason?, review?, rounds, findings?, recordedAt}; a
+                              key not given is omitted, rounds defaults to 0.
+                              --kind is required with skipped and refused with any
+                              other status; --reason is required (non-blank) for
+                              failing and skipped. --findings-json is an object of
+                              <key>: {status: open|fixed|accepted, reason?}; an
+                              overwrite keeps the previous record's accepted
+                              entries it does not restate. --review must resolve
+                              inside the project root. Needs python3. A phase
+                              owing usage validation cannot reach completed
+                              without passed or skipped recorded.
+    usage-validation-required --feature <slug> --phase <id> | [--tasks-file <path>]
+                              Read-only. Whether usage validation is owed for a phase
+                              (every member of a split phase) or a flat run (the
+                              session's tasks file when --tasks-file is absent).
+                              Prints {required, skipKind, reason, surfaceSource,
+                              askUndeclared, members, projects, recipeRecorded,
+                              surfaces, charters, specs}. skipKind is
+                              disabled-by-operator (AIMI_USAGE_VALIDATION=off),
+                              unable-to-evaluate, not-applicable or null. Needs python3.
+    audit-open [--tasks-file <path>]
+                              Read-only. The audit findings a plan left open
+                              (metadata.auditOpen). Prints {count, findings:
+                              [{message, stories[]}]}; count 0 and an empty list
+                              when the key is absent. Exits 1 naming the file when
+                              the key is present but not an array.
+    usage-validation-get --feature <slug> --phase <id> | [--tasks-file <path>]
+                              Read-only. Where a run's usage-validation record lives
+                              and the record: a phase-scoped tasks file (the
+                              session's when --tasks-file is absent) is followed
+                              through metadata.roadmapPath to its roadmap phase, a
+                              flat one answers its own metadata.usageValidation.
+                              Prints {scope (phase|flat), feature, phase, record};
+                              record is null when none is stored. Exits 1 when the
+                              roadmap or the phase cannot be read. Needs python3.
+    usage-validation-verdict --required-file <path> --evidence-dir <dir> [--reproduced <key>]... [--accepted <key>]...
+                              Read-only. Reads the validator's final message on stdin,
+                              takes only its LAST fenced usage_validation_verdict
+                              block and computes the gate outcome itself. Prints
+                              {outcome, reason, counts {planned, executed, blocked,
+                              exploratoryActions}, bugs, decisions, unmapped,
+                              unconfirmed, reported, blockedCharters, droppedEvidence,
+                              summary}. outcome is tooling-failed, unable-to-evaluate,
+                              fails or pass, always at exit 0. --required-file is the
+                              answer of usage-validation-required (its charters[].id
+                              are the planned charters), --evidence-dir the directory
+                              evidence paths are relative to. --reproduced and
+                              --accepted take a <charterId>:<step>:<heuristic> key and
+                              repeat. Needs python3.
     roadmap-visual-gate-required --feature <slug> --phase <id>
                               Read-only. Derives, from the phase's own tasks
                               file(s) (every member of a split phase), whether a
@@ -18818,6 +19905,43 @@ COMMANDS:
                               completed; any failed -> verification_failed; else
                               in_progress) and corrects any divergent phase status.
                               Prints {corrections:[{id,from,to}...]}.
+    validate-contracts <feature> [--phase <id>] [--agent-mode]
+                              Read-only. Cross-checks creates[]/needs[] contracts.
+                              Artifact identity is the entry's own identity field.
+                              Always sanitizes creates/needs entries first; any hit
+                              names the phase id and field (never the raw string)
+                              and exits 1, regardless of --agent-mode. Then checks
+                              duplicate creates (same identity declared by 2+
+                              phases, regardless of status): blocks with exit 1 by
+                              default, naming both phase ids and the identity;
+                              --agent-mode demotes this one finding to a stderr
+                              warning and continues. Then resolves every needs
+                              entry in scope (--phase <id> only, or every phase
+                              when omitted) against creates identities reachable
+                              through the needing phase's dependsOn closure.
+                              Without --phase, identity resolution alone satisfies
+                              a need. With --phase, the resolved provider phase must
+                              also have status completed AND list the identity
+                              under its phase-<dir>/handoff.md "Artifacts Created"
+                              section, else the need is missing with reason
+                              not-delivered; this delivery check always blocks.
+                              Emits {valid, missing:[{phase,need,reason}],
+                              providers:{<need>: <providerPhaseId>}} (plus
+                              duplicateWarnings when --agent-mode demoted a
+                              collision). Exit 0 when valid, 1 otherwise.
+    roadmap-sweep <feature>   Read-only, advisory-only residual sweep.
+                              NEVER exits non-zero. Reports every creates identity
+                              that no needs entry anywhere in the roadmap
+                              references, as orphanCreates:[{phase,creates}].
+                              Reports every needs
+                              entry that resolves (by identity, anywhere in the
+                              roadmap) to a creates entry from a not-yet-completed
+                              phase, as deferredNeeds:[{phase,need,deferred:
+                              <providerPhaseId>}]. Suspicious creates/needs content
+                              is dropped before either check runs and surfaced
+                              instead as warnings:[{phase,field,message}], naming
+                              only the phase id and field, never the raw string.
+                              Emits {orphanCreates, deferredNeeds, warnings}.
     phase-overlap <feature> <phase-a> <phase-b>
                               Deterministic stage-2 check for the sibling-phase
                               overlap guard. Loads both phases' already-expanded
@@ -19094,6 +20218,7 @@ main() {
     mark-failed)       shift; cmd_mark_failed "$@" ;;
     mark-skipped)      shift; cmd_mark_skipped "$@" ;;
     set-execution-mode) shift; cmd_set_execution_mode "$@" ;;
+    patch-metadata)    shift; cmd_patch_metadata "$@" ;;
     count-pending)     shift; cmd_count_pending "$@" ;;
     run-verdict)       shift; cmd_run_verdict "$@" ;;
     validate-deps)            shift; cmd_validate_deps "$@" ;;
@@ -19109,10 +20234,12 @@ main() {
     set-verification)  shift; cmd_set_verification "$@" ;;
     acknowledge-smell) shift; cmd_acknowledge_smell "$@" ;;
     acknowledge-evidence) shift; cmd_acknowledge_evidence "$@" ;;
+    usage-validation-record) shift; cmd_usage_validation_record "$@" ;;
     judge-verification) shift; cmd_judge_verification "$@" ;;
     triage-verify) shift; cmd_triage_verify "$@" ;;
     validate-waves)    shift; cmd_validate_waves "$@" ;;
     validate-wave-contention) shift; cmd_validate_wave_contention "$@" ;;
+    wave-verify-commands) shift; cmd_wave_verify_commands "$@" ;;
     validate-tasks)    shift; cmd_validate_tasks "$@" ;;
     cascade-skip)      shift; cmd_cascade_skip "$@" ;;
     reset-orphaned)    shift; cmd_reset_orphaned "$@" ;;
@@ -19132,6 +20259,7 @@ main() {
     # block above, before find_aimi_root -- never here.
     setup-branch)      shift; cmd_setup_branch "$@" ;;
     resolve-base-branch) shift; cmd_resolve_base_branch "$@" ;;
+    branch-divergence) shift; cmd_branch_divergence "$@" ;;
     clear-state)       cmd_clear_state ;;
     version)           cmd_version ;;
     check-version)     shift; cmd_check_version "$@" ;;
@@ -19152,7 +20280,18 @@ main() {
     apply-audit-patches) shift; cmd_apply_audit_patches "$@" ;;
     validate-outline) shift; cmd_validate_outline "$@" ;;
     validate-staging) shift; cmd_validate_staging "$@" ;;
+    bookkeeping-declared) shift; cmd_bookkeeping_declared "$@" ;;
+    verify-stage-declared) shift; cmd_verify_stage_declared "$@" ;;
+    bookkeeping-resolve) shift; cmd_bookkeeping_resolve "$@" ;;
     deps-recipe-record) shift; cmd_deps_recipe_record "$@" ;;
+    usage-recipe-record) shift; cmd_usage_recipe_record "$@" ;;
+    usage-recipe-get) shift; cmd_usage_recipe_get "$@" ;;
+    usage-recipe-sources) shift; cmd_usage_recipe_sources "$@" ;;
+    inspect-prototype-kit) shift; cmd_inspect_prototype_kit "$@" ;;
+    import-prototype-kit) shift; cmd_import_prototype_kit "$@" ;;
+    usage-env-up) shift; cmd_usage_env_up "$@" ;;
+    usage-env-status) shift; cmd_usage_env_status "$@" ;;
+    usage-env-down) shift; cmd_usage_env_down "$@" ;;
     outline-shift) shift; cmd_outline_shift "$@" ;;
     split-detect)      shift; cmd_split_detect "$@" ;;
     roadmap-init)          shift; cmd_roadmap_init "$@" ;;
@@ -19167,6 +20306,11 @@ main() {
     roadmap-write-handoff) shift; cmd_roadmap_write_handoff "$@" ;;
     roadmap-record-visual-gate)   shift; cmd_roadmap_record_visual_gate "$@" ;;
     roadmap-visual-gate-required) shift; cmd_roadmap_visual_gate_required "$@" ;;
+    roadmap-record-usage-validation) shift; cmd_roadmap_record_usage_validation "$@" ;;
+    usage-validation-required) shift; cmd_usage_validation_required "$@" ;;
+    usage-validation-get) shift; cmd_usage_validation_get "$@" ;;
+    audit-open) shift; cmd_audit_open "$@" ;;
+    usage-validation-verdict) shift; cmd_usage_validation_verdict "$@" ;;
     write-review)         shift; cmd_write_review "$@" ;;
     validate-contracts)    shift; cmd_validate_contracts "$@" ;;
     verify-creates)        shift; cmd_verify_creates "$@" ;;

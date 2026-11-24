@@ -12,7 +12,8 @@ area live under `docs/dev/`; read the one that matches what you are about to cha
 | `docs/dev/hooks.md` | a hook guard (staging-file, raw forge write) or a bypass env (§ Guard Bypass Envs) |
 | `docs/dev/ratchets.md` | the artifact-language or spec-section ratchet, or their baselines |
 | `docs/dev/routers.md` | `commands/plan.md`, `commands/execute.md`, their step files, or the OpenCode references allowlist |
-| `docs/dev/execute-wave-loop.md` | `commands/references/execute/step-4-wave-execution-loop.md` (the reasoning its comments point at) |
+| `docs/dev/execute-wave-loop.md` | `commands/references/execute/step-4-wave-execution-loop.md` or `commands/references/execute/bookkeeping-resolve.md` (the reasoning their comments point at), or the `verifyStage` key of `.aimi/config.json`, `verify-stage-declared` and `AIMI_VERIFY_STAGE` (§ Stage-aware verification) |
+| `docs/dev/bookkeeping.md` | the `bookkeeping` key of `.aimi/config.json`, `bookkeeping-declared`, `bookkeeping-resolve`, `bookkeeping*.py`, or the declared-path exemption in `wave_contention` and the cross-story auditor |
 | `docs/dev/cli-path-resolution.md` | a resolution layer or line in `commands/references/cli-path-resolution.md`, or `hooks/auto-approve-cli.sh` |
 | `docs/dev/story-lifecycle.md` | `remove-story`, `set-verification`, `acknowledge-*`, `judge-verification`, `triage-verify`, `split-detect` |
 | `docs/dev/planning-verbs.md` | `story-merge`, `apply-audit-patches`, `validate-outline`/`validate-staging`/`outline-shift`, `plan_checks.py`, advisory smells |
@@ -21,6 +22,7 @@ area live under `docs/dev/`; read the one that matches what you are about to cha
 | `docs/dev/review.md` | `commands/review.md` or an agent under `agents/review/` (why the request is read as it is, why these reviewers, the shared closing sections) |
 | `docs/dev/story-executor.md` | `skills/story-executor/SKILL.md`, the worker's brief, or how a command spawns it |
 | `docs/dev/tasks-schema.md` | the `tasks.json` shape or a validator over it |
+| `docs/dev/usage-validation.md` | the usage-validation gate: `commands/references/execute/*usage-validation*.md`, the `usage-*` verbs, `aimi-usage-validator`, `AIMI_USAGE_VALIDATION`, the `usageValidation` records |
 | `docs/dev/jq-census.md` | a `jq` call in `aimi-cli.sh` or under `commands/` (the principle stays below) |
 
 ## Versioning Requirements
@@ -123,6 +125,13 @@ For a root whose status is `needs-recipe`, `commands/references/dependency-setup
 ## Deliverable Branch and the Closes Rule
 
 `metadata --with-deliverable-branch` adds `.deliverableBranch` to the metadata object: the phase's branch (derived from the roadmap the way execute's Claim the Phase step derives it) for a phase-scoped split member, and `metadata.branchName` for every other file. `commands/open-pr.md` reads it in Steps 2a and 4a, counts plans rather than tasks files, and renders a `Closes` line for `metadata.issues` only when the plan's deliverable branch is the PR's branch; a plan split across repositories renders none, because one repository's PR could close an issue another repository's PR leaves open. Tests: `scripts/tests/test_open_pr_deliverable.py`.
+
+## Usage Validation
+
+A run that delivered a usable surface is judged by using it: `aimi-usage-validator` walks charters through the product brought up from a recorded recipe, after the Phase Visual Gate (phase mode) or after Finalize (flat run). The flow, the `usage-*` verbs, the records and the skip kinds are in `docs/dev/usage-validation.md`; read it before touching any of them.
+
+- A skip is never a pass: every one records a kind (`not-applicable`, `unable-to-evaluate`, `disabled-by-operator`) and a reason. `AIMI_USAGE_VALIDATION=off` records `disabled-by-operator`.
+- The five read-only verbs (`usage-recipe-get`, `usage-env-status`, `usage-validation-required`, `usage-validation-verdict`, `usage-validation-get`) are in `hooks/auto-approve-cli.sh` Pattern 2; the writers and anything that runs a recipe command are not and must keep prompting.
 
 ## Output Files
 

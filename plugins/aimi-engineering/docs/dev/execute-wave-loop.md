@@ -222,6 +222,22 @@ The step used to stop at every conflict and hand it to a person. In practice the
 - A merge that never started (an untracked file in the way, which `merge-all` reports as "Merge did not start") has no conflicted file and is not a conflict to resolve, so it still stops.
 - After a resolution, `merge-all` runs again over the stories not yet reachable from the target, found with the same `merge-base --is-ancestor` test the cleanup below uses, so a second conflict in the same group goes through the same loop.
 
+A merge that ends clean, or is resolved this way, is still checked afterwards as a whole; that check is described in "Integrated wave verification" below.
+
+## Bookkeeping files are resolved by declared rule
+
+This extends "Wave merge conflicts are resolved in place" above and does not repeat it. The procedure is `commands/references/execute/bookkeeping-resolve.md`; the declaration, the rules and the safety rules are in `docs/dev/bookkeeping.md`.
+
+**The order.** The resolver runs after `merge-all` stops and before the judgment loop. Only the conflicted files the resolver did not resolve, the unclaimed and the undeclared ones, are judged. A file a rule wrote is no longer a conflict anyone reasons about, so spending the loop on it would only invite a hand edit of a value a rule already computed.
+
+**Why the order matters, and what stays the same.**
+
+- `verify` still runs when every conflicted file is declared. Involved stories are taken over every conflicted file, resolved and judged alike, because a rule's output is a computed guess and the stories that wrote the file are the ones that can tell whether it holds.
+- Both sets are staged together, with one `git add` and one commit after the verifies pass, and restored together with `git checkout --merge` on failure. Staging the resolved set early would leave git unable to put its own conflict back, which is the property the in-place loop keeps.
+- The integrated wave check runs after resolution, as it does after any merge. It is what catches a computed number that is wrong.
+- A refusal of kind `unproducible` stops before any judgment, with the existing MERGE CONFLICT report. The verb wrote nothing, so no restore is needed and a re-run starts from the same conflict.
+- The reconcile loop is told which files were machine-resolved and must not hand-edit them; a failure that traces to one is reported, not patched around.
+
 ## Conflict cleanup keeps unmerged branches
 
 Cleanup this wave's worktrees -- but ONLY the ones whose work
@@ -240,6 +256,30 @@ of "Wave merge conflicts are resolved in place" above, and stops only
 when that fails. Its verifies run from the merge directory, never from
 a `SPLIT_PLAN` record's `.root`, which in a multi-repo layout is the
 repository's main checkout and not where the merge is in progress.
+
+## Integrated wave verification
+
+The wiring lives in three places: step-4-wave-execution-loop.md § Integrated Wave Check, paired-split-merge-and-continue.md § Integrated Split Check and step-1-execution-mode.md § Integrated Re-verify on Resume. The procedure they share is `commands/references/execute/wave-reconcile.md`. This section records why it reads as it does.
+
+**Why a clean merge is checked.** Stories of one wave are verified each in its own worktree, against a base that does not hold their siblings' work. Two merges can both apply without a textual conflict and still contradict each other: one story renames what the other calls, or both add an entry the same registry refuses to hold twice. `scripts/tests/test_wave_integration_fixture.py` is the executable proof: it builds two stories in a real git repository whose merges are clean and whose merged tree fails. A break left on the integration branch becomes the base of the next wave, so every later story would be verified on top of it and the failure would surface far from its cause. And a story marked complete before the check would carry a false status. So the check runs per project group, right after that group's merge and before that group's `mark-complete` loop. It is not left to the end of the run, because by then the break has been built on and cannot be attributed to a wave.
+
+**What runs, and how.** `wave-verify-commands` prints the deduplicated union of the `implementation.verify` commands of the merged stories, each with the stories that own it. The orchestrator runs them one at a time, each in its own Bash call, with the full output in a log under `.aimi/wave-verify` and only the tail in its own context. Only stories whose executor recorded verify evidence enter the union; the rest are reported as not re-verified. A lone merged story whose merged tree equals its verified commit is skipped, since the tree was already verified as it stands. The in-place conflict loop's own verifies do not replace the check: they cover the stories involved in one conflict, not the whole wave.
+
+**The reconcile design.** A failing union gets at most 2 reconcile rounds. Each round is a fresh worker, and the orchestrator never trusts its report: it re-runs the whole union itself. Before the first round each failing command is re-run once, unchanged, so a flaky command is reported and not reconciled. A round may not touch `.aimi/`, a tasks file, any story's verify text or `.git/`; such an edit is undone and ends the check. A round that makes no commit counts as spent, and a round after which more commands fail than before ends reconciliation at once. The stop is headed INTEGRATION CHECK FAILED, distinct from the merge conflict stop. It prints PRE_RECONCILE_SHA with the `git reset --hard` command that returns the branch to the merged state, keeps the group's worktrees and branches, and leaves the stories `in_progress`.
+
+**Why a later run re-verifies instead of re-executing.** After the stop, the stories are merged but unchecked. `reset-orphaned` would mark every `in_progress` story failed, and a failed story stays failed, so a plain resume would lose work that is already on the branch. The re-verify therefore runs first, recognizes a story only when it is `in_progress`, has exactly one matching branch with a commit of its own and that branch is an ancestor of the integration branch, and hands those stories back to the same procedure. On a pass they are completed; on another stop they stay as they were.
+
+## Stage-aware verification
+
+Stories of one wave run their `implementation.verify` at the same time, each in its own worktree. A worktree isolates files and nothing else: a test database, a container with a fixed name and a fixed port are shared by every worktree of the machine, so two end-to-end runs side by side collide, or silently share data. The integrated wave check already runs every merged story's verify again, one command at a time, on the merged tree. So the collision is avoided by not running those checks in the worktrees at all, and the plugin leaves the choice of which checks those are to the project.
+
+- **The variable.** `AIMI_VERIFY_STAGE` is `worktree` in a story worker's verify runs (pre-run, probe and Step 4) and `merged` in every command of the integrated check. It is unset everywhere else: an inline run, `/aimi:next`, and the plan-time probe run one story at a time and have no later check to defer to, so there the project's commands run in full.
+- **The project's side.** The command that owns the shared resource leaves itself out when it reads `worktree`, for example as the first line of the script behind `npm run test:e2e`: `[ "${AIMI_VERIFY_STAGE:-}" = "worktree" ] && { echo "deferred to the post-merge check"; exit 0; }`. The plugin never rewrites a verify: the executor runs `implementation.verify` as one script, exactly as written, and cutting a command out of it would mean editing shell.
+- **The declaration.** `{"verifyStage": {"<project key>": true}}` in `.aimi/config.json`, read by `verify-stage-declared` (`scripts/verify_stage.py`). `.` is the single-repo key, the same key `bookkeeping` uses. It prints `{project, staged, declared}`: absence at any level answers both `false`, an entry of `false` answers `staged: false, declared: true`, and a value that is not a boolean is refused, so a typo is never read as "not declared". A tracked config is not refused here: the declaration writes no file and runs no command.
+- **What the declaration changes.** The wave loop hands `VERIFY_STAGE = worktree` to the worktree story workers of a declared group, and only those: without the declaration the plugin cannot know the project's commands read the variable. `wave-reconcile.md`'s skip rule never holds for a declared project, because the deferred checks have run nowhere yet. `merged` is exported whether or not the project declared anything, since a command that does not read it is unaffected.
+- **The notice.** The wave loop reads the declaration once per group per run, before the worktrees exist (`STAGE` in Step 4's Stage Declaration). When a group has never answered (`declared: false`) and a wave holds two or more of its stories, it shows one line, once per run, naming the key to add and the variable the checks read, and that an entry of `false` turns the line off. A refused declaration shows the refusal and no notice. It asks nothing and writes nothing: recording the declaration alone would change nothing while the project's own checks still ignore the variable, and that half is a change to the project's scripts the plugin cannot make for it.
+- **Limits.** The mechanism is only as good as the project's script: a declared project whose commands ignore the variable runs everything in both places, as before. A failure of a deferred check is found after the merge and goes to the reconcile rounds, not to the story's own worker. A deferred segment passes before and after the work in the worktree, so it adds nothing to `verification.evidence.discriminating`; the story's verdict reads `evidence.exit` and is unaffected, but a phase in which every completed story's verify is only deferred commands reaches the completed gate's evidence refusal and needs `acknowledge-evidence`. Split sub-orchestrators run concurrently, so the integrated checks of two members can overlap; on the SIDE axis both members are one repository, and a project that splits that way still needs its own lock around the shared resource.
+- **Tests.** `scripts/tests/test_verify_stage.py` covers the reader and the verb and pins the four wiring sites: the stage handed to a worker, the notice, the worker's export and the integrated check.
 
 ## knownGaps extraction
 

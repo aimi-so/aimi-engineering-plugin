@@ -52,4 +52,17 @@ $AIMI_CLI detect-default-branch
 
 Use the output as the default branch for `branchName` derivation in Phase 4.
 
-**If `AIMI_ROOT_IS_GIT_REPO` is false:** Skip. Default branch detection happens per-project in Phase 4 using `$AIMI_CLI detect-default-branch --project [path]`.
+Then read how the current branch stands against origin, now that the fetch has run:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+AIMI_ROOT="$PWD"
+while [ "$AIMI_ROOT" != "/" ] && [ ! -d "$AIMI_ROOT/.aimi" ]; do AIMI_ROOT=$(dirname "$AIMI_ROOT"); done
+[ -d "$AIMI_ROOT/.aimi" ] || AIMI_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+$AIMI_CLI branch-divergence --project "$AIMI_ROOT" || echo '{"branch":"","divergence":"none","ahead":0,"behind":0}'
+```
+
+Store the printed object as `BRANCH_DIVERGENCE`. `--project "$AIMI_ROOT"` makes it answer for the checkout `baseRef` is read from, whatever directory the command was started in. The plan is written against the working tree and `metadata.baseRef` records its HEAD, so a `divergence` of `local-behind` or `diverged` is acted on by the router's Local Branch Freshness entry once `INTERACTIVE_MODE` is known. Any other value needs nothing.
+
+**If `AIMI_ROOT_IS_GIT_REPO` is false:** Skip. Default branch detection happens per-project in Phase 4 using `$AIMI_CLI detect-default-branch --project [path]`. Set `BRANCH_DIVERGENCE` to `none`: a multi-repo layout is not checked here.

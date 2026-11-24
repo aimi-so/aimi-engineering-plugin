@@ -33,6 +33,7 @@ Your spawn prompt gives you these values. Use them exactly as given; never re-de
 | `PROJECT_GUIDELINES` | when the project has any | Absolute paths of the project's `CLAUDE.md`/`AGENTS.md` files. |
 | `HEADED_MODE` | when visual-follow is active | `true`: a headed browser session named `visual-follow` is already open. |
 | `VISUAL_VERIFICATION` | worktree stories | `post-merge`: skip the Visual Verification section; it runs after the merge. |
+| `VERIFY_STAGE` | worktree stories of a project that declared it | `worktree`: export `AIMI_VERIFY_STAGE=worktree` into every verify run (Step 1.5). |
 
 A value that is absent is unset. Do not invent one.
 
@@ -133,10 +134,17 @@ outside this rule: the verb names it and you read the path it reports.
 `story.implementation.prototypeAnchor` is set, read every prototype with the Read tool before
 writing implementation code:
 
-- First check `metadata.prototypeDropped` for an entry naming a prototype this story's
-  acceptance criteria depend on. If there is one, log `prototype <path> dropped — <reason>`
-  and say so in the report. It is a record only: never open, move, delete or resolve the path
-  it names.
+- First check `metadata.prototypeDropped`. An entry records how the plan saw a prototype;
+  it never stops you reading one. You open prototypes only through `metadata.prototypePaths[]`
+  and `story.implementation.prototypeAnchor` (below), never through a `prototypeDropped` path.
+  - `reason: "no-view-anchors"`: the file has no `data-view` sections, so the plan did not
+    slice it and this story's criteria may restate only part of it. Read it in full anyway: it
+    is still this story's layout reference. Log `prototype <path> not sliced — read in full`.
+  - Any other reason (`aggregate-cap`): the plan was written without its contents. Read it in
+    full when it is listed below, and name in the report each place where a criterion and the
+    prototype disagree. Log `prototype <path> unseen by the plan — <reason>`.
+  - A path named only in `prototypeDropped`, in neither of those fields: do not open it; say
+    so in the report.
 - Check `metadata.prototypeSuperseded` (`[{path, decision, note}]`) for an entry whose `path`
   is a prototype you read. Read it NEXT TO that prototype, log
   `prototype <path> superseded by <decision> — <note>`, and do not reproduce the superseded
@@ -192,8 +200,9 @@ over sentences, no filler, safety escapes preserved.
 
 Read `story.notes` before you start. It holds what the plan found that no other field carries:
 measurements, research findings, file paths and gotchas, and the cross-story audit's own
-paragraphs, separated by `---`. A paragraph opening with `[audit-deferred:` records an audit
-finding the plan left open, with the reason given. An older paragraph can describe a sibling
+paragraphs, separated by `---`. A paragraph opening with `[audit-deferred: resolved at plan review]` is a decision
+already taken: its acceptance criterion is the contract. A paragraph opening with
+`[audit-deferred: unresolved — review before execution]` is a finding left open. An older paragraph can describe a sibling
 story as it stood before the audit. A last paragraph opening with `[execution:` is what the
 previous attempt at this story recorded (`failed`, `skipped` or `reset`, then the cause): the
 newest word on it, after the plan's own notes. It is context, not the contract: where it
@@ -217,6 +226,12 @@ anything. Say in the report that the baseline came from that detached copy.
 **Pre-run.** Run the verify once, exactly as written, from the Step 0c directory, with
 `TASKS_FILE_PATH` and `AIMI_ROOT` exported into its environment (exactly the values you were
 handed), so a verify that reads its own tasks file or `"$AIMI_ROOT/.aimi/..."` finds them.
+When `VERIFY_STAGE` was handed to you, export `AIMI_VERIFY_STAGE` with that value as well, for
+the pre-run, the probe and Step 4; when it was not, leave the variable unset and never invent
+it. The project's own commands read it and leave out the checks that cannot run beside a
+sibling story's, which run after the wave's merge instead. A segment that skips itself this way
+lands in the probe's list 1: report it as deferred to the post-merge check, not as a defect, and
+say in your report that the verify ran at stage `worktree`.
 Record the exit code. A ZERO exit means the verify already passes before any work, so it does
 not discriminate before from after: put a warning in the report. The warning never blocks, in
 any mode, and must name its legitimate cause — a story re-run over partial work can pass this

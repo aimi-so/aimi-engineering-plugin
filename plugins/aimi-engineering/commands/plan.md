@@ -89,6 +89,11 @@ Store `INTERACTIVE_MODE` for use by Phase 0.5, Phase 1.8, Phase 1.9, Phase 2.5, 
 
 Read and follow the **Resolve Agent Models** section of `commands/references/cli-path-resolution.md` to populate `AGENT_MODELS` and `AGENT_EFFORTS`. When resolution fails, treat every category as `"inherit"` and continue.
 
+### Local Branch Freshness
+
+Applies when: Step 0 stored a `BRANCH_DIVERGENCE` whose `divergence` is `local-behind` or `diverged`. Otherwise skip: the plan is written against the local tree as it is.
+Before running this phase, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/plan/step-0-branch-freshness.md in full.
+
 ## Phase 0: Idea Refinement
 
 Check `.aimi/brainstorms/` for a matching brainstorm (semantic match on topic, within 14 days):
@@ -320,6 +325,11 @@ Before running this phase (fewer than 2 staging files: skip), Read ${CLAUDE_PLUG
 Applies when: the audit above ran.
 Before running this phase, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/plan/phase-3d5-audit-apply-gate.md in full.
 
+### Resolve audit findings
+
+Applies when: the Unresolved Gate's Resolve option was chosen (interactive mode only).
+Before running this phase, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/plan/phase-3d5-resolve.md in full.
+
 ## Phase 3e: story-merge Invocation
 
 Applies when: every run.
@@ -334,6 +344,11 @@ Before running this phase, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/plan/p
 
 Applies when: every run, after the identity fields.
 Before running this phase, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/plan/phase-4-metadata-context.md in full.
+
+### Usage Surfaces and Usage Recipe
+
+Applies when: every run, after the context fields; declares `metadata.usageSurfaces` and, in picker mode, asks once per project for the usage recipe.
+Before running this phase, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/plan/phase-4-usage-surfaces.md in full.
 
 ### Schema v3.3 Structure
 

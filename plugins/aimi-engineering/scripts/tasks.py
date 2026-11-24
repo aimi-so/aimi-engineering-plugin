@@ -175,7 +175,13 @@ from roadmap import (
 # file is a DIFFERENT function -- validate_waves' own read-only twin, which
 # returns a dict and omits any story a cycle or a dangling dependency never
 # reaches. This import is the writer; that one stays the checker.
-from story_merge import compute_waves, outline_tokens_in
+from story_merge import (
+    compute_waves,
+    group_key,
+    outline_tokens_in,
+    project_state,
+    tagged_project_keys,
+)
 
 # The one prose sanitizer roadmap.py and story_merge.py already import -- see
 # sanitize.py's own docstring for why it is a module of its own rather than a
@@ -184,6 +190,13 @@ from story_merge import compute_waves, outline_tokens_in
 # entry is written command-side, at plan time -- so it needs the identical
 # rule rather than a third copy of it.
 from sanitize import rm_sanitize, SUSPICIOUS
+
+# The usage-validation record (vocabulary, checks, build) is shared with
+# roadmap.py's phase writer and owned by neither: usage_record.py holds it.
+import usage_record
+
+# The bookkeeping declaration reader: wave_contention's optional exemption.
+import bookkeeping
 
 # The paragraph separator the cross-story audit already writes `notes` with.
 # story_merge imports it from the same place, so this adds no new edge to the
@@ -852,6 +865,9 @@ def status_view(doc, counts_only):
     for status in STATUS_COUNTS:
         view[status] = count_with_status(stories, status)
     view["total"] = len(stories)
+    recorded = metadata.get("usageValidation") if isinstance(metadata, dict) else None
+    if recorded is not None:
+        view["usageValidation"] = recorded
     if not counts_only:
         view["userStories"] = [story_row(story) for story in stories]
     return view
@@ -1234,6 +1250,7 @@ SMELL_ACKNOWLEDGE_REASON_MAXLEN = 500
 # acknowledge-evidence's own cap on --reason, through rm_sanitize. Its own
 # name for the same reason: a different field that merely agrees today.
 EVIDENCE_ACKNOWLEDGE_REASON_MAXLEN = 500
+
 
 # set-verification never writes "pending" -- recording a verdict is the
 # opposite of "nobody looked yet" -- so its own allowed set is this tuple
@@ -1669,11 +1686,20 @@ def guard_rail_findings(story):
     return findings
 
 
-def validate_stories(doc):
+def validate_stories(doc, project_root=None):
     stories = _stories(doc)
     errors = []
     for story in stories:
         errors += _story_errors(story)
+    # The cross-repository rule is the one finding here that needs the layout.
+    # With no root (a caller that has none) it is skipped, and the verdict is
+    # what it always was. It runs after every per-story rule so no earlier
+    # message moves, and its git call happens only when two keys are in play.
+    keys = tagged_project_keys(stories)
+    if project_root and len(keys) >= 2 and is_multi_repo_root(project_root):
+        for story in stories:
+            for finding in cross_repository_file_findings(story, keys, True):
+                errors.append(jq_tostring(jq_index(story, "id", STORY)) + ": " + finding)
     return _verdict(errors)
 
 
@@ -1810,7 +1836,13 @@ def validate_waves(doc):
     return _verdict(errors)
 
 
-def wave_contention(doc):
+def _story_project_key(story):
+    """A story's project key: its own `project` when a non-empty string, else '.'."""
+    project = story.get("project") if isinstance(story, dict) else None
+    return project if isinstance(project, str) and project else "."
+
+
+def wave_contention(doc, declared=None):
     """One error per `implementation.files` path two or more stories in the
     SAME wave both claim -- the check that catches two executors racing each
     other for one literal, which `validate_waves` never asked about at all.
@@ -1841,10 +1873,16 @@ def wave_contention(doc):
     byte for byte by tests: waves ascending, paths in first-appearance document
     order within a wave, ids in document order -- which plain dict insertion
     order already gives, since stories are walked in document order throughout.
+
+    `declared` is optional: a map of project key to the set of paths that
+    project declared as bookkeeping. A path with several claimants is exempt
+    only when EVERY claimant's own project key declares it, so one undeclared
+    claimant keeps the refusal. None or empty takes the original code path.
     """
     stories = _stories(doc)
     assigned = computed_waves(stories)
     by_wave = {}
+    project_of = {}
     for story in stories:
         story_id = jq_index(story, "id", STORY)
         wave = assigned.get(story_id)
@@ -1856,6 +1894,8 @@ def wave_contention(doc):
         files = jq_index(implementation, "files", STORY + ".implementation")
         if not isinstance(files, list):
             continue
+        if declared:
+            project_of[story_id] = _story_project_key(story)
         claims = by_wave.setdefault(wave, {})
         seen = set()
         for entry in files:
@@ -1868,6 +1908,8 @@ def wave_contention(doc):
     for wave in sorted(by_wave):
         for path, ids in by_wave[wave].items():
             if len(ids) > 1:
+                if declared and all(path in declared.get(project_of.get(i), ()) for i in ids):
+                    continue
                 errors.append(
                     "Wave contention: wave " + str(wave)
                     + " path " + path
@@ -2835,6 +2877,145 @@ def implementation_path_findings(story):
     return findings + implementation_outputs_findings(story)
 
 
+# The cross-repository rule for `implementation.files`. A story of a multi-repo
+# layout runs in ONE repository, so an entry that starts with another
+# repository's key -- or with the AIMI root, which holds every repository -- names
+# a file the story's own repository does not have. It is a story-to-project
+# relation, not a property of the path alone, which is why it is not part of
+# _path_escape_reason: the same string is a perfectly good path in a monorepo,
+# where the rule returns nothing. LEXICAL like the path rule: strings and sets
+# only, no filesystem. Only is_multi_repo_root and child_repository_keys read
+# the machine, and they are separate helpers a caller runs once.
+CROSS_REPOSITORY_ROOT_TOKENS = ("$AIMI_ROOT", "${AIMI_ROOT}")
+CROSS_REPOSITORY_REMEDY = (
+    "put the file in the story of the project that owns it, with the project-key "
+    "prefix dropped, or report it as unresolved when no story owns that project"
+)
+
+
+def is_multi_repo_root(root):
+    """True when the `.aimi` root is not a git repository.
+
+    The same test as multi-repo-handling.md's AIMI_ROOT_IS_GIT_REPO rule:
+    `git -C <root> rev-parse --git-dir` failing. A root git cannot be asked about
+    (no path, no git binary) is never called multi-repo, so a host that cannot
+    tell refuses nothing.
+    """
+    if not root:
+        return False
+    try:
+        result = subprocess.run(
+            ["git", "-C", root, "rev-parse", "--git-dir"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
+    return result.returncode != 0
+
+
+def child_repository_keys(root):
+    """The names of the immediate subfolders of `root` that are git repositories.
+
+    validate-staging sees one staged story at a time, so the layout's repository
+    set comes from the folder instead of from the plan. A nested key such as
+    apps/web is not found this way; the staged story's own project key covers it.
+    """
+    keys = set()
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return keys
+    for name in names:
+        if name.startswith("."):
+            continue
+        # A string join and a stat, never an os.path call: this module names no
+        # path of its own, and the name here came from listing the confined root.
+        try:
+            os.stat(root + "/" + name + "/.git")
+        except OSError:
+            continue
+        keys.add(name)
+    return keys
+
+
+def _cross_repository_match(entry, keys):
+    """The key or root token `entry` starts with as WHOLE path segments, or None.
+
+    Segment by segment and case-sensitive: `api` never matches `api-gateway`,
+    and `apps/web` matches only `apps/web` and `apps/web/...`. The longest key
+    wins so a nested key is named in full.
+    """
+    segments = entry.split("/")
+    for token in CROSS_REPOSITORY_ROOT_TOKENS:
+        if segments[0] == token:
+            return token
+    best = None
+    for key in keys:
+        parts = key.split("/")
+        if segments[: len(parts)] == parts and (best is None or len(parts) > len(best.split("/"))):
+            best = key
+    return best
+
+
+def cross_repository_file_entries(story, other_project_keys, multi_repo):
+    """[(index, entry, matched)] for the `implementation.files` entries of a story
+    that name another repository of a multi-repo layout; [] otherwise.
+
+    `other_project_keys` is the layout's repository set; the story's own project
+    key is removed from it here, so a caller may pass the whole set. In a git
+    root (`multi_repo` false) or with fewer than two keys in play it is empty.
+    An entry the path rule already refuses is that rule's, not reported twice.
+    """
+    if not multi_repo:
+        return []
+    implementation = _story_implementation(story)
+    if implementation is None:
+        return []
+    files = implementation.get("files")
+    if not isinstance(files, list):
+        return []
+    own = story.get("project")
+    own_key = group_key(own) if project_state(own) == "tagged" else None
+    keys = {key for key in other_project_keys if isinstance(key, str) and key not in ("", ".")}
+    if len(keys | ({own_key} if own_key else set())) < 2:
+        return []
+    keys.discard(own_key)
+    found = []
+    for index, entry in enumerate(files):
+        if not isinstance(entry, str):
+            continue
+        if implementation_path_problem(IMPLEMENTATION_FILES_FIELD, entry) is not None:
+            continue
+        matched = _cross_repository_match(entry, keys)
+        if matched is not None:
+            found.append((index, entry, matched))
+    return found
+
+
+def cross_repository_file_findings(story, other_project_keys, multi_repo):
+    """One sentence per `implementation.files` entry naming another repository.
+
+    Decided from the story, the layout's project keys and whether the layout is
+    multi-repo; it reads no filesystem. Each sentence names the field index and
+    the quoted path.
+    """
+    findings = []
+    for index, entry, matched in cross_repository_file_entries(
+        story, other_project_keys, multi_repo
+    ):
+        if matched in CROSS_REPOSITORY_ROOT_TOKENS:
+            reason = "starts with " + matched + ", the root that holds every repository"
+        else:
+            reason = "starts with the key of another repository, " + matched
+        findings.append(
+            _path_finding(
+                IMPLEMENTATION_FILES_FIELD, index, entry, reason, CROSS_REPOSITORY_REMEDY
+            )
+        )
+    return findings
+
+
 def validate_tasks(docs, tasks_file, project_root, fields, warn):
     """R2 through R15, in the order bash ran them, over the parsed stream.
 
@@ -2997,6 +3178,8 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
     # a document-sourced path is resolved against PROJECT_ROOT; a path that
     # escapes warns for the same reason a missing directory does, since neither
     # names a directory that exists UNDER the project root.
+    layout_keys = tagged_project_keys([s for d in docs for s in _stories(d)])
+    layout_multi = len(layout_keys) >= 2 and is_multi_repo_root(project_root)
     for doc in docs:
         for story in _stories(doc):
             implementation = jq_index(story, "implementation", ".userStories[]")
@@ -3008,8 +3191,13 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
             base = _story_project_base(story, project_root)
             escapes = []
             unopenable = []
+            crossing = {e for _i, e, _m in cross_repository_file_entries(story, layout_keys, layout_multi)}
             for entry in files:
                 if not isinstance(entry, str):
+                    continue
+                # R27 reports an entry of another repository; it is not also a
+                # directory that does not exist under THIS story's repository.
+                if entry in crossing:
                     continue
                 # An escape is judged by the lexical rule alone and is NEVER
                 # reported as a missing directory: the entry does not name a
@@ -3326,6 +3514,60 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
                     + ", a staging reference story-merge did not resolve; replace it"
                     " with the US-NNN id of the story it names"
                 )
+
+    # R27 -- an `implementation.files` entry that names another repository of a
+    # multi-repo layout. Appended AFTER R26 for R17's reason. An ERROR where R17
+    # warns about the same entry's neighbours: the story runs in one repository
+    # and the entry names a file that is not in it, so no executor can resolve
+    # it. Nothing happens in a git root or below two keys, and the rule is
+    # cross_repository_file_findings', stated nowhere else. R17 skips an entry
+    # this reports, so it is never also warned as a missing directory.
+    for doc in docs:
+        for story in _stories(doc):
+            for finding in cross_repository_file_findings(story, layout_keys, layout_multi):
+                errors.append(
+                    tasks_file + ": "
+                    + jq_tostring(jq_index(story, "id", ".userStories[]"))
+                    + ": " + finding
+                )
+
+    # R28 -- metadata.auditOpen's shape. Appended AFTER R27 for R17's reason: a
+    # rule below the last one can only add lines after everything already
+    # recorded. SHAPE ONLY, and an ERROR: the key has one writer (/aimi:plan
+    # Phase 4), so a malformed value is the plugin having written a record its
+    # reader cannot parse. Absent does nothing; present it must be a non-empty
+    # array of {message, stories} objects, `stories` holding staged idx strings
+    # (two digits, or the `_audit` sentinel) and never US-NNN ids.
+    audit_open = jq_index(doc0_metadata, "auditOpen", ".metadata")
+    if audit_open is not None or (
+        isinstance(doc0_metadata, dict) and "auditOpen" in doc0_metadata
+    ):
+        where = tasks_file + ": metadata.auditOpen"
+        if not isinstance(audit_open, list) or not audit_open:
+            errors.append(where + " must be a non-empty array")
+        else:
+            for index, entry in enumerate(audit_open):
+                at = where + "[" + str(index) + "]"
+                if not isinstance(entry, dict):
+                    errors.append(at + " must be an object")
+                    continue
+                message = entry.get("message")
+                if not isinstance(message, str) or not message:
+                    errors.append(at + ".message must be a non-empty string")
+                stories = entry.get("stories")
+                if (
+                    not isinstance(stories, list)
+                    or not stories
+                    or not all(
+                        isinstance(item, str)
+                        and (item == "_audit" or re.fullmatch(r"[0-9]{2}", item))
+                        for item in stories
+                    )
+                ):
+                    errors.append(
+                        at + ".stories must be a non-empty array of staged idx"
+                        " strings (NN or _audit)"
+                    )
 
     return errors
 
@@ -5256,7 +5498,8 @@ def op_validate_stories(argv):
     path = _flag(argv, "--tasks-file")
     if not path:
         die("Usage: tasks.py validate-stories --tasks-file <path>")
-    verdicts = [validate_stories(doc) for doc in read_docs(path, "validate-stories")]
+    project_root = os.environ.get("PROJECT_ROOT")
+    verdicts = [validate_stories(doc, project_root) for doc in read_docs(path, "validate-stories")]
     _emit_echoed(verdicts)
     if not verdicts or not verdicts[-1]["valid"]:
         return 1
@@ -5309,10 +5552,77 @@ def op_validate_wave_contention(argv):
     path = _flag(argv, "--tasks-file")
     if not path:
         die("Usage: tasks.py validate-wave-contention --tasks-file <path>")
-    verdicts = [wave_contention(doc) for doc in read_docs(path, "validate-wave-contention")]
+    project_root = _flag(argv, "--project-root")
+    docs = read_docs(path, "validate-wave-contention")
+    verdicts = []
+    for doc in docs:
+        declared = None
+        if project_root:
+            config = os.path.join(project_root, ".aimi", "config.json")
+            declared = {}
+            for key in sorted({_story_project_key(s) for s in _stories(doc)}):
+                try:
+                    declared[key] = set(bookkeeping.load_declaration(config, key))
+                except bookkeeping.BookkeepingError as exc:
+                    die(str(exc))
+        verdicts.append(wave_contention(doc, declared))
     for verdict in verdicts:
         _emit(verdict)
     return 0 if all(v["valid"] for v in verdicts) else 1
+
+
+def op_wave_verify_commands(argv):
+    """The deduplicated verify commands of the stories a wave merged.
+
+    Read-only: it never reads `wave`, runs nothing and compares against no
+    evidence. Ids come after `--`; repeats count once, at their first place.
+    Entries are keyed on (project, exact command text) in first-seen order, so
+    two owners of one command collapse into one entry and a failure names them
+    all. A story with no non-blank string `implementation.verify` adds no entry
+    and is named on one stderr line. An id absent from the file refuses, so a
+    mistyped id never shrinks the union quietly.
+    """
+    path = _flag(argv, "--tasks-file")
+    if not path:
+        die("Usage: tasks.py wave-verify-commands --tasks-file <path> -- <id>...")
+    ids = []
+    if "--" in argv:
+        for story_id in argv[argv.index("--") + 1 :]:
+            if story_id not in ids:
+                ids.append(story_id)
+    docs = read_docs(path, "wave-verify-commands")
+    groups = {}
+    missing = []
+    for story_id in ids:
+        found = None
+        for doc in docs:
+            matches = stories_with_id(doc, story_id)
+            if matches:
+                found = matches[0]
+                break
+        if found is None:
+            die(
+                "Error: wave-verify-commands: story "
+                + story_id
+                + " not found in tasks file "
+                + path
+            )
+        implementation = jq_index(found, "implementation", STORY)
+        command = jq_index(implementation, "verify", STORY) if isinstance(implementation, dict) else None
+        if not isinstance(command, str) or not command.strip():
+            missing.append(story_id)
+            continue
+        key = (_report_project(found) or ".", command)
+        groups.setdefault(key, []).append(story_id)
+    if missing:
+        sys.stderr.write("No implementation.verify: " + " ".join(missing) + "\n")
+    _emit(
+        [
+            {"command": command, "project": project, "stories": owners}
+            for (project, command), owners in groups.items()
+        ]
+    )
+    return 0
 
 
 def op_validate_tasks(argv):
@@ -5735,6 +6045,101 @@ def op_set_execution_mode(argv):
     return 0
 
 
+# The four metadata keys story-merge fills itself when it is invoked with
+# --feature and --phase. /aimi:plan Phase 4 verifies them on that path and never
+# recomputes one, so a patch that would change a value already on disk is a
+# planner overwriting what the merge validated.
+PREFILLED_METADATA_KEYS = ("baseRef", "pluginVersion", "roadmapPath", "phase")
+
+
+def _same_json(left, right):
+    """Equality as the file would show it: True and 1 are different values."""
+    return json.dumps(left, sort_keys=True) == json.dumps(right, sort_keys=True)
+
+
+def op_patch_metadata(argv):
+    """Merge a patch object's top-level keys into metadata, in one crossing.
+
+    Each key of the patch replaces the metadata value of the same name, whole:
+    a nested object is not merged into. A null is written as null, because
+    `planPath` is null by contract, so removal has its own flag: `--remove
+    <key>`, repeatable, and a key that is already absent is not an error. Every
+    refusal happens before the write, so a refused call leaves the file
+    byte-identical, and a call that changes nothing writes nothing either.
+    """
+    verb = "patch-metadata"
+    usage = "Usage: tasks.py patch-metadata --tasks-file <path> [--from <patch.json>] [--remove <key>]..."
+    path = _flag(argv, "--tasks-file")
+    patch_path = _flag(argv, "--from")
+    removals = []
+    for position, arg in enumerate(argv):
+        if arg == "--remove" and position + 1 < len(argv) and argv[position + 1] not in removals:
+            removals.append(argv[position + 1])
+    if not path or (not patch_path and not removals):
+        die(usage)
+    patch = {}
+    if patch_path:
+        try:
+            with open(patch_path, "rb") as handle:
+                patch = json.load(handle)
+        except (OSError, UnicodeDecodeError) as err:
+            die("Error: " + verb + ": cannot read patch file " + patch_path + ": " + str(err))
+        except (ValueError, RecursionError) as err:
+            die("Error: " + verb + ": malformed JSON in patch file " + patch_path + ": " + str(err))
+        if not isinstance(patch, dict):
+            die("Error: " + verb + ": the patch file must hold one JSON object: " + patch_path)
+        if not patch:
+            die("Error: " + verb + ": the patch object holds no key: " + patch_path)
+    both = [key for key in removals if key in patch]
+    if both:
+        die("Error: " + verb + ": a key is both patched and removed: " + ", ".join(both))
+
+    docs = read_docs(path, verb)
+    if len(docs) != 1 or not isinstance(docs[0], dict):
+        die("Error: " + verb + ": the tasks file must hold exactly one JSON object: " + path)
+    doc = docs[0]
+    metadata = doc.get("metadata")
+    if not isinstance(metadata, dict):
+        die("Error: " + verb + ": the tasks file has no metadata object: " + path)
+
+    if "branchName" in patch:
+        branch = patch["branchName"]
+        if not isinstance(branch, str) or not BRANCH_NAME.fullmatch(branch):
+            die(
+                "Error: " + verb + ": branchName does not match the required pattern "
+                "^[a-zA-Z0-9][a-zA-Z0-9/_-]*$"
+            )
+    conflicts = [
+        key
+        for key in PREFILLED_METADATA_KEYS
+        if key in metadata
+        and (key in removals or (key in patch and not _same_json(metadata[key], patch[key])))
+    ]
+    if conflicts:
+        die(
+            "Error: " + verb + ": the tasks file already holds a value for "
+            + ", ".join(conflicts)
+            + " that this call would change or remove; these keys are verified,"
+            " never overwritten: " + path
+        )
+
+    patched = []
+    unchanged = []
+    for key, value in patch.items():
+        if key in metadata and _same_json(metadata[key], value):
+            unchanged.append(key)
+        else:
+            metadata[key] = value
+            patched.append(key)
+    removed = [key for key in removals if key in metadata]
+    for key in removed:
+        del metadata[key]
+    if patched or removed:
+        write_docs_atomically(path, docs)
+    _emit_compact({"patched": patched, "unchanged": unchanged, "removed": removed})
+    return 0
+
+
 def _normalize_op(verb, rule):
     """Both normalizers: map, write, and report the count from the SAME call.
 
@@ -6127,6 +6532,190 @@ def op_acknowledge_evidence(argv):
         "completed": completed,
     }
     target["evidenceAcknowledged"] = record
+    write_docs_atomically(path, docs)
+    _emit(record)
+    return 0
+
+
+def _usage_validation_failing(docs):
+    """True when any document's metadata.usageValidation.status is `failing`.
+
+    The one rule archive-task and the archivable predicate both read, so they
+    cannot disagree about which record blocks an archive. Shapes it cannot read
+    answer False: only a stored `failing` blocks.
+    """
+    for doc in docs:
+        metadata = doc.get("metadata") if isinstance(doc, dict) else None
+        record = metadata.get("usageValidation") if isinstance(metadata, dict) else None
+        if isinstance(record, dict) and record.get("status") == "failing":
+            return True
+    return False
+
+
+def _usage_phase_answer(roadmap_path, feature, phase_id, prefix):
+    """usage-validation-get's answer for a roadmap phase. Dies naming the
+    roadmap when it cannot be read or holds no such phase: a reader that
+    cannot find the record must not answer "none recorded"."""
+    roadmap = _read_json_object(roadmap_path)
+    if roadmap is None:
+        die(prefix + "cannot read roadmap.json: " + roadmap_path)
+    phases = roadmap.get("phases")
+    phase = None
+    if isinstance(phases, list):
+        phase = next(
+            (p for p in phases if isinstance(p, dict) and jq_equal(p.get("id"), phase_id)),
+            None,
+        )
+    if phase is None:
+        die(prefix + "phase " + _num(phase_id) + " not found in " + roadmap_path)
+    record = phase.get("usageValidation")
+    return {
+        "scope": "phase",
+        "feature": feature,
+        "phase": phase_id,
+        "record": record if isinstance(record, dict) else None,
+    }
+
+
+def op_usage_validation_get(argv):
+    """usage-validation-get: where a run's usage-validation record lives, and
+    the record. The one reader every command calls instead of branching on
+    phase versus flat itself.
+
+    `--roadmap/--feature/--phase` answers a roadmap phase directly. With
+    `--tasks-file`, a phase-scoped file (metadata.phase present) is followed to
+    its roadmap phase through metadata.roadmapPath, confined the way every
+    document-sourced path is (confined_spec_path), or, when that key is absent,
+    to the roadmap.json two directories above the file, where /aimi:plan puts
+    it. A flat file answers its own metadata.usageValidation. Prints
+    {scope, feature, phase, record}; record is null when none is stored or
+    the stored value is not an object.
+    """
+    prefix = "Error: usage-validation-get: "
+    roadmap_arg = _flag(argv, "--roadmap")
+    if roadmap_arg:
+        phase_raw = _flag(argv, "--phase")
+        if phase_raw is None:
+            die("Usage: tasks.py usage-validation-get --roadmap <path> --feature <slug> --phase <id>")
+        _emit(_usage_phase_answer(roadmap_arg, _flag(argv, "--feature"), jq_numbers(json.loads(phase_raw)), prefix))
+        return 0
+
+    path = _flag(argv, "--tasks-file")
+    project_root = _flag(argv, "--project-root")
+    if not path or not project_root:
+        die("Usage: tasks.py usage-validation-get --tasks-file <path> --project-root <path>")
+    docs = read_docs(path, "usage-validation-get")
+    first = docs[0] if docs else None
+    metadata = first.get("metadata") if isinstance(first, dict) else None
+    if not isinstance(metadata, dict):
+        die(prefix + "no metadata object in " + path)
+    phase_meta = metadata.get("phase")
+    if phase_meta is None:
+        record = metadata.get("usageValidation")
+        _emit({
+            "scope": "flat",
+            "feature": None,
+            "phase": None,
+            "record": record if isinstance(record, dict) else None,
+        })
+        return 0
+
+    phase_id = phase_meta.get("id") if isinstance(phase_meta, dict) else None
+    if isinstance(phase_id, bool) or not isinstance(phase_id, (int, float)):
+        die(prefix + "metadata.phase.id is not a number in " + path)
+    roadmap_rel = metadata.get("roadmapPath")
+    if not (isinstance(roadmap_rel, str) and roadmap_rel):
+        roadmap_rel = os.path.relpath(
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(path))), "roadmap.json"),
+            project_root,
+        )
+    roadmap_path, inside = confined_spec_path(project_root, roadmap_rel)
+    if not inside:
+        die(prefix + "the roadmap path escapes the project: " + roadmap_rel)
+    feature = os.path.basename(os.path.dirname(roadmap_path))
+    _emit(_usage_phase_answer(roadmap_path, feature, phase_id, prefix))
+    return 0
+
+
+def op_audit_findings(argv):
+    """audit-open: the audit findings a plan left open, from metadata.auditOpen.
+
+    A read: nothing is written and no lock is taken. Prints
+    {"count": N, "findings": [{"message": str, "stories": [str]}]}, and answers
+    count 0 with an empty list when the key is absent. A value that is present
+    but not an array of {message, stories} objects dies naming the file: an
+    unreadable list must never be read as nothing open.
+    """
+    prefix = "Error: audit-open: "
+    path = _flag(argv, "--tasks-file")
+    if not path:
+        die("Usage: tasks.py audit-open --tasks-file <path>")
+    docs = read_docs(path, "audit-open")
+    first = docs[0] if docs else None
+    metadata = first.get("metadata") if isinstance(first, dict) else None
+    raw = metadata.get("auditOpen") if isinstance(metadata, dict) else None
+    if raw is None and not (isinstance(metadata, dict) and "auditOpen" in metadata):
+        _emit({"count": 0, "findings": []})
+        return 0
+    where = prefix + "metadata.auditOpen in " + path
+    if not isinstance(raw, list):
+        die(where + " is not an array")
+    findings = []
+    for index, entry in enumerate(raw):
+        message = entry.get("message") if isinstance(entry, dict) else None
+        stories = entry.get("stories") if isinstance(entry, dict) else None
+        if (
+            not isinstance(message, str)
+            or not isinstance(stories, list)
+            or not all(isinstance(item, str) for item in stories)
+        ):
+            die(where + "[" + str(index) + "] is not a {message, stories} object")
+        findings.append({"message": message, "stories": stories})
+    _emit({"count": len(findings), "findings": findings})
+    return 0
+
+
+def op_usage_validation_record(argv):
+    """usage-validation-record: write metadata.usageValidation, the run-level
+    verdict of the real-usage validation gate, replacing any earlier record.
+
+    The record's vocabulary, its checks and its build are usage_record.py's,
+    shared with roadmap.py's phase writer. Every vocabulary rule runs BEFORE the
+    document is read, so a refusal never opens the file. Only --review's
+    confinement is bash's, before the lock; this module takes no path of its
+    own for it. An overwrite carries over the previous record's accepted
+    findings that the new call does not restate, so an accepted decision is
+    never asked again on a re-run. A stored failing record is kept over an
+    unable-to-evaluate skip, and the answer is `{"kept": "failing", ...}`.
+    """
+    prefix = "Error: usage-validation-record: "
+    path = _flag(argv, "--tasks-file")
+    if not path:
+        die("Usage: tasks.py usage-validation-record --tasks-file <path> --status <passed|failing|skipped> [flags]")
+    request = usage_record.parse_request(argv, prefix)
+
+    docs = read_docs(path, "usage-validation-record")
+    first = docs[0] if docs else None
+    if not isinstance(first, dict):
+        die(prefix + "no metadata object in " + path)
+    if first.get("metadata") is None:
+        first["metadata"] = {}
+    target = first["metadata"]
+    if not isinstance(target, dict):
+        die(prefix + "no metadata object in " + path)
+    if target.get("phase") is not None:
+        die(
+            prefix + "refused on a phase-scoped tasks file (metadata.phase is present); "
+            "a phase's verdict is recorded in roadmap.json: " + path
+        )
+
+    action, record = usage_record.build_record(request, target.get("usageValidation"))
+    if action == "keep":
+        # A stored failing record survives an unable-to-evaluate skip; the
+        # file is not written (usage_record.py's docstring says why).
+        _emit(usage_record.kept_answer(record, request))
+        return 0
+    target["usageValidation"] = record
     write_docs_atomically(path, docs)
     _emit(record)
     return 0
@@ -6553,6 +7142,9 @@ def op_archive_task(argv):
     if not counts or (len(counts) == 1 and counts[0] != 0):
         sys.stderr.write("Error: Task file has non-terminal stories — cannot archive\n")
         return 1
+    if _usage_validation_failing(docs):
+        sys.stderr.write("Error: Task file's usage validation is failing — cannot archive\n")
+        return 1
 
     os.makedirs(archive_dir, exist_ok=True)
     archived_task = archive_move(archive_dir, path)
@@ -6764,6 +7356,8 @@ def op_archivable_file_is_terminal(argv):
     if not totals:
         return _archivable_verdict(False)
     if len(totals) == 1 and totals[0] == 0:
+        return _archivable_verdict(False)
+    if _usage_validation_failing(docs):
         return _archivable_verdict(False)
     return _archivable_verdict(True)
 
@@ -9747,6 +10341,7 @@ _OPS = {
     "validate-ids": op_validate_ids,
     "validate-waves": op_validate_waves,
     "validate-wave-contention": op_validate_wave_contention,
+    "wave-verify-commands": op_wave_verify_commands,
     "validate-tasks": op_validate_tasks,
     "validate-story-exists": op_validate_story_exists,
     "mark-complete": _mark_op("mark-complete"),
@@ -9755,6 +10350,7 @@ _OPS = {
     "mark-skipped": _mark_op("mark-skipped"),
     "update-field": op_update_field,
     "set-execution-mode": op_set_execution_mode,
+    "patch-metadata": op_patch_metadata,
     "normalize-status": _normalize_op("normalize-status", normalize_status),
     "normalize-verification": _normalize_op("normalize-verification", normalize_verification),
     "normalize-waves": _normalize_op("normalize-waves", normalize_waves),
@@ -9763,6 +10359,9 @@ _OPS = {
     "set-verification": op_set_verification,
     "acknowledge-smell": op_acknowledge_smell,
     "acknowledge-evidence": op_acknowledge_evidence,
+    "usage-validation-record": op_usage_validation_record,
+    "usage-validation-get": op_usage_validation_get,
+    "audit-open": op_audit_findings,
     "judge-verification": op_judge_verification,
     "reset-orphaned": op_reset_orphaned,
     "gate-pass": _gate_op("gate-pass", "passed"),

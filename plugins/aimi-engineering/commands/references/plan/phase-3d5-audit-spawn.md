@@ -26,6 +26,19 @@ No further action is taken in Phase 3d.5. The `unresolved[]` working-memory list
 
 The auditor reads its corpus from disk, so the Phase 1.6 consolidated research summary needs a file beside the staged stories. Before the spawn, Write `RUN_DIR/consolidation.md` (always `.md`, never `.json`) with the Phase 1.6 consolidated summary, only when that file is missing or empty. A non-empty `RUN_DIR/consolidation.md` is reused as it is and never rewritten. Then check it: when the file is still missing or empty after this step, take the Failure Fallback; do not spawn the auditor. `story-merge` lists only `.json` names in the staging directory, so `consolidation.md` is never read as a story.
 
+### Declared Bookkeeping Paths
+
+The auditor has no CLI, so the orchestrator hands it each project's declared bookkeeping paths. Before the spawn, run this once per distinct `project` among the staged stories (key `.` for a story with none), setting `KEY` to that value each time:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+KEY="<project key, or . when the story has none>"
+$AIMI_CLI bookkeeping-declared --project "$KEY"
+```
+
+Keep each answer line verbatim for the spawn prompt. When the verb refuses (non-zero exit, a tracked or malformed config), surface its stderr line, render that key as `none` and continue the audit: a refused declaration never exempts a path.
+
 ### Auditor Task Spawn
 
 First record what `audit-result.json` holds before the spawn. A retry runs with the Failure Fallback stub in place, and an Edit outline re-run with the previous stamped result, so a file present after the Task proves nothing on its own; a changed checksum does:
@@ -70,6 +83,10 @@ Task subagent_type="aimi-engineering:review:aimi-cross-story-auditor"
    or 'none']
 
   Consolidated research summary (Phase 1.6): <RUN_DIR>/consolidation.md
+
+  Declared bookkeeping paths (one verbatim bookkeeping-declared answer line per project key;
+  a key whose verb refused renders as 'none'; the whole section is 'none' when no key answered):
+  [one line per key, or 'none']
 
   Failed expansion idx values (do NOT emit patches targeting these):
   [comma-separated list of zero-padded idx strings that permanently failed expansion,

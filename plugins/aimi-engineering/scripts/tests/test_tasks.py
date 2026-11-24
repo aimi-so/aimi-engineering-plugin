@@ -83,6 +83,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import tasks as T  # noqa: E402
+import usage_record  # noqa: E402
 from plan_text import plan_text  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1392,7 +1393,7 @@ def _contention_story(story_id, depends_on, files, wave="omit"):
     return story
 
 
-def _run_validate_wave_contention(tmp_path, stories):
+def _run_validate_wave_contention(tmp_path, stories, config=None, track=False):
     """One live validate-wave-contention over a document written for the
     occasion. Mirrors _run_validate_waves; unlike that verb this one really
     does carry an exit status, so a caller reads proc.returncode too."""
@@ -1403,10 +1404,17 @@ def _run_validate_wave_contention(tmp_path, stories):
         os.path.join(tasks_dir, "2020-01-01-contention-tasks.json"), "w", encoding="utf-8"
     ) as fh:
         fh.write(_waves_doc(stories))
+    if config is not None:
+        cfg = os.path.join(root, ".aimi", "config.json")
+        with open(cfg, "w", encoding="utf-8") as fh:
+            fh.write(config if isinstance(config, str) else json.dumps(config))
+        if track:
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "add", "-f", ".aimi/config.json"], cwd=root, check=True)
     proc = subprocess.run(
         ["bash", CLI, "validate-wave-contention"], cwd=root, capture_output=True, text=True, timeout=120
     )
-    return proc, json.loads(proc.stdout)
+    return proc, (json.loads(proc.stdout) if proc.stdout.strip() else None)
 
 
 def test_wave_contention_is_reported_with_the_exact_message(tmp_path):
@@ -1452,6 +1460,184 @@ def test_a_story_with_no_implementation_key_is_skipped_not_crashed(tmp_path):
     assert "implementation" not in stories[0]
     proc, verdict = _run_validate_wave_contention(tmp_path, stories)
     assert verdict == {"valid": True, "errors": []} and proc.returncode == 0
+
+
+def _decl(**by_project):
+    return {"bookkeeping": {k: {p: {"rule": "union-lines"} for p in v} for k, v in by_project.items()}}
+
+
+def _declared_project(story, project):
+    if project is not None:
+        story["project"] = project
+    return story
+
+
+def test_wave_contention_declared_only_overlap_passes(tmp_path):
+    stories = [
+        _contention_story("US-001", [], ["CHANGELOG.md", "a.sh"]),
+        _contention_story("US-002", [], ["CHANGELOG.md", "b.sh"]),
+    ]
+    proc, verdict = _run_validate_wave_contention(tmp_path, stories, _decl(**{".": ["CHANGELOG.md"]}))
+    assert verdict == {"valid": True, "errors": []} and proc.returncode == 0
+
+
+def test_wave_contention_declared_mixed_reports_undeclared_only(tmp_path):
+    stories = [
+        _contention_story("US-001", [], ["CHANGELOG.md", "a.sh"]),
+        _contention_story("US-002", [], ["CHANGELOG.md", "a.sh"]),
+    ]
+    proc, verdict = _run_validate_wave_contention(tmp_path, stories, _decl(**{".": ["CHANGELOG.md"]}))
+    assert verdict == {
+        "valid": False,
+        "errors": ["Wave contention: wave 1 path a.sh claimed by US-001, US-002"],
+    }
+    assert proc.returncode == 1 and "CHANGELOG.md" not in proc.stdout
+
+
+def test_wave_contention_declared_needs_every_claimant_project(tmp_path):
+    stories = [
+        _declared_project(_contention_story("US-001", [], ["VERSION"]), "api"),
+        _declared_project(_contention_story("US-002", [], ["VERSION"]), "web"),
+    ]
+    proc, verdict = _run_validate_wave_contention(tmp_path, stories, _decl(api=["VERSION"]))
+    assert verdict == {
+        "valid": False,
+        "errors": ["Wave contention: wave 1 path VERSION claimed by US-001, US-002"],
+    }
+    assert proc.returncode == 1
+    proc, verdict = _run_validate_wave_contention(
+        tmp_path / "both", stories, _decl(api=["VERSION"], web=["VERSION"])
+    )
+    assert verdict == {"valid": True, "errors": []} and proc.returncode == 0
+
+
+def test_wave_contention_declared_absent_declaration_is_unchanged(tmp_path):
+    stories = [
+        _contention_story("US-001", [], ["CHANGELOG.md"]),
+        _contention_story("US-002", [], ["CHANGELOG.md"]),
+    ]
+    expected = {
+        "valid": False,
+        "errors": ["Wave contention: wave 1 path CHANGELOG.md claimed by US-001, US-002"],
+    }
+    for n, config in enumerate([None, {}, {"bookkeeping": {}}, {"bookkeeping": {"other": {}}}, _decl(**{".": []})]):
+        proc, verdict = _run_validate_wave_contention(tmp_path / str(n), stories, config)
+        assert verdict == expected and proc.returncode == 1, config
+
+
+def test_wave_contention_declared_tracked_or_malformed_config_is_refused(tmp_path):
+    stories = [
+        _contention_story("US-001", [], ["CHANGELOG.md"]),
+        _contention_story("US-002", [], ["CHANGELOG.md"]),
+    ]
+    proc, verdict = _run_validate_wave_contention(
+        tmp_path / "tracked", stories, _decl(**{".": ["CHANGELOG.md"]}), track=True
+    )
+    assert proc.returncode == 1 and verdict is None and "config.json" in proc.stderr
+    proc, verdict = _run_validate_wave_contention(
+        tmp_path / "bad", stories, {"bookkeeping": {".": {"CHANGELOG.md": {"rule": "nope"}}}}
+    )
+    assert proc.returncode == 1 and verdict is None and "config.json" in proc.stderr
+    assert '"valid": true' not in proc.stdout
+
+
+def test_wave_contention_declared_tracked_config_without_key_is_not_refused(tmp_path):
+    stories = [
+        _contention_story("US-001", [], ["a.sh"]),
+        _contention_story("US-002", [], ["a.sh"]),
+    ]
+    proc, verdict = _run_validate_wave_contention(tmp_path, stories, {"other": 1}, track=True)
+    assert verdict == {
+        "valid": False,
+        "errors": ["Wave contention: wave 1 path a.sh claimed by US-001, US-002"],
+    }
+    assert proc.returncode == 1
+
+
+def test_wave_contention_declared_default_parameter_matches_none():
+    doc = json.loads(_waves_doc([
+        _contention_story("US-001", [], ["a.sh"]),
+        _contention_story("US-002", [], ["a.sh"]),
+    ]))
+    assert T.wave_contention(doc) == T.wave_contention(doc, None) == T.wave_contention(doc, {})
+
+
+# ---------------------------------------------------------------------------
+# wave-verify-commands: a brand-new verb, so hand-written cases against the
+# live CLI rather than a golden replay.
+# ---------------------------------------------------------------------------
+
+
+def _wvc_story(story_id, verify="omit", project=None):
+    story = {"id": story_id}
+    if project is not None:
+        story["project"] = project
+    if verify != "omit":
+        story["implementation"] = {"verify": verify}
+    else:
+        story["implementation"] = {"files": ["a"]}
+    return story
+
+
+def _run_wave_verify_commands(tmp_path, stories, ids, tasks_arg=None):
+    root = os.path.realpath(str(tmp_path))
+    tasks_dir = os.path.join(root, ".aimi", "tasks")
+    os.makedirs(tasks_dir, exist_ok=True)
+    tasks = os.path.join(tasks_dir, "2020-01-01-verify-tasks.json")
+    with open(tasks, "w", encoding="utf-8") as fh:
+        fh.write(_waves_doc(stories))
+    return subprocess.run(
+        ["bash", CLI, "wave-verify-commands", *ids, "--tasks-file", tasks_arg or tasks],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+def test_wave_verify_commands_groups_by_project_and_exact_text(tmp_path):
+    stories = [
+        _wvc_story("US-001", "make test", "apps/web"),
+        _wvc_story("US-002", "make test"),
+        _wvc_story("US-003", "make test", "apps/web"),
+        _wvc_story("US-004", "make test "),
+        _wvc_story("US-005"),
+    ]
+    proc = _run_wave_verify_commands(
+        tmp_path, stories, ["US-003", "US-001", "US-002", "US-004", "US-005", "US-001"]
+    )
+    assert proc.returncode == 0
+    assert json.loads(proc.stdout) == [
+        {"command": "make test", "project": "apps/web", "stories": ["US-003", "US-001"]},
+        {"command": "make test", "project": ".", "stories": ["US-002"]},
+        {"command": "make test ", "project": ".", "stories": ["US-004"]},
+    ]
+    assert "No implementation.verify: US-005" in proc.stderr
+
+
+def test_wave_verify_commands_blank_and_empty_union(tmp_path):
+    stories = [_wvc_story("US-001", "   "), _wvc_story("US-002", 7)]
+    proc = _run_wave_verify_commands(tmp_path, stories, ["US-001", "US-002"])
+    assert proc.returncode == 0 and json.loads(proc.stdout) == []
+    assert "No implementation.verify: US-001 US-002" in proc.stderr
+    proc = _run_wave_verify_commands(tmp_path, stories, [])
+    assert proc.returncode == 0 and json.loads(proc.stdout) == []
+
+
+def test_wave_verify_commands_refuses_unknown_malformed_and_outside_ids(tmp_path):
+    stories = [_wvc_story("US-001", "true")]
+    proc = _run_wave_verify_commands(tmp_path, stories, ["US-099"])
+    assert proc.returncode == 1
+    assert "Error: wave-verify-commands: story US-099 not found in tasks file" in proc.stderr
+    proc = _run_wave_verify_commands(tmp_path, stories, ["US-1"])
+    assert proc.returncode == 1 and "Invalid story ID format" in proc.stderr
+    proc = _run_wave_verify_commands(tmp_path, stories, ["US-001"], tasks_arg="/etc/passwd")
+    assert proc.returncode != 0 and "escapes project root" in proc.stderr
+
+
+def test_wave_verify_commands_is_listed_in_help():
+    proc = subprocess.run(["bash", CLI, "help"], capture_output=True, text=True, timeout=120)
+    assert "    wave-verify-commands <id>... [--tasks-file <path>]" in proc.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -5210,9 +5396,18 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     --prototype texts it measures. The literal is `open(source_path, "rb")`, a
     new distinct form, so the set below gains one member. It is a read, and it
     adds no os.path call -- an unreadable file is an OSError, not a predicate.
+
+    THE TWELFTH open() ARRIVED WITH patch-metadata, and it is again a read of a
+    file named by a CLI ARGUMENT (--from): the patch object /aimi:plan Phase 4
+    writes beside its run directories. cmd_patch_metadata confines the path
+    with validate_path_in_project before python3 starts and refuses a missing
+    file there, so what reaches this open is a path inside the project. The
+    literal is `open(patch_path, "rb")`, a new distinct form. Nothing else in
+    this test moved for the verb: it writes the tasks file it was handed
+    through write_docs_atomically and has no writer of its own.
     """
     code = _code()
-    assert code.count("open(") == 11
+    assert code.count("open(") == 12
     assert 'open(path, "r", encoding="utf-8")' in code
     assert 'open(spec_path, "rb")' in code
     assert 'open(path, "r", encoding="utf-8", errors="replace")' in code
@@ -5221,7 +5416,8 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     assert 'open(brainstorm_path, "rb")' in code
     assert 'open(input_path, "rb")' in code
     assert 'open(source_path, "rb")' in code
-    assert len(re.findall(r'open\([^)]*"[rw]b?"', code)) == 11
+    assert 'open(patch_path, "rb")' in code
+    assert len(re.findall(r'open\([^)]*"[rw]b?"', code)) == 12
     assert not re.search(r'open\([^)]*"[wax]', code), "every open here is a read"
     assert len(re.findall(r"^def write_docs_atomically\(", code, re.M)) == 1
     assert code.count("os.replace(") == 1 and code.count("NamedTemporaryFile(") == 1
@@ -5344,7 +5540,24 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     # build the phase's tasks path. They compose strings and touch nothing: both
     # document-sourced paths reach the disk only through confined_spec_path, and
     # the reads go through load_docs, so no open() arrived with them.
-    assert code.count("os.path.") == 61
+    #
+    # The last SEVEN are op_usage_validation_get's: a relpath, a join, two
+    # dirnames and an abspath that name the roadmap.json two directories above
+    # a phase tasks file when metadata.roadmapPath is absent, then a basename
+    # and a dirname of the resolved roadmap path for the feature slug. They
+    # compose strings only: the roadmap path, whichever way it was named,
+    # reaches the disk only through confined_spec_path, and the read goes
+    # through _read_json_object, so no open() arrived with them. No new root,
+    # and the verb writes nothing.
+    #
+    # The last ONE is op_validate_wave_contention's join of --project-root
+    # with .aimi/config.json, the fixed location of the bookkeeping
+    # declaration. --project-root is PROJECT_ROOT, which the wrapper passes
+    # itself and never takes from a caller, and the join composes a string
+    # only: the read happens in bookkeeping.load_declaration, which owns the
+    # declaration's refusals (a tracked or malformed config), so no open()
+    # arrived with it. The verb still writes nothing.
+    assert code.count("os.path.") == 69
     assert code.count("os.path.isfile(") == 11  # 9 + acknowledge-evidence's two
     assert code.count("os.path.isdir(") == 4  # 3 + R23's verify_grep_directory_findings
     confinement = code.split("def confined_spec_path", 1)[1].split("\ndef ", 1)[0]
@@ -5456,8 +5669,10 @@ def test_every_locked_tasks_verb_crosses_into_python_exactly_once():
         "cmd_set_verification",
         "cmd_acknowledge_smell",
         "cmd_acknowledge_evidence",
+        "cmd_usage_validation_record",
         "cmd_judge_verification",
         "cmd_set_execution_mode",
+        "cmd_patch_metadata",
         "cmd_normalize_status",
         "cmd_normalize_verification",
         "cmd_normalize_waves",
@@ -7098,6 +7313,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "project-groups",
         "get-story",
         "get-story-context",
+        "audit-open",
         "triage-verify",
         "current-story",
         "get-state",
@@ -7110,6 +7326,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "validate-ids",
         "validate-waves",
         "validate-wave-contention",
+        "wave-verify-commands",
         "validate-tasks",
         "validate-story-exists",
         "mark-complete",
@@ -7118,6 +7335,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "mark-skipped",
         "update-field",
         "set-execution-mode",
+        "patch-metadata",
         "normalize-status",
         "normalize-verification",
         "normalize-waves",
@@ -7126,6 +7344,8 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "set-verification",
         "acknowledge-smell",
         "acknowledge-evidence",
+        "usage-validation-record",
+        "usage-validation-get",
         "judge-verification",
         "reset-orphaned",
         "archive-task",
@@ -11823,3 +12043,291 @@ def test_deliverable_branch_flag_without_project_root_is_a_usage_error(tmp_path)
     result = _run_metadata(tmp_path, _member_doc(), "--with-deliverable-branch")
     assert result.returncode == 1
     assert "--project-root" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# usage-validation-record -- metadata.usageValidation and what it blocks
+# ---------------------------------------------------------------------------
+
+
+def _uv_file(tmp_path, name="u.json", status="completed", phase=None):
+    return _rs_file(tmp_path, name, [_rs_story("US-001", status)], phase=phase)
+
+
+def _uv(path, *flags):
+    return T.op_usage_validation_record(["usage-validation-record", "--tasks-file", path, *flags])
+
+
+def _uv_cli(path, *flags, home=None):
+    root = os.path.dirname(os.path.dirname(path))
+    return subprocess.run(
+        ["bash", CLI, *flags[:0], "usage-validation-record", "--tasks-file", path, *flags],
+        capture_output=True, text=True, cwd=root,
+        env={**os.environ, "AIMI_AGENT_MODE": "1"},
+    )
+
+
+def test_usage_validation_writes_the_record_and_replaces_the_earlier_one(tmp_path, capsys):
+    path = _uv_file(tmp_path)
+    assert _uv(path, "--status", "failing", "--reason", "login broken", "--rounds", "2") == 0
+    out = json.loads(capsys.readouterr().out)
+    saved = _rs_read(path)["metadata"]["usageValidation"]
+    assert out == saved
+    assert saved["status"] == "failing" and saved["rounds"] == 2
+    assert saved["reason"] == "login broken"
+    assert re.match(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$", saved["recordedAt"])
+    assert _uv(path, "--status", "passed") == 0
+    saved = _rs_read(path)["metadata"]["usageValidation"]
+    assert set(saved) == {"status", "rounds", "recordedAt"} and saved["rounds"] == 0
+
+
+def test_usage_validation_skipped_needs_a_kind_and_only_skipped_takes_one(tmp_path, capsys):
+    path = _uv_file(tmp_path)
+    assert _uv(path, "--status", "skipped", "--kind", "not-applicable", "--reason", "no ui") == 0
+    assert _rs_read(path)["metadata"]["usageValidation"]["kind"] == "not-applicable"
+
+
+@pytest.mark.parametrize(
+    "flags,named",
+    [
+        (["--status", "bogus"], "--status"),
+        (["--status", "skipped", "--kind", "nope", "--reason", "x"], "--kind"),
+        (["--status", "passed", "--kind", "not-applicable"], "--kind"),
+        (["--status", "skipped", "--reason", "x"], "--kind"),
+        (["--status", "failing"], "--reason"),
+        (["--status", "failing", "--reason", "  "], "--reason"),
+        (["--status", "skipped", "--kind", "disabled-by-operator"], "--reason"),
+        (["--status", "passed", "--rounds", ""], "--rounds"),
+        (["--status", "passed", "--rounds", "x"], "--rounds"),
+        (["--status", "passed", "--rounds", "-1"], "--rounds"),
+        (["--status", "passed", "--findings-json", "{"], "--findings-json"),
+        (["--status", "passed", "--findings-json", "[]"], "--findings-json"),
+        (["--status", "passed", "--findings-json", '{"-bad": {"status": "open"}}'], "--findings-json"),
+        (["--status", "passed", "--findings-json", '{"a": {"status": "weird"}}'], "--findings-json"),
+        (["--status", "passed", "--findings-json", '{"a": {"status": "accepted"}}'], "--findings-json"),
+    ],
+)
+def test_usage_validation_refuses_and_names_the_flag_and_writes_nothing(tmp_path, capsys, flags, named):
+    path = _uv_file(tmp_path)
+    before = open(path, encoding="utf-8").read()
+    with pytest.raises(SystemExit) as raised:
+        _uv(path, *flags)
+    assert raised.value.code == 1
+    assert named in capsys.readouterr().err
+    assert open(path, encoding="utf-8").read() == before
+
+
+def test_usage_validation_refuses_a_phase_scoped_file(tmp_path, capsys):
+    path = _uv_file(tmp_path, phase={"id": "1"})
+    before = open(path, encoding="utf-8").read()
+    with pytest.raises(SystemExit) as raised:
+        _uv(path, "--status", "passed")
+    assert raised.value.code == 1
+    assert "metadata.phase" in capsys.readouterr().err
+    assert open(path, encoding="utf-8").read() == before
+
+
+def test_usage_validation_findings_merge_keeps_accepted_and_drops_open_and_fixed(tmp_path, capsys):
+    path = _uv_file(tmp_path)
+    first = json.dumps({
+        "a:1:h": {"status": "accepted", "reason": "known"},
+        "b:1:h": {"status": "open"},
+        "c:1:h": {"status": "fixed"},
+    })
+    assert _uv(path, "--status", "failing", "--reason", "r", "--findings-json", first) == 0
+    second = json.dumps({"d:1:h": {"status": "open"}, "a:1:h": {"status": "fixed"}})
+    assert _uv(path, "--status", "failing", "--reason", "r", "--findings-json", second) == 0
+    assert _rs_read(path)["metadata"]["usageValidation"]["findings"] == {
+        "d:1:h": {"status": "open"}, "a:1:h": {"status": "fixed"},
+    }
+    assert _uv(path, "--status", "failing", "--reason", "r", "--findings-json", first) == 0
+    assert _uv(path, "--status", "passed", "--findings-json", "{}") == 0
+    assert list(_rs_read(path)["metadata"]["usageValidation"]["findings"]) == ["a:1:h"]
+
+
+def test_usage_validation_keeps_a_stored_failing_record_over_an_unable_to_evaluate_skip(tmp_path, capsys):
+    path = _uv_file(tmp_path)
+    assert _uv(path, "--status", "failing", "--reason", "open bug") == 0
+    capsys.readouterr()
+    with open(path, "rb") as handle:
+        before = handle.read()
+    assert _uv(path, "--status", "skipped", "--kind", "unable-to-evaluate", "--reason", "env down") == 0
+    answer = json.loads(capsys.readouterr().out)
+    assert answer["kept"] == "failing" and answer["usageValidation"]["reason"] == "open bug"
+    assert answer["requested"] == {"status": "skipped", "kind": "unable-to-evaluate", "reason": "env down"}
+    with open(path, "rb") as handle:
+        assert handle.read() == before
+
+
+@pytest.mark.parametrize("flags", [
+    ("--status", "passed"),
+    ("--status", "failing", "--reason", "new"),
+    ("--status", "skipped", "--kind", "disabled-by-operator", "--reason", "decided"),
+    ("--status", "skipped", "--kind", "not-applicable", "--reason", "nothing to use"),
+])
+def test_usage_validation_overwrites_a_stored_failing_record_with_a_judged_or_chosen_verdict(tmp_path, capsys, flags):
+    path = _uv_file(tmp_path)
+    assert _uv(path, "--status", "failing", "--reason", "open bug") == 0
+    assert _uv(path, *flags) == 0
+    assert _rs_read(path)["metadata"]["usageValidation"]["status"] == flags[1]
+
+
+def test_usage_validation_an_unable_skip_without_a_failing_record_is_written(tmp_path, capsys):
+    path = _uv_file(tmp_path)
+    assert _uv(path, "--status", "passed") == 0
+    assert _uv(path, "--status", "skipped", "--kind", "unable-to-evaluate", "--reason", "env down") == 0
+    assert _rs_read(path)["metadata"]["usageValidation"]["kind"] == "unable-to-evaluate"
+
+
+def test_usage_validation_findings_cap_and_reason_sanitizing(tmp_path, capsys):
+    path = _uv_file(tmp_path)
+    many = {"k%d" % i: {"status": "open"} for i in range(250)}
+    assert _uv(path, "--status", "passed", "--findings-json", json.dumps(many)) == 0
+    assert len(_rs_read(path)["metadata"]["usageValidation"]["findings"]) == usage_record.FINDINGS_MAX
+    one = json.dumps({"a": {"status": "accepted", "reason": "x" * 900}})
+    assert _uv(path, "--status", "passed", "--findings-json", one) == 0
+    reason = _rs_read(path)["metadata"]["usageValidation"]["findings"]["a"]["reason"]
+    assert len(reason) <= usage_record.FINDING_REASON_MAXLEN
+
+
+def test_usage_validation_failing_blocks_archive_and_the_predicate_until_passed(tmp_path):
+    path = _uv_file(tmp_path)
+    tasks_dir = os.path.dirname(path)
+    root = os.path.dirname(tasks_dir)
+    os.makedirs(os.path.join(root, ".aimi", "tasks"), exist_ok=True)
+    proc = _uv_cli(path, "--status", "failing", "--reason", "broken")
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["status"] == "failing"
+    archive = os.path.join(root, "archive")
+    argv = ["archive-task", "--tasks-file", path, "--project-root", root, "--archive-dir", archive]
+    assert T.op_archive_task(argv) == 1
+    assert os.path.exists(path) and not os.path.exists(archive)
+    assert T.op_archivable_file_is_terminal(["x", "--tasks-file", path]) == 0
+    _uv(path, "--status", "passed")
+    assert T.op_archive_task(argv) == 0
+    assert not os.path.exists(path)
+
+
+def test_usage_validation_predicate_prints_false_for_failing_and_true_otherwise(tmp_path, capsys):
+    path = _uv_file(tmp_path)
+    assert T.op_archivable_file_is_terminal(["x", "--tasks-file", path]) == 0
+    assert capsys.readouterr().out.strip() == "true"
+    _uv(path, "--status", "failing", "--reason", "r")
+    capsys.readouterr()
+    assert T.op_archivable_file_is_terminal(["x", "--tasks-file", path]) == 0
+    assert capsys.readouterr().out.strip() == "false"
+    _uv(path, "--status", "skipped", "--kind", "not-applicable", "--reason", "r")
+    capsys.readouterr()
+    assert T.op_archivable_file_is_terminal(["x", "--tasks-file", path]) == 0
+    assert capsys.readouterr().out.strip() == "true"
+
+
+def test_usage_validation_status_view_adds_the_key_only_when_recorded(tmp_path):
+    doc = _rs_read(_uv_file(tmp_path))
+    assert "usageValidation" not in T.status_view(doc, False)
+    doc["metadata"]["usageValidation"] = {"status": "passed", "rounds": 0}
+    assert T.status_view(doc, True)["usageValidation"] == {"status": "passed", "rounds": 0}
+    assert T.status_view(doc, False)["usageValidation"] == {"status": "passed", "rounds": 0}
+
+
+def test_usage_validation_wrapper_works_in_agent_mode_and_is_in_the_help(tmp_path):
+    path = _uv_file(tmp_path)
+    os.makedirs(os.path.join(os.path.dirname(os.path.dirname(path)), ".aimi", "tasks"), exist_ok=True)
+    before = open(path, encoding="utf-8").read()
+    proc = _uv_cli(path, "--status", "passed", "--review", "/etc/passwd")
+    assert proc.returncode == 1
+    assert open(path, encoding="utf-8").read() == before
+    proc = _uv_cli(path, "--status", "passed")
+    assert proc.returncode == 0, proc.stderr
+    helped = subprocess.run(["bash", CLI, "help"], capture_output=True, text=True)
+    assert "usage-validation-record" in helped.stdout + helped.stderr
+
+
+def test_usage_validation_status_md_carries_the_line_and_the_notice():
+    text = open(os.path.join(SCRIPTS, "..", "commands", "status.md"), encoding="utf-8").read()
+    assert "Usage validation:" in text and "FAILING" in text
+    assert "/aimi:open-pr" in text and "re-validates" in text
+    assert len(text.encode("utf-8")) <= 16384
+
+
+def _replay_audit_open(audit_open, tmp_path):
+    """R28's replay, built like _replay_prototype_superseded: bash never ran it."""
+    story = {
+        "id": "US-001",
+        "title": "Story US-001",
+        "description": "As a user, I want US-001.",
+        "acceptanceCriteria": ["um criterio sem ancora nenhuma"],
+        "status": "pending",
+        "priority": 1,
+        "dependsOn": [],
+        "wave": 0,
+    }
+    metadata = {"branchName": "ref/corpus", "maxConcurrency": 1}
+    if audit_open is not _ABSENT:
+        metadata["auditOpen"] = audit_open
+    document = {"schemaVersion": "3.3", "metadata": metadata, "userStories": [story]}
+    case = {
+        "args": ["validate-tasks"],
+        "input": {
+            "tasks_file": "2020-01-01-corpus-tasks.json",
+            "tasks": json.dumps(document, ensure_ascii=False) + "\n",
+            "files": {},
+            "outside": {},
+            "state": {},
+        },
+    }
+    return _replay_validate(case, tmp_path)
+
+
+def _audit_open_errors(actual):
+    return [e for e in json.loads(actual["stdout"])["errors"] if "metadata.auditOpen" in e]
+
+
+def test_validate_tasks_audit_open_absent_passes(tmp_path):
+    actual = _replay_audit_open(_ABSENT, tmp_path)
+    assert actual["exit"] == 0
+    assert _audit_open_errors(actual) == []
+
+
+def test_validate_tasks_audit_open_valid_passes(tmp_path):
+    actual = _replay_audit_open(
+        [{"message": "m", "stories": ["01", "_audit"]}, {"message": "n", "stories": ["12"]}],
+        tmp_path,
+    )
+    assert actual["exit"] == 0
+    assert _audit_open_errors(actual) == []
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        [],
+        {},
+        "x",
+        None,
+        ["x"],
+        [{"stories": ["01"]}],
+        [{"message": "", "stories": ["01"]}],
+        [{"message": 3, "stories": ["01"]}],
+        [{"message": "m"}],
+        [{"message": "m", "stories": []}],
+        [{"message": "m", "stories": "01"}],
+        [{"message": "m", "stories": ["US-001"]}],
+        [{"message": "m", "stories": ["1"]}],
+        [{"message": "m", "stories": [1]}],
+        [{"message": "m", "stories": ["001"]}],
+    ],
+)
+def test_validate_tasks_audit_open_malformed_is_an_error(tmp_path, value):
+    actual = _replay_audit_open(value, tmp_path)
+    assert actual["exit"] == 1
+    found = _audit_open_errors(actual)
+    assert found and all("2020-01-01-corpus-tasks.json" in e for e in found)
+
+
+def test_validate_tasks_audit_open_error_names_the_index(tmp_path):
+    actual = _replay_audit_open(
+        [{"message": "m", "stories": ["01"]}, {"message": "m", "stories": ["x"]}], tmp_path
+    )
+    found = _audit_open_errors(actual)
+    assert len(found) == 1 and "metadata.auditOpen[1]" in found[0]

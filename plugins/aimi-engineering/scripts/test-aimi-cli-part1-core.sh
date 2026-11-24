@@ -52,6 +52,34 @@ CLI="$SCRIPT_DIR/aimi-cli.sh"
 # General Tests
 # ============================================================================
 
+# Prints, space-separated, every verb main() dispatches that has no entry line
+# in the help text. Verbs come from the case arms of main() only (4-space
+# indent), a|b alternations split, help/--help/-h dropped. Prints
+# EXTRACTION-EMPTY when fewer than 50 verbs were read, so an empty extraction
+# can never pass vacuously. Keeps no exemption list.
+_verbs_missing_from_help() {
+  local cli_file="$1" help_file="$2"
+  local verbs verb missing="" count=0
+  verbs=$(sed -n '/^main() {/,/^}$/p' "$cli_file" 2>/dev/null \
+    | grep -E '^    [-a-z0-9|]+\)' \
+    | sed -E 's/^    ([-a-z0-9|]+)\).*/\1/' \
+    | tr '|' '\n' \
+    | grep -v -E '^(help|--help|-h)$' \
+    | sort -u || true)
+  while IFS= read -r verb; do
+    [ -n "$verb" ] || continue
+    count=$((count + 1))
+    if ! grep -q -E "^    ${verb}( |\$)" "$help_file"; then
+      missing="${missing:+$missing }$verb"
+    fi
+  done <<< "$verbs"
+  if [ "$count" -lt 50 ]; then
+    echo "EXTRACTION-EMPTY"
+    return 0
+  fi
+  echo "$missing"
+}
+
 test_help() {
   echo ""
   echo "=== Testing help command ==="
@@ -62,6 +90,19 @@ test_help() {
   assert_contains "aimi-cli.sh" "$output" "help shows script name"
   assert_contains "init-session" "$output" "help shows init-session"
   assert_contains "mark-complete" "$output" "help shows mark-complete"
+}
+
+test_help_lists_every_dispatched_verb() {
+  echo ""
+  echo "=== Testing help lists every dispatched verb ==="
+
+  local help_file missing
+  help_file=$(mktemp)
+  "$CLI" help > "$help_file" 2>&1 || true
+  missing=$(_verbs_missing_from_help "$CLI" "$help_file")
+  rm -f "$help_file"
+
+  assert_eq "" "$missing" "help has an entry line for every dispatched verb (missing: ${missing:-none})"
 }
 
 test_find_tasks() {
@@ -1497,7 +1538,7 @@ test_validators_moved_to_tasks_py() {
   # no jq left, and — unlike the eleven writers — no lock, because there is
   # nothing to serialize against a verb that only reads.
   local fn body
-  for fn in cmd_validate_deps cmd_validate_stories cmd_validate_ids cmd_validate_waves cmd_validate_wave_contention; do
+  for fn in cmd_validate_deps cmd_validate_stories cmd_validate_ids cmd_validate_waves cmd_validate_wave_contention cmd_bookkeeping_declared; do
     body=$(_cmd_body "$fn")
     assert_eq "1" "$(printf '%s\n' "$body" | grep -c 'python3 ' || true)" \
       "validators: $fn makes exactly one python3 call"
@@ -3536,7 +3577,7 @@ test_worktree_project_root_resolution() {
 
 # Builds a throwaway repository standing in for a main checkout, carrying a
 # REAL copy of the modules under test (aimi-cli.sh + tasks.py + roadmap.py +
-# sanitize.py — tasks.py's own import chain, see tasks.py's `from roadmap
+# sanitize.py + usage_record.py — tasks.py's own import chain, see tasks.py's `from roadmap
 # import ...`), plus one worktree of its own. Marks the WORKTREE's own copy
 # of tasks.py with a stderr marker after the worktree is created, so the
 # main checkout's copy stays byte-identical to $SCRIPT_DIR's and only the
@@ -3575,7 +3616,8 @@ setup_worktree_module_resolution_fixture() {
 EOF
 
   cp "$CLI" "$WT_MOD_SCRIPTS_MAIN/aimi-cli.sh"
-  cp "$SCRIPT_DIR/tasks.py" "$SCRIPT_DIR/roadmap.py" "$SCRIPT_DIR/sanitize.py" "$WT_MOD_SCRIPTS_MAIN/"
+  cp "$SCRIPT_DIR/tasks.py" "$SCRIPT_DIR/roadmap.py" "$SCRIPT_DIR/sanitize.py" \
+    "$SCRIPT_DIR/usage_record.py" "$WT_MOD_SCRIPTS_MAIN/"
   chmod +x "$WT_MOD_SCRIPTS_MAIN/aimi-cli.sh"
 
   echo "probe" > "$WT_MOD_MAIN/README.md"
@@ -3665,9 +3707,15 @@ EOF
   # now one of tasks.py's siblings this fixture must provision, the same as
   # roadmap.py and sanitize.py already are. story_merge.py in turn imports
   # audit_patches.py (the staged-idx helper its audit gate shares with the
-  # apply-audit-patches verb), so that is provisioned too.
+  # apply-audit-patches verb), so that is provisioned too. tasks.py and
+  # roadmap.py both import usage_record.py (the one usage-validation record
+  # rule both writers share), so it is provisioned as well. tasks.py also
+  # imports bookkeeping.py (validate-wave-contention's declaration reader),
+  # which imports deps_recipe.py for its tracked-config check.
   cp "$SCRIPT_DIR/tasks.py" "$SCRIPT_DIR/roadmap.py" "$SCRIPT_DIR/sanitize.py" \
     "$SCRIPT_DIR/story_merge.py" "$SCRIPT_DIR/audit_patches.py" \
+    "$SCRIPT_DIR/usage_record.py" "$SCRIPT_DIR/bookkeeping.py" \
+    "$SCRIPT_DIR/deps_recipe.py" \
     "$real_dir/plugins/aimi-engineering/scripts/"
   chmod +x "$real_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
 
@@ -11838,6 +11886,7 @@ main() {
   echo ""
   echo "--- General Tests ---"
   test_help
+  test_help_lists_every_dispatched_verb
   test_find_tasks
   test_init_session
   test_metadata

@@ -40,6 +40,7 @@ Specific obligations:
 - [ ] `metadata.designBundle` (if set) — all paths (`root`, `readme`, `chats[]`, `businessSpec`, `designSpec`) that are non-null exist on disk under `AIMI_ROOT`
 - [ ] `metadata.designTokens` (if set) is a flat object whose top-level keys match the token categories enumerated in `DesignSpec § 1`
 - [ ] When `businessSpecContent` is non-null, every story whose title matches a screen name in `BusinessSpec § 2` (canonical map: `commands/references/spec-section-contract.md`) cites at least one rule ID from `§ 3` (e.g., `RN-01`) or one criterion ID from `§ 9` in its `acceptanceCriteria`
+- [ ] `metadata.usageSurfaces` (if set) is a non-empty array of `web` (`url`, no origin) and `cli` (`command`, plain) entries whose `stories` ids exist in that same file — absent entirely, never `[]` and never `null`, when nothing is declared
 - [ ] Every story has a `wave` number (wave 1 for roots, computed from `dependsOn` for others)
 - [ ] Wave numbers are contiguous with no gaps
 - [ ] `implementation` (if present) has `files` (string[]), `approach` (string), `verify` (string) with concrete paths and no `cd <project> &&` prefix, per the "verify working directory" rule in the Story JSON shape block above — the executor has already entered the project

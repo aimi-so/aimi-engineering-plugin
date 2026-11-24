@@ -192,6 +192,8 @@ Write `implementation.verify` as if it already runs from the right directory, be
 
 `implementation.files` lists only files inside the story's own repository, as plain relative paths (no `..` segment, no leading `/` or `~`, no `./`, no whitespace). A file written OUTSIDE it, such as a report under the AIMI root's gitignored `.aimi/`, goes in the optional `implementation.outputs`, as a path relative to the AIMI root starting with `.aimi/`. A verify or criterion reaches that file through `"$AIMI_ROOT/.aimi/..."`, exported by the executor and by the plan-time probes, never through `../.aimi` and never through a path re-derived from the worktree.
 
+When your prompt carries a `layout repositories:` line, the `.aimi` root is not a git repository and each key on that line is a separate repository. An `implementation.files` entry never starts with another repository's key (a whole path segment, so `api` does not match `api-gateway`), nor with `$AIMI_ROOT` or `${AIMI_ROOT}`: that file belongs to the story of the repository that owns it, so name it there, or in `implementation.outputs` when it is a `.aimi/` path. `validate-staging` and `story-merge` refuse such an entry, naming the story and the path.
+
 ## Verify measures the tree under test, never an installed copy
 
 A story that creates or changes an executable this repository *ships* must run **that tree's** copy of it. Resolve the tool the way an ordinary session does (a global cache, `PATH`, a path an installer wrote into a shell profile) and the verify measures the copy installed on the machine, a different checkout from the executor's worktree. The check then passes or fails for reasons unrelated to the story, and a story that adds behaviour can never observe it.

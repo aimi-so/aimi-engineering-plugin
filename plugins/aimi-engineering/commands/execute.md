@@ -30,8 +30,8 @@ A spawned split task is a Task the orchestrator started for one member of a spli
 
 | Kind | Marker line | Evaluates | Skips |
 |---|---|---|---|
-| flat-split-child | `SPAWNED_SPLIT_TASK=flat-split-child` | Multi-Repo Handling; Step 1: Initialize Session; Execution Mode Detection (`EXECUTION_MODE` and `CONTAINER_MODE` come from the prompt); Step 1.5: Branch Freshness Check (for `DEFAULT_BRANCH`); Step 3: Check for Pending Stories; Steps 3.1 and 3.2: Resolve Worktree Manager, Read Concurrency Setting; Step 3.3: Load Project Guidelines; Step 3.4: Open Visual Follow Session; Step 4: Wave Execution Loop; Post-Loop Cleanup; Finalize Step; Console Error Attribution; Step 5: Completion; If deadlock detected:; Resuming Execution | Step 0.5: Archival Check; Step 0.7: Visual Follow Prompt; Step 0.9: Multi-File Auto-Detection; Per-Repo Branch and Container Setup for the Split; Split File Waves; Aggregated Completion (Split Mode); Step 1.6: Branch Base Selection; Resolve Session Identity; Create or Reuse the Phase Container; Detect a Full-Stack Split Inside This Phase; Create Phase Containers Per Project Group; Phase Container Dev Server Bootstrap; Phase-Mode Paired Split; Split Container Dev Server Bootstrap; Aggregated Completion Report (Phase-Mode Paired Split); Step 2: Branch Setup; Main Repo Branch Setup; Per-Project Branch Setup; Phase Completion; Creates Verification; Phase Visual Gate; Write Handoff; Offer a Pull Request; Next Phase |
-| phase-split-sub-orchestrator | `SPAWNED_SPLIT_TASK=phase-split-sub-orchestrator` | Multi-Repo Handling; Execution Mode Detection (Orphaned Story Recovery and Content Validation only); Step 3: Check for Pending Stories; Steps 3.1 and 3.2: Resolve Worktree Manager, Read Concurrency Setting; Step 3.3: Load Project Guidelines; Step 3.4: Open Visual Follow Session; Step 4: Wave Execution Loop; Post-Loop Cleanup; Console Error Attribution; Resuming Execution | Step 0.5: Archival Check; Step 0.7: Visual Follow Prompt; Step 0.9: Multi-File Auto-Detection; Per-Repo Branch and Container Setup for the Split; Split File Waves; Aggregated Completion (Split Mode); Step 1: Initialize Session; Step 1.5: Branch Freshness Check; Step 1.6: Branch Base Selection; Resolve Session Identity; Create or Reuse the Phase Container; Detect a Full-Stack Split Inside This Phase; Create Phase Containers Per Project Group; Phase Container Dev Server Bootstrap; Phase-Mode Paired Split; Split Container Dev Server Bootstrap; Aggregated Completion Report (Phase-Mode Paired Split); Step 2: Branch Setup; Main Repo Branch Setup; Per-Project Branch Setup; Finalize Step; Phase Completion; Creates Verification; Phase Visual Gate; Write Handoff; Offer a Pull Request; Next Phase; Step 5: Completion; If deadlock detected: |
+| flat-split-child | `SPAWNED_SPLIT_TASK=flat-split-child` | Multi-Repo Handling; Usage Validation Environment; Usage Validation Loop; Step 1: Initialize Session; Execution Mode Detection (`EXECUTION_MODE` and `CONTAINER_MODE` come from the prompt); Step 1.5: Branch Freshness Check (for `DEFAULT_BRANCH`); Step 3: Check for Pending Stories; Steps 3.1 and 3.2: Resolve Worktree Manager, Read Concurrency Setting; Step 3.3: Load Project Guidelines; Step 3.4: Open Visual Follow Session; Step 4: Wave Execution Loop; Post-Loop Cleanup; Finalize Step; Flat Usage Validation Step; Console Error Attribution; Step 5: Completion; If deadlock detected:; Resuming Execution | Step 0.5: Archival Check; Step 0.7: Visual Follow Prompt; Open Audit Findings; Step 0.9: Multi-File Auto-Detection; Per-Repo Branch and Container Setup for the Split; Split File Waves; Aggregated Completion (Split Mode); Step 1.6: Branch Base Selection; Resolve Session Identity; Create or Reuse the Phase Container; Detect a Full-Stack Split Inside This Phase; Create Phase Containers Per Project Group; Phase Container Dev Server Bootstrap; Phase-Mode Paired Split; Split Container Dev Server Bootstrap; Aggregated Completion Report (Phase-Mode Paired Split); Step 2: Branch Setup; Main Repo Branch Setup; Per-Project Branch Setup; Phase Completion; Creates Verification; Phase Visual Gate; Phase Usage Validation; Write Handoff; Offer a Pull Request; Next Phase |
+| phase-split-sub-orchestrator | `SPAWNED_SPLIT_TASK=phase-split-sub-orchestrator` | Multi-Repo Handling; Execution Mode Detection (Orphaned Story Recovery and Content Validation only); Step 3: Check for Pending Stories; Steps 3.1 and 3.2: Resolve Worktree Manager, Read Concurrency Setting; Step 3.3: Load Project Guidelines; Step 3.4: Open Visual Follow Session; Step 4: Wave Execution Loop; Post-Loop Cleanup; Console Error Attribution; Resuming Execution | Step 0.5: Archival Check; Step 0.7: Visual Follow Prompt; Usage Validation Environment; Usage Validation Loop; Open Audit Findings; Step 0.9: Multi-File Auto-Detection; Per-Repo Branch and Container Setup for the Split; Split File Waves; Aggregated Completion (Split Mode); Step 1: Initialize Session; Step 1.5: Branch Freshness Check; Step 1.6: Branch Base Selection; Resolve Session Identity; Create or Reuse the Phase Container; Detect a Full-Stack Split Inside This Phase; Create Phase Containers Per Project Group; Phase Container Dev Server Bootstrap; Phase-Mode Paired Split; Split Container Dev Server Bootstrap; Aggregated Completion Report (Phase-Mode Paired Split); Step 2: Branch Setup; Main Repo Branch Setup; Per-Project Branch Setup; Finalize Step; Flat Usage Validation Step; Phase Completion; Creates Verification; Phase Visual Gate; Phase Usage Validation; Write Handoff; Offer a Pull Request; Next Phase; Step 5: Completion; If deadlock detected: |
 
 ## Step 0: Resolve CLI Path
 
@@ -112,6 +112,24 @@ Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute
 Applies when: not a spawned split task (the prompt carries no `SPAWNED_SPLIT_TASK=` marker line); on every other run it counts the visual stories, aborts on a malformed `verification` field and sets `VISUAL_FOLLOW`. A spawned split task takes `VISUAL_FOLLOW` from its prompt.
 After the count, when `VISUAL_STORIES` is greater than 0, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/visual-follow-lifecycle.md in full before the prompt, since the answer feeds the lifecycle it defines. When `VISUAL_STORIES` is 0 or empty skip it: `VISUAL_FOLLOW=false`.
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/step-0-7-visual-follow-prompt.md in full.
+
+
+## Usage Validation Environment
+
+Applies when: the usage-validation loop is about to validate, or re-validate after a merged fix, and hands over a run key, the repositories and `USAGE_RESTART`: with `PHASE_MODE=true` after the Phase Visual Gate and before Write Handoff, with `PHASE_MODE=false` in a flat run after Step 4 Finalize (or Step 3's Re-validate block) and before container teardown in Step 5. Otherwise skip this file.
+Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/usage-validation-environment.md in full.
+
+
+## Usage Validation Loop
+
+Applies when: usage validation is owed after the run's work merged: with `PHASE_MODE=true` after the Phase Visual Gate and before Write Handoff, with `PHASE_MODE=false` in a flat run after Step 4 Finalize (or Step 3's Re-validate block) and before container teardown in Step 5. A prompt carrying `SPAWNED_SPLIT_TASK=phase-split-sub-orchestrator` skips it, since its parent validates once after the members merge. Otherwise skip this file.
+Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/usage-validation-loop.md in full.
+
+
+## Open Audit Findings
+
+Applies when: not a spawned split task, once per top-level run, at the first of two points reached: right after Step 1's `init-session` on the single-file path, or, when `split-detect` answered a split with `activeCount` of 2 or more, before Per-Repo Branch and Container Setup for the Split. Otherwise skip this file.
+Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/step-1-audit-open.md in full.
 
 
 ## Step 0.9: Multi-File Auto-Detection
@@ -276,7 +294,7 @@ Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute
 ### Aggregated Completion Report (Phase-Mode Paired Split)
 
 Applies when: `PHASE_MODE=true` and `PHASE_SPLIT_MODE=true`, once the spawned split sub-orchestrators have finished. Otherwise skip it (default `PHASE_SPLIT_MODE=false`).
-Covers: `### Merge Split Branches Into the Phase Branch`, `### Clean Up Split Worktrees`, `### Continue to Phase Completion`.
+Covers: `### Merge Split Branches Into the Phase Branch`, `### Integrated Split Check`, `### Clean Up Split Worktrees`, `### Continue to Phase Completion`.
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/paired-split-merge-and-continue.md in full.
 
 
@@ -302,7 +320,7 @@ Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute
 ## Step 3: Check for Pending Stories
 
 Applies when: `PHASE_SPLIT_MODE=false` (the default when Step 1.7 was skipped, so a flat run always reads it). When `PHASE_SPLIT_MODE=true` skip it: the split sub-orchestrators and Phase Completion own the pending count there.
-Covers: `### Validate Dependencies`, and the Re-verify branch.
+Covers: `### Validate Dependencies`, the Re-verify branch and the Re-validate branch.
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/step-3-check-pending.md in full.
 
 
@@ -329,6 +347,8 @@ Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute
 
 Applies when: `PHASE_SPLIT_MODE=false`, Step 3 did not report its Re-verify block and the pending count was above zero. Otherwise skip this file (default: Step 3 did not fire the re-verify branch).
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/step-4-wave-execution-loop.md in full.
+Before the in-place conflict loop of a group's merge, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/bookkeeping-resolve.md in full.
+Before the integrated check after each group's merge, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/wave-reconcile.md in full.
 
 
 ### Post-Loop Cleanup
@@ -344,6 +364,12 @@ Applies when: every top-level run that reached Post-Loop Cleanup, immediately af
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/step-4-finalize.md in full.
 
 
+### Flat Usage Validation Step
+
+Applies when: `PHASE_MODE=false` and the prompt does not carry the `SPAWNED_SPLIT_TASK=phase-split-sub-orchestrator` marker, immediately after Finalize Step and before Step 5, or straight from Step 3 when it reported its Re-validate block. Otherwise skip this file (default `PHASE_MODE=true`: Phase Usage Validation owns it).
+Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/step-4-usage-validation.md in full.
+
+
 ## Console Error Attribution
 
 Applies when: at least one story of the run is a visual story, so the per-story post-merge visual verification in Step 4 calls `attribute_console_errors()`. Otherwise skip this file (default: no visual story, no console buffer).
@@ -352,7 +378,7 @@ Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute
 
 ## Phase Completion
 
-Applies when: `PHASE_MODE=true` outside a spawned split task (the top-level orchestrator: the prompt carries no `SPAWNED_SPLIT_TASK=` marker line). Otherwise skip this entry and the five Phase Completion files below (default `PHASE_MODE=false`).
+Applies when: `PHASE_MODE=true` outside a spawned split task (the top-level orchestrator: the prompt carries no `SPAWNED_SPLIT_TASK=` marker line). Otherwise skip this entry and the six Phase Completion files below (default `PHASE_MODE=false`).
 Covers: `### Multi-File Pending Count`.
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/phase-completion-pending-count.md in full.
 
@@ -369,6 +395,13 @@ Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute
 Applies when: `PHASE_MODE=true` outside a spawned split task (the prompt carries no `SPAWNED_SPLIT_TASK=` marker line), and the pending count was zero after Creates Verification. Otherwise skip this file (default `PHASE_MODE=false`).
 Covers: `#### Is a comparison owed`, `#### Environment checks and the live URLs`, `#### Run the comparison`, `#### On a diverges verdict`.
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/phase-completion-visual-gate.md in full.
+
+
+### Phase Usage Validation
+
+Applies when: `PHASE_MODE=true` outside a spawned split task (the prompt carries no `SPAWNED_SPLIT_TASK=` marker line), and the pending count was zero after the Phase Visual Gate fell through. Otherwise skip this file (default `PHASE_MODE=false`).
+Covers: `#### Is validation owed`, `#### The stored record and the run values`, `#### Skip ladder`, `#### Bring up and validate`, `#### Record the outcome`.
+Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/phase-completion-usage-validation.md in full.
 
 
 ### Write Handoff
