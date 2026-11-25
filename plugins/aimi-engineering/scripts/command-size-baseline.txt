@@ -70,7 +70,7 @@ references/scope-contexts.md	24576
 plan.md	24576
 deepen.md	20480
 
-skills/story-executor/SKILL.md	32768
+skills/story-executor/SKILL.md	36864
 skills/task-planner/SKILL.md	24576
 skills/git-worktree/SKILL.md	20480
 

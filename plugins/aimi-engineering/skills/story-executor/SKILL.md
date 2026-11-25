@@ -306,6 +306,12 @@ To probe from a verify, probe a sibling story's verify or a throwaway fixture, o
   start with `.aimi/`: artifacts the story produces outside the repository. Create each one
   under `"$AIMI_ROOT"` (`mkdir -p` its parent), never stage or commit it, and never treat it as
   a commit-verification target.
+- **`story.implementation.symbols`**, when present, maps a path to `{creates: [...], edits: [...]}`.
+  For each path that is a key of it, those names are your scope in that file. A path in
+  `story.implementation.files` with no key, or a story whose map is absent or `{}`, is a
+  whole-file claim with no symbol scope. Touching an undeclared symbol is allowed when an
+  acceptance criterion needs it, but report it (Result Contract). Nothing is refused at execute
+  time for it; the integrated wave check after the merge remains the safety net.
 - When the story is visual or carries a reference artifact, run the Visual Source-of-Truth
   Protocol (V1/V2/V3) and the Reference-Artifact Parity Pass below BEFORE writing code.
 
@@ -522,6 +528,9 @@ Omit optional fields that are empty rather than emitting null or empty arrays.
   never counted there, and `segments - discriminating` is not a null tally). Omit the WHOLE
   object when `story.implementation.verify` is absent or empty: the missing key is the signal
   that the story ran with no verify.
+- `knownGaps`: report each undeclared symbol you touched as one entry of the exact form
+  `undeclared-symbol: <path> <symbol>`, one per path and symbol. Report none when you stayed
+  inside the declaration or the story declared no symbols. No new key exists for it.
 - A number that was never measured is OMITTED, never invented. `segments` and `discriminating`
   leave together when `verify-probe` was unavailable; `exit` leaves when Step 4 never ran.
   **Zero never means "not measured"**: zero is a measured, successful exit.
