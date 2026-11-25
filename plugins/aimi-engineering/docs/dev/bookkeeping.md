@@ -49,7 +49,7 @@ Paths match by exact string equality against the declaration, relative to `--roo
 
 ## Plan-time contracts
 
-`wave_contention` (in `tasks.py`) takes the declared paths as an optional parameter, a map of project key to a set of paths, matched by exact string equality. An absent declaration gives today's output unchanged. A path with several claimants is exempt only when every claimant's own project key declares it, and a mixed overlap lists the undeclared paths only. The cross-story auditor applies the same rule to its `dependsOn` serialization: it skips declared paths, reads them from a data line it never opens as a file, and a path declared under another project key exempts nothing.
+`wave_contention` (in `tasks.py`) takes the declared paths as an optional parameter, a map of project key to a set of paths, matched by exact string equality. An absent declaration gives today's output unchanged. A path with several claimants is exempt only when every claimant's own project key declares it, and a mixed overlap lists the undeclared paths only. The cross-story auditor no longer re-derives the shared-path rule for its `dependsOn` serialization: the `staging-contention` verb hands it the contending staged pairs, computed by the same `wave_symbol_contention` the wave check uses with this declaration passed in (see `docs/dev/wave-contention.md`). It patches only listed pairs, still skips a pair's declared paths, reads them from a data line it never opens as a file, and a path declared under another project key exempts nothing.
 
 ## Modules
 

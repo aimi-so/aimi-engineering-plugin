@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.169.0] - 2026-11-25
+
+Two stories of one wave that share a file are refused only when they declare the same symbol in it, and the cross-story auditor is handed the contending pairs instead of working them out.
+
+### Added
+- `implementation.symbols`, the optional per-file declaration of the names a story creates and edits (`{"<path>": {"creates": [...], "edits": [...]}}`). `validate-tasks` rule R30 judges its shape; a path with no entry, or a story with no declaration, is a whole-file claim.
+- `validate-wave-contention` warns, without refusing, when stories of one wave share a file but declare disjoint symbols in it (`Wave contention warning: ... shared by N stories with disjoint symbols`), and refuses a shared symbol per name (`... path P symbol S claimed by ...`). `/aimi:plan` prints the warnings at plan validation.
+- `staging-contention --staging-dir <dir>`, a read-only verb that prints the staged story pairs the wave check would refuse as `{"pairs":[...]}`, computed by the same rule. Phase 3d.5 hands it to the cross-story auditor, which patches only the pairs it is given.
+- `validate-staging` reports a staged story with no `implementation.symbols` declaration, `story-merge --require-symbols` refuses it (`{}` counts as a declaration), and `story-merge --outline` records an advisory `symbol-produces` smell where the declared symbols and the outline entry's `produces` tokens disagree.
+- The story expander declares each story's symbols, the story executor reads them and reports an undeclared symbol it touched as `undeclared-symbol: <path> <symbol>` in `knownGaps`.
+- `docs/dev/wave-contention.md`, with the gate answers for the symbol refusal, the missing-declaration refusal and the symbol-produces smell. Only declared names are measured; `wave-verify-commands` and `wave-reconcile.md` remain the net for undeclared edits and shared literals.
+
+### Changed
+- `validate-wave-contention` now compares only stories of the same `project`. A plan that was refused because stories of different projects listed one literal path now passes, since those are different files.
+- `docs/dev/bookkeeping.md` says the cross-story auditor reads the contending pairs from `staging-contention` instead of re-deriving the shared-path rule.
+
 ## [1.168.0] - 2026-11-24
 
 A screen built from a prototype that has no `data-view` sections is sliced and cited like one that has, a kit's handoff documents travel from the plan to the story worker, and a run that completed screen stories nobody checked against the running product is no longer closed or published without a question.
