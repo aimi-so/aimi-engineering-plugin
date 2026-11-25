@@ -1843,10 +1843,110 @@ def _story_project_key(story):
     return project if isinstance(project, str) and project else "."
 
 
+def wave_symbol_contention(claimants, declared=None):
+    """The wave-contention rule, before it is worded: findings, never strings.
+
+    `claimants` is an iterable of `(ident, wave, story)` in document order; a
+    `None` wave (a story `computed_waves` never placed) is skipped. `declared`
+    has `wave_contention`'s shape -- a map of project key to the set of paths
+    that project declared as bookkeeping. Pure: no file is read, and no story is
+    changed.
+
+    Stories are compared only inside one wave AND one project key
+    (`_story_project_key`), so two stories of different projects that list one
+    literal path are two different files and never contend. A path only one
+    story claims is no finding, and a story never contends with itself: its own
+    repeated paths count once. The same skip guards as ever apply -- a story
+    whose `implementation` is not an object, or whose `implementation.files` is
+    not a list, claims nothing, and a non-string entry is no path.
+
+    A path with several claimants, whose project does not declare it as
+    bookkeeping, is classified by what each claimant declared for it through
+    `declared_symbols` -- the one reader of `implementation.symbols`, so an
+    entry the validator refuses is "not declared" here as well:
+
+      * `file`        some claimant has no entry for the path: the whole file is
+                      its claim, and the refusal is today's, one per path.
+      * `symbol`      every claimant has an entry and some name is in two or
+                      more of them: one finding per shared name, sorted, its
+                      `ids` the claimants of THAT name. No other finding is made
+                      for the path.
+      * `shared-file` every claimant has an entry and no name is shared: not a
+                      refusal, and `ids` is every claimant.
+
+    A finding is `{kind, wave, project, path, ids}` (a `symbol` one adds
+    `symbol`), ordered by wave ascending, path in first-appearance order within
+    the wave, symbol sorted, ids in document order.
+    """
+    by_wave = {}
+    symbols_of = {}
+    for ident, wave, story in claimants:
+        if wave is None:
+            continue
+        implementation = jq_index(story, "implementation", STORY)
+        if jq_type(implementation) != "object":
+            continue
+        files = jq_index(implementation, "files", STORY + ".implementation")
+        if not isinstance(files, list):
+            continue
+        project = _story_project_key(story)
+        groups = by_wave.setdefault(wave, {})
+        seen = set()
+        for entry in files:
+            if not isinstance(entry, str) or entry in seen:
+                continue
+            seen.add(entry)
+            groups.setdefault((project, entry), []).append((ident, story))
+
+    findings = []
+    for wave in sorted(by_wave):
+        for (project, path), claims in by_wave[wave].items():
+            if len(claims) < 2:
+                continue
+            if declared and path in declared.get(project, ()):
+                continue
+            ids = [ident for ident, _ in claims]
+            names = []
+            for ident, story in claims:
+                if id(story) not in symbols_of:
+                    symbols_of[id(story)] = declared_symbols(story)
+                names.append(symbols_of[id(story)].get(path))
+            if any(entry is None for entry in names):
+                findings.append(
+                    {"kind": "file", "wave": wave, "project": project, "path": path, "ids": ids}
+                )
+                continue
+            shared = sorted(
+                name for name in set().union(*names)
+                if sum(1 for entry in names if name in entry) > 1
+            )
+            if not shared:
+                findings.append(
+                    {"kind": "shared-file", "wave": wave, "project": project, "path": path, "ids": ids}
+                )
+                continue
+            for name in shared:
+                findings.append(
+                    {
+                        "kind": "symbol", "wave": wave, "project": project, "path": path,
+                        "symbol": name,
+                        "ids": [ident for (ident, _), entry in zip(claims, names) if name in entry],
+                    }
+                )
+    return findings
+
+
 def wave_contention(doc, declared=None):
     """One error per `implementation.files` path two or more stories in the
     SAME wave both claim -- the check that catches two executors racing each
     other for one literal, which `validate_waves` never asked about at all.
+
+    The rule is `wave_symbol_contention`; this function only builds its
+    claimants and words what it finds. A `file` finding is the original error,
+    a `symbol` finding is one error per shared symbol, and a `shared-file`
+    finding is a WARNING: the verdict gains a `warnings` key only when one
+    exists, so a document with no `implementation.symbols` and no cross-project
+    overlap answers exactly as before.
 
     KEYED ON THE COMPUTED WAVE, NEVER THE STORED ONE. `list-ready` never reads
     `wave` -- `ready_stories` decides readiness from status plus completed
@@ -1863,60 +1963,46 @@ def wave_contention(doc, declared=None):
 
     A story `computed_waves` never assigned (a cycle, a dangling `dependsOn`)
     is skipped, exactly as `validate_waves` skips it -- reporting those is
-    `validate_deps`' job. A story whose own `implementation` is not an object,
-    or whose `implementation.files` is not a list, is skipped too: the guard is
-    R17's, reused verbatim rather than respelled (see its comment, and the
-    account beside `.project` in `validate_stories`). Each story's own repeated
-    paths are deduplicated before comparison, so a story cannot contend with
-    itself.
+    `validate_deps`' job. The guards on `implementation` and `implementation.files`
+    are R17's, reused verbatim rather than respelled (see its comment, and the
+    account beside `.project` in `validate_stories`).
 
-    Errors are built in a deterministic order because the verdict is compared
-    byte for byte by tests: waves ascending, paths in first-appearance document
-    order within a wave, ids in document order -- which plain dict insertion
-    order already gives, since stories are walked in document order throughout.
+    Errors are built in the rule's deterministic order because the verdict is
+    compared byte for byte by tests: waves ascending, paths in first-appearance
+    document order within a wave, ids in document order.
 
     `declared` is optional: a map of project key to the set of paths that
-    project declared as bookkeeping. A path with several claimants is exempt
-    only when EVERY claimant's own project key declares it, so one undeclared
-    claimant keeps the refusal. None or empty takes the original code path.
+    project declared as bookkeeping. Every claimant of a compared path shares
+    one project, so the path is exempt when that project declares it. None or
+    empty takes the original code path.
     """
     stories = _stories(doc)
     assigned = computed_waves(stories)
-    by_wave = {}
-    project_of = {}
+    claimants = []
     for story in stories:
         story_id = jq_index(story, "id", STORY)
-        wave = assigned.get(story_id)
-        if wave is None:
-            continue
-        implementation = jq_index(story, "implementation", STORY)
-        if jq_type(implementation) != "object":
-            continue
-        files = jq_index(implementation, "files", STORY + ".implementation")
-        if not isinstance(files, list):
-            continue
-        if declared:
-            project_of[story_id] = _story_project_key(story)
-        claims = by_wave.setdefault(wave, {})
-        seen = set()
-        for entry in files:
-            if not isinstance(entry, str) or entry in seen:
-                continue
-            seen.add(entry)
-            claims.setdefault(entry, []).append(story_id)
+        claimants.append((story_id, assigned.get(story_id), story))
 
     errors = []
-    for wave in sorted(by_wave):
-        for path, ids in by_wave[wave].items():
-            if len(ids) > 1:
-                if declared and all(path in declared.get(project_of.get(i), ()) for i in ids):
-                    continue
-                errors.append(
-                    "Wave contention: wave " + str(wave)
-                    + " path " + path
-                    + " claimed by " + ", ".join(ids)
-                )
-    return _verdict(errors)
+    warnings = []
+    for finding in wave_symbol_contention(claimants, declared):
+        head = "wave " + str(finding["wave"]) + " path " + finding["path"]
+        if finding["kind"] == "file":
+            errors.append("Wave contention: " + head + " claimed by " + ", ".join(finding["ids"]))
+        elif finding["kind"] == "symbol":
+            errors.append(
+                "Wave contention: " + head + " symbol " + finding["symbol"]
+                + " claimed by " + ", ".join(finding["ids"])
+            )
+        else:
+            warnings.append(
+                "Wave contention warning: " + head + " shared by " + str(len(finding["ids"]))
+                + " stories with disjoint symbols: " + ", ".join(finding["ids"])
+            )
+    verdict = _verdict(errors)
+    if warnings:
+        verdict["warnings"] = warnings
+    return verdict
 
 
 # ---------------------------------------------------------------------------

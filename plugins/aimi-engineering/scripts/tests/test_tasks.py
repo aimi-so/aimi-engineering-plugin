@@ -1495,20 +1495,31 @@ def test_wave_contention_declared_mixed_reports_undeclared_only(tmp_path):
 
 
 def test_wave_contention_declared_needs_every_claimant_project(tmp_path):
+    """The bookkeeping exemption is per project. Two claimants of one project
+    are exempt only when that project declares the path; a claimant of another
+    project never entered the comparison at all."""
     stories = [
         _declared_project(_contention_story("US-001", [], ["VERSION"]), "api"),
-        _declared_project(_contention_story("US-002", [], ["VERSION"]), "web"),
+        _declared_project(_contention_story("US-002", [], ["VERSION"]), "api"),
     ]
-    proc, verdict = _run_validate_wave_contention(tmp_path, stories, _decl(api=["VERSION"]))
+    proc, verdict = _run_validate_wave_contention(tmp_path / "none", stories, _decl(web=["VERSION"]))
     assert verdict == {
         "valid": False,
         "errors": ["Wave contention: wave 1 path VERSION claimed by US-001, US-002"],
     }
     assert proc.returncode == 1
-    proc, verdict = _run_validate_wave_contention(
-        tmp_path / "both", stories, _decl(api=["VERSION"], web=["VERSION"])
-    )
+    proc, verdict = _run_validate_wave_contention(tmp_path / "own", stories, _decl(api=["VERSION"]))
     assert verdict == {"valid": True, "errors": []} and proc.returncode == 0
+
+
+def test_wave_contention_different_projects_listing_one_path_no_longer_contend(tmp_path):
+    stories = [
+        _declared_project(_contention_story("US-001", [], ["VERSION"]), "api"),
+        _declared_project(_contention_story("US-002", [], ["VERSION"]), "web"),
+    ]
+    for n, config in enumerate([None, _decl(api=["VERSION"]), _decl(api=["VERSION"], web=["VERSION"])]):
+        proc, verdict = _run_validate_wave_contention(tmp_path / str(n), stories, config)
+        assert verdict == {"valid": True, "errors": []} and proc.returncode == 0, config
 
 
 def test_wave_contention_declared_absent_declaration_is_unchanged(tmp_path):
@@ -1560,6 +1571,218 @@ def test_wave_contention_declared_default_parameter_matches_none():
         _contention_story("US-002", [], ["a.sh"]),
     ]))
     assert T.wave_contention(doc) == T.wave_contention(doc, None) == T.wave_contention(doc, {})
+
+
+# ---------------------------------------------------------------------------
+# wave_symbol_contention -- the rule wave_contention words (symbol level)
+# ---------------------------------------------------------------------------
+
+
+_NO_SYMBOLS = object()
+
+
+def _symbol_claimant(story_id, files, symbols=_NO_SYMBOLS, project=None, wave=1):
+    story = _contention_story(story_id, [], files)
+    if symbols is not _NO_SYMBOLS:
+        story["implementation"]["symbols"] = symbols
+    if project is not None:
+        story["project"] = project
+    return (story_id, wave, story)
+
+
+def _symbol_stories(*claimants):
+    return [story for _, _, story in claimants]
+
+
+def test_wave_symbol_contention_a_shared_symbol_is_one_error_per_symbol(tmp_path):
+    claimants = [
+        _symbol_claimant("US-001", ["a.ts"], {"a.ts": {"creates": ["f", "h"], "edits": ["g"]}}),
+        _symbol_claimant("US-002", ["a.ts"], {"a.ts": {"edits": ["g", "f", "z"]}}),
+    ]
+    proc, verdict = _run_validate_wave_contention(tmp_path, _symbol_stories(*claimants))
+    assert verdict == {
+        "valid": False,
+        "errors": [
+            "Wave contention: wave 1 path a.ts symbol f claimed by US-001, US-002",
+            "Wave contention: wave 1 path a.ts symbol g claimed by US-001, US-002",
+        ],
+    }
+    assert proc.returncode == 1 and "warnings" not in verdict
+
+
+def test_wave_symbol_contention_disjoint_symbols_warn_and_exit_zero(tmp_path):
+    claimants = [
+        _symbol_claimant("US-001", ["a.ts"], {"a.ts": {"edits": ["f"]}}),
+        _symbol_claimant("US-002", ["a.ts"], {"a.ts": {"creates": ["g"]}}),
+        _symbol_claimant("US-003", ["a.ts"], {"a.ts": {"edits": ["h"]}}),
+    ]
+    proc, verdict = _run_validate_wave_contention(tmp_path, _symbol_stories(*claimants))
+    assert verdict == {
+        "valid": True,
+        "errors": [],
+        "warnings": [
+            "Wave contention warning: wave 1 path a.ts shared by 3 stories with disjoint symbols:"
+            " US-001, US-002, US-003"
+        ],
+    }
+    assert proc.returncode == 0
+
+
+def test_wave_symbol_contention_one_undeclared_claimant_keeps_the_file_level_error(tmp_path):
+    cases = {
+        "nokey": {"b.ts": {"edits": ["x"]}},
+        "empty": {"a.ts": {"edits": []}},
+        "malformed": {"a.ts": "f"},
+        "noobject": None,
+    }
+    for name, symbols in cases.items():
+        claimants = [
+            _symbol_claimant("US-001", ["a.ts", "b.ts"], {"a.ts": {"edits": ["f"]}}),
+            _symbol_claimant("US-002", ["a.ts", "b.ts"], symbols),
+        ]
+        proc, verdict = _run_validate_wave_contention(tmp_path / name, _symbol_stories(*claimants))
+        assert verdict["valid"] is False and proc.returncode == 1, name
+        assert verdict["errors"][0] == "Wave contention: wave 1 path a.ts claimed by US-001, US-002", name
+        assert "warnings" not in verdict, name
+
+
+def test_wave_symbol_contention_a_shared_symbol_yields_no_warning_for_the_path(tmp_path):
+    claimants = [
+        _symbol_claimant("US-001", ["a.ts"], {"a.ts": {"edits": ["f"]}}),
+        _symbol_claimant("US-002", ["a.ts"], {"a.ts": {"edits": ["f"]}}),
+        _symbol_claimant("US-003", ["a.ts"], {"a.ts": {"edits": ["g"]}}),
+    ]
+    proc, verdict = _run_validate_wave_contention(tmp_path, _symbol_stories(*claimants))
+    assert verdict == {
+        "valid": False,
+        "errors": ["Wave contention: wave 1 path a.ts symbol f claimed by US-001, US-002"],
+    }
+
+
+def test_wave_symbol_contention_names_match_exactly_and_case_sensitively():
+    claimants = [
+        _symbol_claimant("US-001", ["a.ts"], {"a.ts": {"edits": ["Foo"]}}),
+        _symbol_claimant("US-002", ["a.ts"], {"a.ts": {"edits": ["foo"]}}),
+    ]
+    found = T.wave_symbol_contention(claimants)
+    assert [f["kind"] for f in found] == ["shared-file"]
+
+
+def test_wave_symbol_contention_symbols_are_compared_within_one_path_only():
+    claimants = [
+        _symbol_claimant("US-001", ["a.ts", "b.ts"], {"a.ts": {"edits": ["f"]}, "b.ts": {"edits": ["x"]}}),
+        _symbol_claimant("US-002", ["a.ts", "b.ts"], {"a.ts": {"edits": ["g"]}, "b.ts": {"edits": ["f"]}}),
+    ]
+    found = T.wave_symbol_contention(claimants)
+    assert [(f["kind"], f["path"]) for f in found] == [("shared-file", "a.ts"), ("shared-file", "b.ts")]
+
+
+def test_wave_symbol_contention_a_bookkeeping_path_is_neither_refused_nor_warned(tmp_path):
+    claimants = [
+        _symbol_claimant("US-001", ["CHANGELOG.md"], {"CHANGELOG.md": {"edits": ["f"]}}),
+        _symbol_claimant("US-002", ["CHANGELOG.md"]),
+    ]
+    proc, verdict = _run_validate_wave_contention(
+        tmp_path, _symbol_stories(*claimants), _decl(**{".": ["CHANGELOG.md"]})
+    )
+    assert verdict == {"valid": True, "errors": []} and proc.returncode == 0
+    assert T.wave_symbol_contention(claimants, {".": {"CHANGELOG.md"}}) == []
+
+
+def test_wave_symbol_contention_only_same_project_stories_are_compared(tmp_path):
+    claimants = [
+        _symbol_claimant("US-001", ["a.ts"], {"a.ts": {"edits": ["f"]}}, project="api"),
+        _symbol_claimant("US-002", ["a.ts"], {"a.ts": {"edits": ["f"]}}, project="web"),
+    ]
+    proc, verdict = _run_validate_wave_contention(tmp_path, _symbol_stories(*claimants))
+    assert verdict == {"valid": True, "errors": []} and proc.returncode == 0
+    assert T.wave_symbol_contention(claimants) == []
+    mixed = claimants + [_symbol_claimant("US-003", ["a.ts"], {"a.ts": {"edits": ["f"]}}, project="api")]
+    found = T.wave_symbol_contention(mixed)
+    assert [(f["kind"], f["project"], f["ids"]) for f in found] == [("symbol", "api", ["US-001", "US-003"])]
+
+
+def test_wave_symbol_contention_a_story_without_project_is_the_dot_project():
+    claimants = [
+        _symbol_claimant("US-001", ["a.ts"]),
+        _symbol_claimant("US-002", ["a.ts"], project=""),
+        _symbol_claimant("US-003", ["a.ts"], project="api"),
+    ]
+    found = T.wave_symbol_contention(claimants)
+    assert found == [{"kind": "file", "wave": 1, "project": ".", "path": "a.ts", "ids": ["US-001", "US-002"]}]
+
+
+def test_wave_symbol_contention_findings_have_the_documented_shape_and_order():
+    claimants = [
+        _symbol_claimant("US-001", ["z.ts", "a.ts", "m.ts"],
+                         {"a.ts": {"edits": ["q", "b"]}, "m.ts": {"edits": ["k"]}}, wave=2),
+        _symbol_claimant("US-002", ["a.ts", "z.ts", "m.ts"],
+                         {"a.ts": {"edits": ["b", "q"]}, "m.ts": {"edits": ["j"]}}, wave=2),
+        _symbol_claimant("US-003", ["z.ts"], wave=1),
+        _symbol_claimant("US-004", ["z.ts"], wave=1),
+        _symbol_claimant("US-005", ["z.ts"], wave=None),
+    ]
+    assert T.wave_symbol_contention(claimants) == [
+        {"kind": "file", "wave": 1, "project": ".", "path": "z.ts", "ids": ["US-003", "US-004"]},
+        {"kind": "file", "wave": 2, "project": ".", "path": "z.ts", "ids": ["US-001", "US-002"]},
+        {"kind": "symbol", "wave": 2, "project": ".", "path": "a.ts", "symbol": "b", "ids": ["US-001", "US-002"]},
+        {"kind": "symbol", "wave": 2, "project": ".", "path": "a.ts", "symbol": "q", "ids": ["US-001", "US-002"]},
+        {"kind": "shared-file", "wave": 2, "project": ".", "path": "m.ts", "ids": ["US-001", "US-002"]},
+    ]
+
+
+def test_wave_symbol_contention_is_pure_and_takes_any_iterable():
+    claimants = [
+        _symbol_claimant("US-001", ["a.ts"], {"a.ts": {"edits": ["f"]}}),
+        _symbol_claimant("US-002", ["a.ts"], {"a.ts": {"edits": ["f"]}}),
+    ]
+    before = json.dumps([c[2] for c in claimants], sort_keys=True)
+    first = T.wave_symbol_contention(iter(claimants), None)
+    assert first == T.wave_symbol_contention(tuple(claimants), {}) == T.wave_symbol_contention(claimants)
+    assert json.dumps([c[2] for c in claimants], sort_keys=True) == before
+    assert T.wave_symbol_contention([]) == []
+
+
+def test_wave_symbol_contention_skips_a_story_that_claims_nothing():
+    odd = _symbol_claimant("US-002", ["a.ts"])
+    odd[2]["implementation"]["files"] = "a.ts"
+    other = _symbol_claimant("US-003", ["a.ts"])
+    other[2]["implementation"] = None
+    repeated = _symbol_claimant("US-004", ["a.ts", "a.ts", 7])
+    assert T.wave_symbol_contention([_symbol_claimant("US-001", ["a.ts"]), odd, other, repeated]) == [
+        {"kind": "file", "wave": 1, "project": ".", "path": "a.ts", "ids": ["US-001", "US-004"]}
+    ]
+
+
+def test_wave_symbol_contention_a_story_never_contends_with_itself():
+    story = _symbol_claimant("US-001", ["a.ts", "a.ts"], {"a.ts": {"edits": ["f"]}})
+    assert T.wave_symbol_contention([story]) == []
+
+
+def test_wave_symbol_contention_verdict_has_a_warnings_key_only_when_non_empty():
+    doc = json.loads(_waves_doc(_symbol_stories(
+        _symbol_claimant("US-001", ["a.ts"]), _symbol_claimant("US-002", ["b.ts"])
+    )))
+    assert list(T.wave_contention(doc)) == ["valid", "errors"]
+    warned = json.loads(_waves_doc(_symbol_stories(
+        _symbol_claimant("US-001", ["a.ts"], {"a.ts": {"edits": ["f"]}}),
+        _symbol_claimant("US-002", ["a.ts"], {"a.ts": {"edits": ["g"]}}),
+    )))
+    assert list(T.wave_contention(warned)) == ["valid", "errors", "warnings"]
+    assert T._verdict([]) == {"valid": True, "errors": []}
+
+
+def test_wave_symbol_contention_mixed_errors_and_warnings_keep_the_refusal(tmp_path):
+    claimants = [
+        _symbol_claimant("US-001", ["a.ts", "b.ts"], {"a.ts": {"edits": ["f"]}, "b.ts": {"edits": ["x"]}}),
+        _symbol_claimant("US-002", ["a.ts", "b.ts"], {"a.ts": {"edits": ["f"]}, "b.ts": {"edits": ["y"]}}),
+    ]
+    proc, verdict = _run_validate_wave_contention(tmp_path, _symbol_stories(*claimants))
+    assert proc.returncode == 1 and verdict["valid"] is False
+    assert verdict["errors"] == ["Wave contention: wave 1 path a.ts symbol f claimed by US-001, US-002"]
+    assert verdict["warnings"] == [
+        "Wave contention warning: wave 1 path b.ts shared by 2 stories with disjoint symbols: US-001, US-002"
+    ]
 
 
 # ---------------------------------------------------------------------------
