@@ -118,6 +118,7 @@ Write exactly one JSON object to `outputPath`. Fields:
   "project": "<optional, relative repo path for multi-repo>",
   "implementation": {
     "files": ["<concrete in-repository paths, plain relative, from research>"],
+    "symbols": {"<path from files>": {"creates": ["<name>"], "edits": ["<name>"]}},
     "approach": "<actionable strategy, referencing codebase patterns by file:line where possible>",
     "verify": "<executable command or checkable assertion>",
     "guardRails": ["<optional: verbatim verify segments that pass by design>"],
@@ -152,7 +153,7 @@ Each fact has exactly one home field. Write it there once and let every other fi
 | `description` | Who, what and why: the role, the capability and the benefit, in the sentence the format above prescribes. |
 | `acceptanceCriteria` | Observable behaviour, plus the cross-story and wire contracts another story or a consumer depends on. Never the steps that produce it. |
 | `implementation.approach` | How: the strategy, the pattern to follow and the reason it was chosen. Never a restatement of what a criterion already asserts. |
-| `implementation.files` and `verify` | Where and what runs: the concrete paths, and the command that executes the criteria. |
+| `implementation.files`, `implementation.symbols` and `verify` | Where and what runs: the concrete paths, the names the story creates or edits inside them, and the command that executes the criteria. |
 | `tasks[]` | A short checklist the executor ticks off in order. |
 | `notes` | Residue: what no other field carries. |
 
@@ -173,6 +174,25 @@ Each fact has exactly one home field. Write it there once and let every other fi
 **Measure rather than trust.** `story-merge` reports two advisory smells about exactly these habits: field-overlap, when a fact appears in more than one field of the same story, and story-oversize, when a serialized story exceeds the size budget. Neither blocks a merge. They are how a budget you were only asked to respect gets checked.
 
 The first-criterion rule, the project's own type or syntax check rule and the 3–15 entries `tasks[]` count apply as stated in their own sections, and so does "## Verify coverage": this section adds ownership and size, and restates none of them.
+
+## Declared symbols
+
+`implementation.symbols` says, per file of `implementation.files`, which names the story creates and which it edits, so the wave check can tell two stories that merely touch one file from two that touch the same symbol. Always write the key: `{}` when no listed file has a nameable symbol. Its contract is `implementation_symbol_findings` (US-001); it names the failure for each bad entry and never repairs one.
+
+```json
+"files": ["src/billing/invoice.ts", "src/billing/invoice.test.ts", "CHANGELOG.md"],
+"symbols": {
+  "src/billing/invoice.ts": {"creates": ["InvoiceTotals", "renderInvoice"], "edits": ["InvoiceService.total"]},
+  "src/billing/invoice.test.ts": {"creates": ["test_invoice_totals_round_up"]}
+}
+```
+
+- Every key is also an entry of `implementation.files`, written the same way. A file listed there with no key is a **whole-file claim**: the story may change anything in it, and a sibling that lists it is refused as today.
+- A Markdown section, a CHANGELOG line, a config key or a shared count such as `EXPECTED_ASSERTIONS` gets no key and no pseudo-symbol (the `CHANGELOG.md` above). Inventing a name for one hides a real overlap.
+- Names are exact, case-sensitive and scoped to their path: the same name in two files is two symbols.
+- A rename declares the old name under `edits` and the new one under `creates`.
+- A name passes the identity rules US-001 applies (`_identity_reasons`, not restated here): no whitespace, no shell metacharacters. A refused name is a finding, so write a different one rather than quoting or escaping it.
+- An entry with neither list, or with an empty one, names no symbol: leave the file out instead.
 
 ## Artifact language
 
