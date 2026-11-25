@@ -16010,6 +16010,53 @@ cmd_validate_staging() {
 }
 
 # ============================================================================
+# staging-contention: the staged-story pairs the wave check would refuse
+# Usage: aimi-cli.sh staging-contention --staging-dir <dir>
+# ============================================================================
+#
+# Modelled on cmd_validate_staging: no tasks file and so no lock, the flags and
+# the path confinement in bash before python3 starts, check_python3 refusing
+# rather than degrading (an empty {"pairs":[]} without the interpreter would read
+# as "nothing contends"), and one crossing into story_merge.py, which runs
+# tasks.wave_symbol_contention over the staged files.
+cmd_staging_contention() {
+  local usage="usage: aimi-cli.sh staging-contention --staging-dir <dir>"
+  local staging_dir=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --staging-dir)
+        if [ $# -lt 2 ]; then
+          echo "Error: staging-contention: $1 needs a value ($usage)" >&2
+          exit 1
+        fi
+        staging_dir="$2"
+        shift 2
+        ;;
+      *)
+        echo "Error: staging-contention: unknown flag: $1 ($usage)" >&2
+        exit 1
+        ;;
+    esac
+  done
+
+  if [ -z "$staging_dir" ]; then
+    echo "Error: staging-contention: --staging-dir <dir> is required ($usage)" >&2
+    exit 1
+  fi
+
+  validate_path_in_project "$staging_dir"
+
+  if [ ! -d "$staging_dir" ]; then
+    echo "Error: staging-contention: staging directory does not exist: $staging_dir" >&2
+    exit 1
+  fi
+
+  check_python3
+  python3 "$(_aimi_script_py story_merge.py)" --staging-contention --staging-dir "$staging_dir"
+}
+
+# ============================================================================
 # slugify: derive an ASCII directory slug from free text
 # Usage: aimi-cli.sh slugify <text> | slugify --stdin
 # ============================================================================
@@ -18645,6 +18692,17 @@ COMMANDS:
                               null one, is a finding naming implementation.symbols; {} is
                               allowed when no file has a nameable symbol. Always on.
                               A staged file that is not valid JSON is skipped.
+    staging-contention --staging-dir <dir>
+                              List the staged stories the wave check would refuse to run
+                              together. Prints one line {"pairs":[{"wave","path","symbol",
+                              "stories":["outline:LO","outline:HI"]}]} and exits 0, with or
+                              without pairs. A path two stories of one wave both claim whole
+                              gives a pair with symbol null; a symbol both declare gives a
+                              pair with that symbol; a path they share only by file is a
+                              warning and gives none. Uses the same rule as
+                              validate-wave-contention, with .aimi/config.json bookkeeping.
+                              Exit 1 on a bad flag, a missing directory or a broken
+                              bookkeeping declaration.
     acknowledge-evidence --reason <text> [--tasks-file <path>]
                               Record metadata.evidenceAcknowledged {reason, acknowledgedAt,
                               completed} in one locked crossing, so a phase whose completed
@@ -20555,6 +20613,7 @@ main() {
     apply-audit-patches) shift; cmd_apply_audit_patches "$@" ;;
     validate-outline) shift; cmd_validate_outline "$@" ;;
     validate-staging) shift; cmd_validate_staging "$@" ;;
+    staging-contention) shift; cmd_staging_contention "$@" ;;
     bookkeeping-declared) shift; cmd_bookkeeping_declared "$@" ;;
     verify-stage-declared) shift; cmd_verify_stage_declared "$@" ;;
     bookkeeping-resolve) shift; cmd_bookkeeping_resolve "$@" ;;

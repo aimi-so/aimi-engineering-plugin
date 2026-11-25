@@ -3346,6 +3346,92 @@ def run_validate_staging(args):
     return 1 if report else 0
 
 
+_OUTLINE_TOKEN = re.compile(r"outline:([0-9]{2})")
+
+
+def staging_contention(staging_dir, project_root):
+    """The staged-story pairs `validate-wave-contention` would refuse, as a list.
+
+    Each staged `NN-*.json` object (the files `staged_idx_map` lists; one that is
+    not valid JSON or not an object is skipped) becomes a story `outline:<NN>`
+    whose `dependsOn` keeps only the `outline:NN` tokens whose idx has a staged
+    file. Waves come from `tasks.computed_waves`, so a story in a cycle has no
+    wave and is skipped, and `(ident, wave, story)` goes straight to
+    `tasks.wave_symbol_contention` with the bookkeeping declaration built the way
+    `op_validate_wave_contention` builds it. Pairs are read from each finding's
+    `kind`, `wave`, `path`, `symbol` and `ids` only: a `file` finding gives
+    `symbol: None`, a `symbol` one its symbol, a `shared-file` one (a warning)
+    gives none; a finding of three or more stories gives one pair per two of
+    them, the lower outline index first. May raise AuditRefusal or
+    bookkeeping.BookkeepingError.
+    """
+    import bookkeeping
+    from tasks import _story_project_key, computed_waves, wave_symbol_contention
+
+    staged = staged_idx_map(staging_dir)
+    stories = []
+    for idx, path in sorted(staged.items()):
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                value = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(value, dict):
+            continue
+        raw = value.get("dependsOn")
+        kept = []
+        for token in raw if isinstance(raw, list) else ():
+            match = _OUTLINE_TOKEN.fullmatch(token) if isinstance(token, str) else None
+            if match and match.group(1) in staged and token not in kept:
+                kept.append(token)
+        stories.append({**value, "id": "outline:" + idx, "dependsOn": kept})
+
+    waves = computed_waves(stories)
+    declared = None
+    if project_root:
+        config = os.path.join(project_root, ".aimi", "config.json")
+        declared = {
+            key: set(bookkeeping.load_declaration(config, key))
+            for key in sorted({_story_project_key(s) for s in stories})
+        }
+    claimants = [(s["id"], waves.get(s["id"]), s) for s in stories]
+    pairs = []
+    for finding in wave_symbol_contention(claimants, declared):
+        if finding["kind"] not in ("file", "symbol"):
+            continue
+        symbol = finding.get("symbol")
+        ids = finding["ids"]
+        for i, low in enumerate(ids):
+            for high in ids[i + 1 :]:
+                pairs.append(
+                    {
+                        "wave": finding["wave"],
+                        "path": finding["path"],
+                        "symbol": symbol,
+                        "stories": [low, high],
+                    }
+                )
+    return pairs
+
+
+def run_staging_contention(args):
+    """The contention mode: print {"pairs": [...]} on one line, exit 0."""
+    import bookkeeping
+
+    staging_dir = _flag(args, "--staging-dir", "")
+    project_root = os.environ.get("PROJECT_ROOT") or os.getcwd()
+    try:
+        pairs = staging_contention(staging_dir, project_root)
+    except (AuditRefusal, OSError) as refusal:
+        die("Error: staging-contention: " + rm_sanitize(str(refusal), _FINDING_MAXLEN))
+    except bookkeeping.BookkeepingError as refusal:
+        die("Error: staging-contention: " + rm_sanitize(str(refusal), _FINDING_MAXLEN))
+    sys.stdout.write(
+        json.dumps({"pairs": pairs}, ensure_ascii=False, separators=(",", ":")) + "\n"
+    )
+    return 0
+
+
 def _flag(argv, name, default=None):
     if name in argv:
         i = argv.index(name)
@@ -3369,6 +3455,8 @@ def main(argv):
     args = argv[1:]
     if "--validate-staging" in args:
         return run_validate_staging(args)
+    if "--staging-contention" in args:
+        return run_staging_contention(args)
     staging_dir = _flag(args, "--staging-dir", "")
     output_path = _flag(args, "--output", "")
     split_mode = _flag(args, "--split", "legacy")
