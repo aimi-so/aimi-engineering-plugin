@@ -1742,6 +1742,7 @@ def _staging_story(title, deps=None):
             "files": ["src/x.ts"],
             "approach": "Implement it",
             "verify": "tsc --noEmit",
+            "symbols": {},
         },
     }
 
@@ -3966,11 +3967,13 @@ def test_outline_ref_in_description_on_an_unstaged_idx_is_refused_by_field(tmp_p
 #
 # The rule is tasks.py's implementation_symbol_findings; these cases pin that
 # rail_and_path_findings carries it, so both verbs read one rule. A story that
-# simply lacks the key is never a finding here (requiring it is another rule).
+# simply lacks the key is a finding of the separate missing-declaration rule, which
+# validate-staging always reports and story-merge refuses only with --require-symbols.
 
 
 def _symbols_story(title, symbols="__absent__"):
     story = _staging_story(title)
+    story["implementation"].pop("symbols", None)
     if symbols != "__absent__":
         story["implementation"]["symbols"] = symbols
     return story
@@ -3993,7 +3996,7 @@ def test_implementation_symbols_validate_staging_reports_a_malformed_map_by_idx(
     proc = _symbols_validate_staging(
         tmp_path,
         {
-            "01-a.json": _symbols_story("A"),
+            "01-a.json": _symbols_story("A", {}),
             "02-b.json": _symbols_story("B", {"src/other.ts": {"creates": ["f"]}}),
         },
     )
@@ -4005,7 +4008,9 @@ def test_implementation_symbols_validate_staging_reports_a_malformed_map_by_idx(
     assert "is not an entry of implementation.files" in report["02"][0]
 
 
-def test_implementation_symbols_validate_staging_is_silent_for_a_missing_or_valid_key(tmp_path):
+def test_implementation_symbols_validate_staging_reports_a_missing_key_and_passes_a_valid_one(tmp_path):
+    # A keyless staged story now draws the missing-declaration finding; a valid
+    # map and `{}` do not. story-merge without --require-symbols still accepts it.
     proc = _symbols_validate_staging(
         tmp_path,
         {
@@ -4014,7 +4019,10 @@ def test_implementation_symbols_validate_staging_is_silent_for_a_missing_or_vali
             "03-c.json": _symbols_story("C", {}),
         },
     )
-    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    report = json.loads(proc.stdout)
+    assert list(report) == ["01"]
+    assert "implementation.symbols" in report["01"][0]
 
 
 def test_implementation_symbols_story_merge_refuses_and_writes_nothing(tmp_path):

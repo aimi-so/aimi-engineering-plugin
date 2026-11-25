@@ -51,6 +51,7 @@ def story(title, verify="tsc --noEmit", files=None, rails=None, outputs=None, de
         "files": ["src/x.ts"] if files is None else files,
         "approach": "Implement it",
         "verify": verify,
+        "symbols": {},
     }
     if rails is not None:
         implementation["guardRails"] = rails
