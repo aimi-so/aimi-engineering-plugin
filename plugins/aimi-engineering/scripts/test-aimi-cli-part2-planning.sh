@@ -5712,7 +5712,7 @@ test_validate_staging() {
 
   local bad=".aimi/.vs-bad-$$" good=".aimi/.vs-good-$$"
   mkdir -p "$bad" "$good"
-  local head='{"title":"T","description":"d","acceptanceCriteria":["Typecheck passes"],"status":"pending","dependsOn":[],"notes":"","implementation":{"files":["a.py"],"approach":"x","verify":"'
+  local head='{"title":"T","description":"d","acceptanceCriteria":["Typecheck passes"],"status":"pending","dependsOn":[],"notes":"","implementation":{"files":["a.py"],"symbols":{},"approach":"x","verify":"'
   printf '%s' "${head}"'true\nfalse\ntrue\n"}}' > "$bad/01-a.json"
   printf '%s' "${head}"'set -e\ntrue\nfalse\n"}}' > "$bad/02-b.json"
   printf '%s' "${head}"'tsc --noEmit"}}' > "$good/01-a.json"

@@ -15577,7 +15577,7 @@ cmd_research_figures() {
 # Usage: aimi-cli.sh story-merge --staging-dir <dir> --output <path>
 #           [--split legacy|full-stack] [--agent-mode] [--phase-aware]
 #           [--foundation <NN>|<project>:NN]...
-#           [--feature <slug> --phase <id>]
+#           [--feature <slug> --phase <id>] [--require-symbols] [--outline <path>]
 #   Two or more staged stories are merged only with an audit-result.json whose
 #   auditedIdx matches them (written by apply-audit-patches); no flag skips it.
 # ============================================================================
@@ -15606,6 +15606,10 @@ cmd_story_merge() {
   # deduplicated in bash -- story_merge.py's own dedup is the single source of
   # truth for what an exact repeat means.
   local foundation_vals=()
+  # --require-symbols is a boolean opt-in: a story with no implementation.symbols
+  # declaration is refused. --outline names the outline.json the symbol-produces
+  # smell compares against; it is a path, confined below before python3 starts.
+  local require_symbols=false outline_path=""
 
   # --- Parse flags ---
   while [ $# -gt 0 ]; do
@@ -15617,6 +15621,13 @@ cmd_story_merge() {
       --output)
         shift
         output_path="${1:-}"
+        ;;
+      --require-symbols)
+        require_symbols=true
+        ;;
+      --outline)
+        shift
+        outline_path="${1:-}"
         ;;
       --split)
         shift
@@ -15771,6 +15782,9 @@ cmd_story_merge() {
 
   # --- Validate paths are inside project ---
   validate_path_in_project "$staging_dir"
+  if [ -n "$outline_path" ]; then
+    validate_path_in_project "$outline_path"
+  fi
   local output_parent
   output_parent=$(dirname "$output_path")
   # output_path may not exist yet; validate parent dir or the path itself
@@ -15802,6 +15816,12 @@ cmd_story_merge() {
   fi
   if [ "$phase_aware" = true ]; then
     sm_args+=(--phase-aware)
+  fi
+  if [ "$require_symbols" = true ]; then
+    sm_args+=(--require-symbols)
+  fi
+  if [ -n "$outline_path" ]; then
+    sm_args+=(--outline "$outline_path")
   fi
   # One --foundation pair per collected value, in the order given. Never joined
   # into one value and never deduplicated here.
@@ -18621,6 +18641,9 @@ COMMANDS:
                               outline:NN token is a finding too (ext: consumes need none).
                               So is an outline: reference in any field that is not exactly
                               two digits (outline:7, outline:007): it names no staged file.
+                              A staged story whose implementation has no symbols key, or a
+                              null one, is a finding naming implementation.symbols; {} is
+                              allowed when no file has a nameable symbol. Always on.
                               A staged file that is not valid JSON is skipped.
     acknowledge-evidence --reason <text> [--tasks-file <path>]
                               Record metadata.evidenceAcknowledged {reason, acknowledgedAt,
@@ -19562,6 +19585,7 @@ COMMANDS:
                               [--phase-aware]
                               [--foundation <NN>|<project>:NN]...
                               [--feature <slug> --phase <id>]
+                              [--require-symbols] [--outline <path>]
                               Consolidate per-story staging *.json files into a
                               validated tasks.json. Steps: glob+validate JSON,
                               assign US-NNN IDs by lex order, remap outline:NN
@@ -19574,6 +19598,18 @@ COMMANDS:
                               that no other story references; not codebase
                               dead-code detection — always a warning, never a
                               hard block; skipped for single-story merges).
+                              --require-symbols refuses, before anything is
+                              written, a story whose implementation has no
+                              symbols key or a null one ({} is a declaration);
+                              the finding is validate-staging's, which always
+                              reports it. Without the flag the merge is
+                              unchanged. --outline <path> (an outline.json,
+                              confined to the project) adds an advisory
+                              symbol-produces smell per story whose declared
+                              creates differ from its outline entry's sym:/cli:
+                              produces names: a metadata.smellWarnings entry
+                              {type, storyId, unproduced[], uncreated[], message}
+                              plus a stderr warning, never a refusal.
                               --split full-stack additionally detects
                               cross-file-dep-dropped smells: a dependsOn edge
                               that crosses an output-file boundary (a repo
