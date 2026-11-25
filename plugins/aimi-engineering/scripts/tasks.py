@@ -160,6 +160,7 @@ from roadmap import (
     TERMINAL_STORY_STATUSES,
     _completed_gate_has_marker,
     _completed_story_ids,
+    _identity_reasons,
     _json_type,
     _num,
     ground_truth,
@@ -2921,6 +2922,151 @@ def implementation_path_findings(story):
     return findings + implementation_outputs_findings(story)
 
 
+# The symbol declaration of `implementation.symbols`. A story that shares a
+# file with a sibling says, per file it lists in `implementation.files`, which
+# names it creates and which it edits, so a later wave check can tell two
+# stories that merely touch one file from two that touch the same symbol. It is
+# LEXICAL like the path rule above -- strings and containers only, no
+# filesystem access -- and one private per-entry helper, _symbol_entry_problem,
+# decides BOTH implementation_symbol_findings (the validator's reading) and
+# declared_symbols (the wave check's reading), so the two cannot disagree about
+# which entries count as declared. A name is judged by roadmap.py's
+# _identity_reasons, the rule an identity already answers to, called with an
+# empty description because a symbol has none.
+IMPLEMENTATION_SYMBOLS_FIELD = "implementation.symbols"
+SYMBOL_KINDS = ("creates", "edits")
+
+SYMBOLS_SHAPE_REMEDY = (
+    "write an object keyed by an implementation.files entry, or leave the key out"
+)
+SYMBOLS_ENTRY_REMEDY = (
+    "write the key exactly as an implementation.files entry and, under it, an "
+    "object with a creates and/or edits list of symbol names"
+)
+
+
+def _symbol_name_reason(name):
+    """The first reason `_identity_reasons` gives a symbol name, or `None`.
+
+    Only the clause before the reason's own ` -- ` remedy is kept: the remedy
+    talks about identities and contracts, not symbols, and the finding carries
+    its own. The clause is made safe to quote the way `_path_echo` makes a
+    value safe -- a backtick and a `$(` can appear in it, because the shell
+    metacharacter reason names the character it found.
+    """
+    reasons = _identity_reasons(name, "")
+    if not reasons:
+        return None
+    text = reasons[0].split(" -- ")[0].replace("`", "'")
+    while "$(" in text:
+        text = text.replace("$(", "(")
+    return text
+
+
+def _symbol_entry_problem(path, value, files):
+    """The first reason one `implementation.symbols` entry is unusable, or None.
+
+    `files` is the story's `implementation.files` as given. The checks run in a
+    fixed order so the same bad entry always draws the same reason: a key that
+    is no entry of `files`, a value that is not an object, a key other than
+    `creates` and `edits`, a kind that is not a list of strings, no name at all,
+    then the first name `_identity_reasons` refuses. Returns `(reason, shown)`,
+    `shown` being the value the finding echoes, or `None` for a good entry.
+    """
+    listed = isinstance(files, list) and any(
+        isinstance(entry, str) and entry == path for entry in files
+    )
+    if not listed:
+        return ("is not an entry of implementation.files", path)
+    if not isinstance(value, dict):
+        return ("is not an object", value)
+    for key in value:
+        if key not in SYMBOL_KINDS:
+            return ("has a key other than creates and edits", key)
+    total = 0
+    for kind in SYMBOL_KINDS:
+        if kind not in value:
+            continue
+        names = value[kind]
+        if not isinstance(names, list):
+            return (kind + " is not a list", names)
+        for name in names:
+            if not isinstance(name, str):
+                return (kind + " holds a name that is not a string", name)
+            reason = _symbol_name_reason(name)
+            if reason is not None:
+                return (kind + " holds a name that is refused: " + reason, name)
+            total += 1
+    if total == 0:
+        return ("names no symbol under creates or edits", value)
+    return None
+
+
+def _symbols_map(story):
+    """`implementation.symbols` when it is an object, otherwise `None`."""
+    implementation = _story_implementation(story)
+    if implementation is None:
+        return None
+    declared = implementation.get("symbols")
+    return declared if isinstance(declared, dict) else None
+
+
+def implementation_symbol_findings(story):
+    """One sentence per bad `implementation.symbols` entry of a story.
+
+    An absent key draws nothing: requiring the key is a separate rule. A key
+    that is present, an explicit null included, and is not an object is exactly
+    one finding about the field as a whole, with no per-entry findings layered
+    on top of it. `{}` is valid and means every file is a whole-file claim.
+    Every other finding is one per path key, and the offending value is echoed
+    through `_path_echo` and never repaired.
+    """
+    implementation = _story_implementation(story)
+    if implementation is None or "symbols" not in implementation:
+        return []
+    declared = implementation["symbols"]
+    if not isinstance(declared, dict):
+        return [
+            IMPLEMENTATION_SYMBOLS_FIELD + " is not an object (value: "
+            + _path_echo(declared) + "); " + SYMBOLS_SHAPE_REMEDY + "."
+        ]
+    files = implementation.get("files")
+    findings = []
+    for path, value in declared.items():
+        problem = _symbol_entry_problem(path, value, files)
+        if problem is None:
+            continue
+        reason, shown = problem
+        findings.append(
+            IMPLEMENTATION_SYMBOLS_FIELD + "[" + _path_echo(path) + "] " + reason
+            + " (value: " + _path_echo(shown) + "); " + SYMBOLS_ENTRY_REMEDY + "."
+        )
+    return findings
+
+
+def declared_symbols(story):
+    """`{path: set of names}` for the `implementation.symbols` entries that hold.
+
+    Creates and edits are read together: a wave check asks whether two stories
+    name the same symbol, not what each does to it. Only a path entry that draws
+    no finding appears, so a malformed entry counts as not declared, and a file
+    of `implementation.files` with no key is absent too -- a whole-file claim.
+    An absent, null or non-object map is `{}`. Pure and lexical.
+    """
+    declared = _symbols_map(story)
+    if declared is None:
+        return {}
+    files = _story_implementation(story).get("files")
+    result = {}
+    for path, value in declared.items():
+        if _symbol_entry_problem(path, value, files) is not None:
+            continue
+        result[path] = {
+            name for kind in SYMBOL_KINDS for name in value.get(kind, ())
+        }
+    return result
+
+
 # The cross-repository rule for `implementation.files`. A story of a multi-repo
 # layout runs in ONE repository, so an entry that starts with another
 # repository's key -- or with the AIMI root, which holds every repository -- names
@@ -3645,6 +3791,24 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
                         tasks_file + ": metadata.prototypeHandoffPaths[" + str(index)
                         + "] escapes .aimi/sources/: " + given
                     )
+
+    # R30 -- implementation.symbols's shape. Appended AFTER R29 for R17's
+    # reason: a rule below the last one can only add lines after everything
+    # already recorded, so a tasks file without the key validates byte for byte
+    # as before. An ERROR, R24's reasoning held: the declaration is a record the
+    # wave check reads as the names a story claims inside a shared file, so a
+    # malformed one is a record its reader cannot use. Absent does nothing; a
+    # present key, an explicit null included, must be an object. One finding per
+    # bad entry, prefixed with the story id the way R24 builds it, and the
+    # finding text is implementation_symbol_findings', stated nowhere else.
+    for doc in docs:
+        for story in _stories(doc):
+            for finding in implementation_symbol_findings(story):
+                errors.append(
+                    tasks_file + ": "
+                    + jq_tostring(jq_index(story, "id", ".userStories[]"))
+                    + ": " + finding
+                )
 
     return errors
 

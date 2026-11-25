@@ -3027,9 +3027,10 @@ def verify_refusal_findings(story):
 def rail_and_path_findings(story, other_projects=None, multi_repo=False):
     """Sanitized guard-rail and path findings for one story; [] for a clean one.
 
-    Rails first, then paths, then the cross-repository entries, the order the
-    report keeps. The rules live in tasks.py (guard_rail_findings,
-    implementation_path_findings, cross_repository_file_findings) and are
+    Rails first, then paths, then the symbol declaration, then the
+    cross-repository entries, the order the report keeps. The rules live in
+    tasks.py (guard_rail_findings, implementation_path_findings,
+    implementation_symbol_findings, cross_repository_file_findings) and are
     imported INSIDE this body for the reason verify_refusal_findings gives; this
     function restates none of them. Both callers -- validate-staging and the
     story-merge refusal -- read it, so they cannot disagree about a story.
@@ -3042,12 +3043,14 @@ def rail_and_path_findings(story, other_projects=None, multi_repo=False):
         cross_repository_file_findings,
         guard_rail_findings,
         implementation_path_findings,
+        implementation_symbol_findings,
     )
 
     return [
         rm_sanitize(finding, _FINDING_MAXLEN)
         for finding in guard_rail_findings(story)
         + implementation_path_findings(story)
+        + implementation_symbol_findings(story)
         + cross_repository_file_findings(story, other_projects or (), multi_repo)
     ]
 

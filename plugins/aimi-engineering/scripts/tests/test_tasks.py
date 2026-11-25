@@ -12593,3 +12593,230 @@ def test_prototype_handoff_shape_helper_is_called_only_from_the_r29_block():
         and "prototype_handoff_paths_shape_errors(" in inspect.getsource(value)
     }
     assert callers == {"prototype_handoff_paths_shape_errors", "validate_tasks"}
+
+
+# ---------------------------------------------------------------------------
+# implementation.symbols -- R30 and declared_symbols
+# ---------------------------------------------------------------------------
+#
+# Bash never ran this rule, so there is no jq recording and nothing for the
+# golden corpus: these hand-written cases ARE the coverage. The shape rule is
+# tasks.py's implementation_symbol_findings and the reader a wave check will
+# use is declared_symbols; both answer from one private per-entry helper, and
+# the last cases here pin that they cannot disagree.
+
+_SYM_FILES = ["src/a.ts", "src/b.ts", "src/c/"]
+
+
+def _sym_story(symbols=_ABSENT, files=None, story_id="US-001"):
+    implementation = {
+        "files": list(_SYM_FILES) if files is None else files,
+        "approach": "Implement it",
+        "verify": "true",
+    }
+    if symbols is not _ABSENT:
+        implementation["symbols"] = symbols
+    return {
+        "id": story_id, "title": "Story " + story_id, "description": "As a user, I want it.",
+        "acceptanceCriteria": ["um criterio sem ancora nenhuma"], "status": "pending",
+        "priority": 1, "dependsOn": [], "wave": 1, "implementation": implementation,
+    }
+
+
+def _sym_validate(tmp_path, stories):
+    root = os.path.join(os.path.realpath(str(tmp_path)), "proj")
+    tasks_dir = os.path.join(root, ".aimi", "tasks")
+    os.makedirs(tasks_dir, exist_ok=True)
+    os.makedirs(os.path.join(root, "src", "c"), exist_ok=True)  # R17 warns about a missing directory
+    document = {
+        "schemaVersion": "3.3",
+        "metadata": {"branchName": "ref/corpus", "maxConcurrency": 1},
+        "userStories": stories,
+    }
+    with open(os.path.join(tasks_dir, "2020-01-01-corpus-tasks.json"), "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(document, ensure_ascii=False) + "\n")
+    return subprocess.run(
+        ["bash", CLI, "validate-tasks"], cwd=root, capture_output=True, text=True, timeout=120
+    )
+
+
+def _sym_errors(proc):
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    verdict = json.loads(proc.stdout)
+    assert verdict["valid"] is False
+    found = [entry for entry in verdict["errors"] if "implementation.symbols" in entry]
+    assert found, verdict["errors"]
+    return found
+
+
+def _sym_findings(symbols, files=None):
+    return T.implementation_symbol_findings(_sym_story(symbols, files))
+
+
+def test_implementation_symbols_absent_key_draws_no_finding_and_validates_as_before(tmp_path):
+    assert _sym_findings(_ABSENT) == []
+    proc = _sym_validate(tmp_path, [_sym_story()])
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout == '{"valid": true, "errors": []}\n'
+    assert proc.stderr == ""
+
+
+def test_implementation_symbols_well_formed_declaration_validates_clean(tmp_path):
+    declared = {
+        "src/a.ts": {"creates": ["parse", "Foo.bar"], "edits": ["render"]},
+        "src/b.ts": {"edits": ["helper"]},
+        "src/c/": {"creates": ["index"]},
+    }
+    assert _sym_findings(declared) == []
+    proc = _sym_validate(tmp_path, [_sym_story(declared)])
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout == '{"valid": true, "errors": []}\n'
+
+
+def test_implementation_symbols_empty_object_is_valid(tmp_path):
+    assert _sym_findings({}) == []
+    assert _sym_validate(tmp_path, [_sym_story({})]).returncode == 0
+
+
+@pytest.mark.parametrize("value", [None, [], "src/a.ts", 3, True])
+def test_implementation_symbols_a_present_non_object_is_one_whole_field_finding(value):
+    found = _sym_findings(value)
+    assert len(found) == 1
+    assert found[0].startswith("implementation.symbols is not an object (value: ")
+
+
+def test_implementation_symbols_explicit_null_is_refused_through_the_cli(tmp_path):
+    found = _sym_errors(_sym_validate(tmp_path, [_sym_story(None)]))
+    assert len(found) == 1
+    assert "US-001: implementation.symbols is not an object (value: None)" in found[0]
+
+
+@pytest.mark.parametrize(
+    "symbols, reason",
+    [
+        ({"src/zzz.ts": {"creates": ["f"]}}, "is not an entry of implementation.files"),
+        ({"src/a.ts ": {"creates": ["f"]}}, "is not an entry of implementation.files"),
+        ({"src/a.ts": ["f"]}, "is not an object"),
+        ({"src/a.ts": None}, "is not an object"),
+        ({"src/a.ts": {"creates": ["f"], "deletes": ["g"]}}, "has a key other than creates and edits"),
+        ({"src/a.ts": {"creates": "f"}}, "creates is not a list"),
+        ({"src/a.ts": {"edits": {"f": 1}}}, "edits is not a list"),
+        ({"src/a.ts": {"creates": [3]}}, "creates holds a name that is not a string"),
+        ({"src/a.ts": {}}, "names no symbol under creates or edits"),
+        ({"src/a.ts": {"creates": [], "edits": []}}, "names no symbol under creates or edits"),
+        ({"src/a.ts": {"edits": ["ok", ""]}}, "edits holds a name that is refused: empty"),
+        ({"src/a.ts": {"creates": ["a b"]}}, "creates holds a name that is refused: contains whitespace"),
+        ({"src/a.ts": {"creates": ["../x"]}}, 'refused: contains a ".." path segment'),
+        ({"src/a.ts": {"creates": ["/abs"]}}, 'refused: begins with "/"'),
+        ({"src/a.ts": {"creates": ["***"]}}, "refused: names nothing in particular"),
+    ],
+)
+def test_implementation_symbols_each_shape_rule_draws_one_finding_naming_the_key(symbols, reason):
+    found = _sym_findings(symbols)
+    assert len(found) == 1, found
+    key = next(iter(symbols))
+    assert found[0].startswith("implementation.symbols[" + key + "] "), found[0]
+    assert reason in found[0], found[0]
+    assert "(value: " in found[0]
+
+
+def test_implementation_symbols_a_malformed_entry_does_not_mask_a_good_one_and_each_gets_a_line(tmp_path):
+    declared = {
+        "src/a.ts": {"creates": ["f"]},
+        "src/b.ts": {"creates": []},
+        "src/gone.ts": {"edits": ["g"]},
+    }
+    found = _sym_errors(_sym_validate(tmp_path, [_sym_story(declared)]))
+    assert len(found) == 2
+    assert all("US-001: implementation.symbols[" in entry for entry in found)
+    assert "src/b.ts" in found[0] and "src/gone.ts" in found[1]
+
+
+def test_implementation_symbols_errors_name_the_story_that_carries_them(tmp_path):
+    stories = [
+        _sym_story({"src/a.ts": {"creates": ["f"]}}, story_id="US-001"),
+        _sym_story({"src/a.ts": {}}, story_id="US-002"),
+    ]
+    stories[1]["priority"] = 2
+    found = _sym_errors(_sym_validate(tmp_path, stories))
+    assert len(found) == 1 and "US-002: implementation.symbols[src/a.ts]" in found[0]
+
+
+def test_implementation_symbols_the_value_is_echoed_safely_and_never_repaired():
+    found = _sym_findings({"src/a.ts": {"creates": ["a`b$(c)"]}})
+    assert len(found) == 1
+    assert "`" not in found[0] and "$(" not in found[0]
+    long_name = "x" * 40 + " " + "y" * 200
+    found = _sym_findings({"src/a.ts": {"creates": [long_name]}})
+    assert len(found) == 1 and "..." in found[0] and len(found[0]) < 600
+
+
+def test_implementation_symbols_a_story_without_a_files_list_refuses_every_key():
+    story = _sym_story({"src/a.ts": {"creates": ["f"]}})
+    story["implementation"]["files"] = "src/a.ts"
+    found = T.implementation_symbol_findings(story)
+    assert len(found) == 1 and "is not an entry of implementation.files" in found[0]
+
+
+def test_implementation_symbols_a_story_with_no_implementation_draws_nothing():
+    story = _sym_story()
+    for implementation in (None, [], "x"):
+        story["implementation"] = implementation
+        assert T.implementation_symbol_findings(story) == []
+        assert T.declared_symbols(story) == {}
+    assert T.implementation_symbol_findings("not a story") == []
+    assert T.declared_symbols("not a story") == {}
+
+
+def test_declared_symbols_returns_creates_and_edits_together_per_valid_path():
+    story = _sym_story(
+        {"src/a.ts": {"creates": ["f", "g"], "edits": ["g", "h"]}, "src/b.ts": {"edits": ["k"]}}
+    )
+    assert T.declared_symbols(story) == {"src/a.ts": {"f", "g", "h"}, "src/b.ts": {"k"}}
+
+
+def test_declared_symbols_leaves_a_malformed_entry_out_and_keeps_the_good_ones():
+    story = _sym_story(
+        {"src/a.ts": {"creates": ["f"]}, "src/b.ts": {"creates": []}, "elsewhere.ts": {"edits": ["x"]}}
+    )
+    assert T.declared_symbols(story) == {"src/a.ts": {"f"}}
+
+
+@pytest.mark.parametrize("symbols", [_ABSENT, None, {}, [], "src/a.ts", 7])
+def test_declared_symbols_an_absent_null_empty_or_non_object_map_is_empty(symbols):
+    assert T.declared_symbols(_sym_story(symbols)) == {}
+
+
+def test_declared_symbols_a_file_with_no_key_is_absent_so_it_stays_a_whole_file_claim():
+    story = _sym_story({"src/a.ts": {"creates": ["f"]}})
+    declared = T.declared_symbols(story)
+    assert "src/b.ts" not in declared and "src/c/" not in declared
+    assert set(declared) < set(story["implementation"]["files"])
+
+
+def test_declared_symbols_returns_sets_and_never_the_documents_own_lists():
+    story = _sym_story({"src/a.ts": {"creates": ["f"]}})
+    declared = T.declared_symbols(story)
+    assert isinstance(declared["src/a.ts"], set)
+    declared["src/a.ts"].add("mutated")
+    assert story["implementation"]["symbols"] == {"src/a.ts": {"creates": ["f"]}}
+
+
+def test_declared_symbols_reads_no_file_and_the_validator_agrees_with_it_on_every_entry(tmp_path):
+    symbols = {
+        "src/a.ts": {"creates": ["f"]},
+        "src/b.ts": {"edits": []},
+        "src/c/": {"edits": ["a b"]},
+        "src/nope.ts": {"edits": ["x"]},
+    }
+    story = _sym_story(symbols)
+    flagged = {key for key in symbols if any("[" + key + "]" in line for line in T.implementation_symbol_findings(story))}
+    assert set(T.declared_symbols(story)) == set(symbols) - flagged == {"src/a.ts"}
+    assert not os.path.exists("src/a.ts"), "nothing here may depend on the file existing"
+
+
+def test_implementation_symbols_r30_is_appended_after_r29_and_calls_the_one_rule():
+    source = inspect.getsource(T.validate_tasks)
+    assert source.index("# R30 ") > source.index("# R29 ")
+    assert source.count("implementation_symbol_findings(") == 1
+    assert "_identity_reasons" not in source

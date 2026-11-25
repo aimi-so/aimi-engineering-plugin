@@ -363,6 +363,7 @@ def test_the_helper_imports_tasks_lazily_and_restates_no_rule():
         "cross_repository_file_findings",
         "guard_rail_findings",
         "implementation_path_findings",
+        "implementation_symbol_findings",
     ]
     for restated in ("PATH_REASON_", "_GUARD_RAIL_REMEDY", "FILES_ESCAPE_REMEDY"):
         assert restated not in source
