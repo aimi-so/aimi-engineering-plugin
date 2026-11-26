@@ -12710,13 +12710,19 @@ cmd_setup_branch() {
   reason=$(echo "$resolution" | jq -r '.reason')
   base=$(echo "$resolution" | jq -r '.base')
 
+  # --no-track on both creations from a resolved base: the resolver prefers
+  # origin/<name>, and under git's default branch.autoSetupMerge a branch cut
+  # from a remote ref takes it as its upstream -- a new feat/x would track
+  # origin/main, so git status compared it with main and a bare `git push` was
+  # refused or, under push.default=upstream, went to main. The branch gets its
+  # real upstream when /aimi:open-pr pushes it with -u.
   case "$reason" in
     explicit-base)
-      git checkout -b "$branch_name" "$base" >/dev/null 2>&1
+      git checkout --no-track -b "$branch_name" "$base" >/dev/null 2>&1
       printf '{"branch":"%s","action":"created-from-base","base":"%s"}\n' "$branch_name" "$base_override"
       ;;
     default-branch)
-      git checkout -b "$branch_name" "$base" >/dev/null 2>&1
+      git checkout --no-track -b "$branch_name" "$base" >/dev/null 2>&1
       printf '{"branch":"%s","action":"created-from-default"}\n' "$branch_name"
       ;;
     detached-head|stacked-on-current)
@@ -17963,6 +17969,17 @@ cmd_roadmap_write_handoff() {
 # phase that does not exist; deriving from the tasks file basename names it
 # after something that genuinely identifies this run instead.
 #
+# --tasks-file <path> names WHICH tasks file a flat review is named after. Without
+# it the name comes from get_tasks_file, which reads .aimi/current-tasks -- one
+# pointer every session under the same .aimi/ root shares. Two sessions running
+# their own flat plans side by side would then name each other's reviews: the
+# usage-validation loop wrote rounds of one run under the other run's plan name
+# before this flag existed. A caller that knows its run's tasks file passes it,
+# the same way metadata, usage-validation-get and usage-validation-record already
+# take it; the pointer stays the fallback for a caller that does not. It is a
+# flat-mode flag, so combining it with --feature/--phase is refused, as
+# usage-validation-get refuses the same combination.
+#
 # --kind <name> is an optional suffix, appended to whichever name the mode above
 # chose: <feature>-phase-<N>-<name>.md, or <tasks basename>-<name>.md. It exists
 # because one phase has more than one review. Step 5's per-story design review
@@ -17980,20 +17997,32 @@ cmd_roadmap_write_handoff() {
 # The path is confined by validate_path_in_project, the standing authority over
 # every path arriving as a CLI ARGUMENT -- no second check is invented here.
 cmd_write_review() {
-  local feature="" phase_id="" kind=""
+  local feature="" phase_id="" kind="" tasks_file="" have_tasks=0
 
   while [ $# -gt 0 ]; do
     case "$1" in
       --feature) shift; feature="${1:-}" ;;
       --phase) shift; phase_id="${1:-}" ;;
       --kind) shift; kind="${1:-}" ;;
+      --tasks-file) have_tasks=1; shift; tasks_file="${1:-}" ;;
       *)
         echo "Error: write-review: unknown flag: $1" >&2
         exit 1
         ;;
     esac
-    shift
+    [ $# -gt 0 ] && shift
   done
+
+  if [ "$have_tasks" -eq 1 ]; then
+    if [ -n "$feature" ] || [ -n "$phase_id" ]; then
+      echo "Error: write-review: --tasks-file cannot be combined with --feature/--phase" >&2
+      exit 1
+    fi
+    if [ -z "$tasks_file" ]; then
+      echo "Error: write-review: --tasks-file needs a path" >&2
+      exit 1
+    fi
+  fi
 
   if [ -n "$kind" ] && ! [[ "$kind" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
     echo "Error: write-review: --kind must be one lowercase slug (^[a-z0-9][a-z0-9-]*\$) -- got: $kind" >&2
@@ -18013,8 +18042,16 @@ cmd_write_review() {
     _roadmap_validate_phase_id "$phase_id" "write-review"
     review_path="$reviews_dir/${feature}-phase-${phase_id}${suffix}.md"
   else
-    local tasks_file
-    tasks_file=$(get_tasks_file) || exit 1
+    if [ "$have_tasks" -eq 1 ]; then
+      tasks_file=$(resolve_path "$tasks_file")
+      validate_path_in_project "$tasks_file"
+      if [ ! -f "$tasks_file" ]; then
+        echo "Error: write-review: tasks file not found: $tasks_file" >&2
+        exit 1
+      fi
+    else
+      tasks_file=$(get_tasks_file) || exit 1
+    fi
     review_path="$reviews_dir/$(basename "$tasks_file" .json)${suffix}.md"
   fi
 
@@ -20178,7 +20215,7 @@ COMMANDS:
                               "visual"; visualStories is [{id, url}], groups the
                               number of resolved tasks files. A phase id absent
                               from roadmap.json is refused.
-    write-review [--feature <slug> --phase <N>] [--kind <name>]
+    write-review [--feature <slug> --phase <N>] [--kind <name>] [--tasks-file <path>]
                               Read a review as markdown on stdin and atomically
                               write it to disk, so the review outlives the
                               session that produced it. With --feature and
@@ -20188,7 +20225,12 @@ COMMANDS:
                               pair to name a file with), writes to
                               .aimi/reviews/<active tasks file's basename>.md
                               instead -- one flag without its partner is
-                              refused rather than guessed. --kind <name> appends
+                              refused rather than guessed. --tasks-file names
+                              that tasks file instead of the shared
+                              .aimi/current-tasks pointer, so two sessions
+                              under one .aimi/ never name each other's
+                              reviews; it is refused beside --feature/--phase.
+                              --kind <name> appends
                               -<name> to either name, so two reviews of one
                               phase (.aimi/reviews/<slug>-phase-<N>-<name>.md)
                               never overwrite each other. The body is stored

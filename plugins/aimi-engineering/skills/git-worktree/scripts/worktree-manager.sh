@@ -288,7 +288,13 @@ create_worktree() {
     git worktree add "$worktree_path" "$branch_name"
   else
     echo -e "${BLUE}Creating worktree...${NC}"
-    git worktree add -b "$branch_name" "$worktree_path" -- "$from_branch"
+    # --no-track: from_branch is usually origin/<default> (the base resolver
+    # prefers it), and with git's default branch.autoSetupMerge a branch cut
+    # from a remote ref would get that ref as its upstream -- git status then
+    # counts ahead/behind against main, and a bare `git push` is refused or,
+    # under push.default=upstream, lands on main. Nothing here reads that
+    # upstream; /aimi:open-pr sets the real one with `git push -u`.
+    git worktree add --no-track -b "$branch_name" "$worktree_path" -- "$from_branch"
   fi
 
   # Copy environment files

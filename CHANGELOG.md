@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.169.1] - 2026-11-26
+
+Two sessions under one `.aimi/` no longer name each other's usage-validation reviews, and a branch the plugin creates from `origin/<default>` no longer takes it as its upstream.
+
+### Added
+- `write-review --tasks-file <path>`, the tasks file a flat review is named after instead of the shared `.aimi/current-tasks` pointer. The path is confined to the project and must exist; combining it with `--feature`/`--phase` is refused.
+
+### Fixed
+- The usage-validation loop of a flat run passes its run's tasks file to `write-review`. Before, a round was written as `.aimi/reviews/<other plan>-tasks-usage-validation-r<N>.md` whenever another session had pointed `.aimi/current-tasks` at its own plan.
+- `worktree-manager.sh create` and `setup-branch` create the branch with `--no-track`. Cut from `origin/main` under git's default `branch.autoSetupMerge`, the new branch used to track `origin/main`: `git status` counted ahead and behind against main, and a bare `git push` was refused, or went to main under `push.default=upstream`. `/aimi:open-pr` still sets the real upstream with `git push -u`.
+
 ## [1.169.0] - 2026-11-25
 
 Two stories of one wave that share a file are refused only when they declare the same symbol in it, and the cross-story auditor is handed the contending pairs instead of working them out.
