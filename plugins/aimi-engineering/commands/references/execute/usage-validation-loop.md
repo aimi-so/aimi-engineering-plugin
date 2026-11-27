@@ -16,6 +16,7 @@ The calling step sets, and this reference never re-derives:
 - The saved `usage-validation-required` answer (a file) and the accepted keys of any stored record.
 - From the Usage Validation Environment's `usage-browser:` line: `agent-browser:<name>` gives BROWSER `agent-browser` and SESSION_NAME `<name>`; `chrome` gives BROWSER `chrome` and no SESSION_NAME; `none` gives no BROWSER, so only cli charters are walked, every web charter is reported blocked and a run whose charters are all web ends `unable-to-evaluate`. From its `usage-origins:` line: ORIGINS. SESSION is always `aimi-usage-<run key>`, the session that Environment closes at tear-down.
 - The run key and repository values the Environment's bring-up was given, so a re-check runs that bring-up again with `--restart`.
+- The run's tasks file (`RUN_TASKS_FILE`), which a flat run's reviews are named after; never the shared `.aimi/current-tasks` pointer, which another session may have moved.
 - The run's `FEATURE`, `PHASE_ID`, `PHASE_MODE` and, per project group, `EXEC_ROOT[group_key]` and `EXEC_BRANCH[group_key]` (`${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md`), with the `usage-exec:` lines that carried them.
 
 Every run ends with these lines, in this order, and the calling step reads them:
@@ -95,6 +96,7 @@ USAGE_EVIDENCE_DIR="[the usage-evidence directory]"
 USAGE_PHASE_MODE="[true or false]"
 USAGE_FEATURE="[FEATURE, phase mode only]"
 USAGE_PHASE_ID="[PHASE_ID, phase mode only]"
+USAGE_TASKS_FILE="[RUN_TASKS_FILE, the run's tasks file]"
 USAGE_REVIEW="[empty, or the review path this round already wrote]"
 USAGE_ACCEPTED=$(cat <<'USAGE_ACCEPTED_EOF'
 [one accepted key per line]
@@ -113,7 +115,7 @@ if [ -z "$USAGE_REVIEW" ]; then
   if [ "$USAGE_PHASE_MODE" = "true" ]; then
     USAGE_REVIEW_JSON=$(printf '%s\n' "$USAGE_MESSAGE" | "$AIMI_CLI" write-review --feature "$USAGE_FEATURE" --phase "$USAGE_PHASE_ID" --kind "usage-validation-r$USAGE_ROUND") || USAGE_REVIEW_JSON=""
   else
-    USAGE_REVIEW_JSON=$(printf '%s\n' "$USAGE_MESSAGE" | "$AIMI_CLI" write-review --kind "usage-validation-r$USAGE_ROUND") || USAGE_REVIEW_JSON=""
+    USAGE_REVIEW_JSON=$(printf '%s\n' "$USAGE_MESSAGE" | "$AIMI_CLI" write-review --kind "usage-validation-r$USAGE_ROUND" --tasks-file "$USAGE_TASKS_FILE") || USAGE_REVIEW_JSON=""
   fi
   USAGE_REVIEW=$(printf '%s' "$USAGE_REVIEW_JSON" | jq -r '.review // empty' 2>/dev/null)
 fi

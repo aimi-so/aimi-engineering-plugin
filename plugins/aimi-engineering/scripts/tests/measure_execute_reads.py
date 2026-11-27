@@ -104,6 +104,7 @@ TABLE = {
     "phase-completion-usage-validation.md": PHASES,
     "phase-completion-handoff-and-mark.md": PHASES,
     "phase-completion-offer-pull-request.md": PHASES,
+    "run-end-unverified-screens.md": ALL,
     "phase-completion-next-phase.md": PHASES,
     "step-5-completion.md": NOT_SPLIT,
     "step-5-deadlock.md": set(),

@@ -2429,6 +2429,43 @@ test_create_defaults_from_current_branch() {
   teardown_wtm_fixture
 }
 
+# A branch cut from a remote ref must not take that ref as its upstream. The
+# base resolver hands create `origin/<default>` on the common path, and with
+# branch.autoSetupMerge (git's default, pinned here so a global setting cannot
+# mask it) `git worktree add -b` without --no-track set @{u}=origin/main: git
+# status counted ahead/behind against main, and a bare `git push` was refused
+# or, under push.default=upstream, went to main. Both upstream assertions fail
+# against a create that omits --no-track.
+test_create_from_remote_ref_sets_no_upstream() {
+  echo ""
+  echo "=== Testing create from a remote ref leaves the new branch without an upstream ==="
+
+  setup_wtm_fixture
+
+  local origin_dir
+  origin_dir=$(mktemp -d)
+  git init -q --bare "$origin_dir"
+  git remote add origin "$origin_dir"
+  git push -q origin main 2>/dev/null
+  git fetch -q origin 2>/dev/null
+  git config branch.autoSetupMerge true
+
+  local out
+  out=$(bash "$WTM" create no-upstream-branch --from origin/main 2>&1)
+
+  assert_contains "From: origin/main" "$out" \
+    "create from remote ref: reports origin/main as the base it used"
+  assert_eq "$(git rev-parse origin/main)" "$(git rev-parse no-upstream-branch 2>/dev/null)" \
+    "create from remote ref: the new branch stands on origin/main's sha"
+  assert_eq "" "$(git config --get branch.no-upstream-branch.remote 2>/dev/null)" \
+    "create from remote ref: no branch.<name>.remote is recorded"
+  assert_eq "false" "$(git rev-parse --abbrev-ref 'no-upstream-branch@{u}' >/dev/null 2>&1 && echo true || echo false)" \
+    "create from remote ref: the new branch has no upstream"
+
+  teardown_wtm_fixture
+  rm -rf "$origin_dir"
+}
+
 # The absence of .aimi/ IS the assertion. find_aimi_root stops at the first
 # directory containing .aimi/, so a worktree that has one becomes PROJECT_ROOT
 # instead of the main repository -- and the tasks file, which lives in the
@@ -2481,6 +2518,7 @@ main() {
   test_remove_refuses_a_name_registered_only_inside_a_nested_container
   test_create_emits_sentinels_on_both_branches
   test_create_defaults_from_current_branch
+  test_create_from_remote_ref_sets_no_upstream
   test_create_does_not_create_aimi_in_worktree
 
   echo ""

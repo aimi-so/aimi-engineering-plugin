@@ -70,12 +70,12 @@ references/scope-contexts.md	24576
 plan.md	24576
 deepen.md	20480
 
-skills/story-executor/SKILL.md	32768
+skills/story-executor/SKILL.md	36864
 skills/task-planner/SKILL.md	24576
 skills/git-worktree/SKILL.md	20480
 
 agents/research/aimi-foundation-architect.md	24576
-agents/workflow/aimi-story-expander.md	57344
+agents/workflow/aimi-story-expander.md	61440
 agents/research/aimi-learnings-researcher.md	20480
 agents/research/aimi-design-bundle-researcher.md	20480
 agents/review/aimi-cross-story-auditor.md	24576

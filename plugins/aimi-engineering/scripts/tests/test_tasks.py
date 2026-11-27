@@ -1495,20 +1495,31 @@ def test_wave_contention_declared_mixed_reports_undeclared_only(tmp_path):
 
 
 def test_wave_contention_declared_needs_every_claimant_project(tmp_path):
+    """The bookkeeping exemption is per project. Two claimants of one project
+    are exempt only when that project declares the path; a claimant of another
+    project never entered the comparison at all."""
     stories = [
         _declared_project(_contention_story("US-001", [], ["VERSION"]), "api"),
-        _declared_project(_contention_story("US-002", [], ["VERSION"]), "web"),
+        _declared_project(_contention_story("US-002", [], ["VERSION"]), "api"),
     ]
-    proc, verdict = _run_validate_wave_contention(tmp_path, stories, _decl(api=["VERSION"]))
+    proc, verdict = _run_validate_wave_contention(tmp_path / "none", stories, _decl(web=["VERSION"]))
     assert verdict == {
         "valid": False,
         "errors": ["Wave contention: wave 1 path VERSION claimed by US-001, US-002"],
     }
     assert proc.returncode == 1
-    proc, verdict = _run_validate_wave_contention(
-        tmp_path / "both", stories, _decl(api=["VERSION"], web=["VERSION"])
-    )
+    proc, verdict = _run_validate_wave_contention(tmp_path / "own", stories, _decl(api=["VERSION"]))
     assert verdict == {"valid": True, "errors": []} and proc.returncode == 0
+
+
+def test_wave_contention_different_projects_listing_one_path_no_longer_contend(tmp_path):
+    stories = [
+        _declared_project(_contention_story("US-001", [], ["VERSION"]), "api"),
+        _declared_project(_contention_story("US-002", [], ["VERSION"]), "web"),
+    ]
+    for n, config in enumerate([None, _decl(api=["VERSION"]), _decl(api=["VERSION"], web=["VERSION"])]):
+        proc, verdict = _run_validate_wave_contention(tmp_path / str(n), stories, config)
+        assert verdict == {"valid": True, "errors": []} and proc.returncode == 0, config
 
 
 def test_wave_contention_declared_absent_declaration_is_unchanged(tmp_path):
@@ -1560,6 +1571,218 @@ def test_wave_contention_declared_default_parameter_matches_none():
         _contention_story("US-002", [], ["a.sh"]),
     ]))
     assert T.wave_contention(doc) == T.wave_contention(doc, None) == T.wave_contention(doc, {})
+
+
+# ---------------------------------------------------------------------------
+# wave_symbol_contention -- the rule wave_contention words (symbol level)
+# ---------------------------------------------------------------------------
+
+
+_NO_SYMBOLS = object()
+
+
+def _symbol_claimant(story_id, files, symbols=_NO_SYMBOLS, project=None, wave=1):
+    story = _contention_story(story_id, [], files)
+    if symbols is not _NO_SYMBOLS:
+        story["implementation"]["symbols"] = symbols
+    if project is not None:
+        story["project"] = project
+    return (story_id, wave, story)
+
+
+def _symbol_stories(*claimants):
+    return [story for _, _, story in claimants]
+
+
+def test_wave_symbol_contention_a_shared_symbol_is_one_error_per_symbol(tmp_path):
+    claimants = [
+        _symbol_claimant("US-001", ["a.ts"], {"a.ts": {"creates": ["f", "h"], "edits": ["g"]}}),
+        _symbol_claimant("US-002", ["a.ts"], {"a.ts": {"edits": ["g", "f", "z"]}}),
+    ]
+    proc, verdict = _run_validate_wave_contention(tmp_path, _symbol_stories(*claimants))
+    assert verdict == {
+        "valid": False,
+        "errors": [
+            "Wave contention: wave 1 path a.ts symbol f claimed by US-001, US-002",
+            "Wave contention: wave 1 path a.ts symbol g claimed by US-001, US-002",
+        ],
+    }
+    assert proc.returncode == 1 and "warnings" not in verdict
+
+
+def test_wave_symbol_contention_disjoint_symbols_warn_and_exit_zero(tmp_path):
+    claimants = [
+        _symbol_claimant("US-001", ["a.ts"], {"a.ts": {"edits": ["f"]}}),
+        _symbol_claimant("US-002", ["a.ts"], {"a.ts": {"creates": ["g"]}}),
+        _symbol_claimant("US-003", ["a.ts"], {"a.ts": {"edits": ["h"]}}),
+    ]
+    proc, verdict = _run_validate_wave_contention(tmp_path, _symbol_stories(*claimants))
+    assert verdict == {
+        "valid": True,
+        "errors": [],
+        "warnings": [
+            "Wave contention warning: wave 1 path a.ts shared by 3 stories with disjoint symbols:"
+            " US-001, US-002, US-003"
+        ],
+    }
+    assert proc.returncode == 0
+
+
+def test_wave_symbol_contention_one_undeclared_claimant_keeps_the_file_level_error(tmp_path):
+    cases = {
+        "nokey": {"b.ts": {"edits": ["x"]}},
+        "empty": {"a.ts": {"edits": []}},
+        "malformed": {"a.ts": "f"},
+        "noobject": None,
+    }
+    for name, symbols in cases.items():
+        claimants = [
+            _symbol_claimant("US-001", ["a.ts", "b.ts"], {"a.ts": {"edits": ["f"]}}),
+            _symbol_claimant("US-002", ["a.ts", "b.ts"], symbols),
+        ]
+        proc, verdict = _run_validate_wave_contention(tmp_path / name, _symbol_stories(*claimants))
+        assert verdict["valid"] is False and proc.returncode == 1, name
+        assert verdict["errors"][0] == "Wave contention: wave 1 path a.ts claimed by US-001, US-002", name
+        assert "warnings" not in verdict, name
+
+
+def test_wave_symbol_contention_a_shared_symbol_yields_no_warning_for_the_path(tmp_path):
+    claimants = [
+        _symbol_claimant("US-001", ["a.ts"], {"a.ts": {"edits": ["f"]}}),
+        _symbol_claimant("US-002", ["a.ts"], {"a.ts": {"edits": ["f"]}}),
+        _symbol_claimant("US-003", ["a.ts"], {"a.ts": {"edits": ["g"]}}),
+    ]
+    proc, verdict = _run_validate_wave_contention(tmp_path, _symbol_stories(*claimants))
+    assert verdict == {
+        "valid": False,
+        "errors": ["Wave contention: wave 1 path a.ts symbol f claimed by US-001, US-002"],
+    }
+
+
+def test_wave_symbol_contention_names_match_exactly_and_case_sensitively():
+    claimants = [
+        _symbol_claimant("US-001", ["a.ts"], {"a.ts": {"edits": ["Foo"]}}),
+        _symbol_claimant("US-002", ["a.ts"], {"a.ts": {"edits": ["foo"]}}),
+    ]
+    found = T.wave_symbol_contention(claimants)
+    assert [f["kind"] for f in found] == ["shared-file"]
+
+
+def test_wave_symbol_contention_symbols_are_compared_within_one_path_only():
+    claimants = [
+        _symbol_claimant("US-001", ["a.ts", "b.ts"], {"a.ts": {"edits": ["f"]}, "b.ts": {"edits": ["x"]}}),
+        _symbol_claimant("US-002", ["a.ts", "b.ts"], {"a.ts": {"edits": ["g"]}, "b.ts": {"edits": ["f"]}}),
+    ]
+    found = T.wave_symbol_contention(claimants)
+    assert [(f["kind"], f["path"]) for f in found] == [("shared-file", "a.ts"), ("shared-file", "b.ts")]
+
+
+def test_wave_symbol_contention_a_bookkeeping_path_is_neither_refused_nor_warned(tmp_path):
+    claimants = [
+        _symbol_claimant("US-001", ["CHANGELOG.md"], {"CHANGELOG.md": {"edits": ["f"]}}),
+        _symbol_claimant("US-002", ["CHANGELOG.md"]),
+    ]
+    proc, verdict = _run_validate_wave_contention(
+        tmp_path, _symbol_stories(*claimants), _decl(**{".": ["CHANGELOG.md"]})
+    )
+    assert verdict == {"valid": True, "errors": []} and proc.returncode == 0
+    assert T.wave_symbol_contention(claimants, {".": {"CHANGELOG.md"}}) == []
+
+
+def test_wave_symbol_contention_only_same_project_stories_are_compared(tmp_path):
+    claimants = [
+        _symbol_claimant("US-001", ["a.ts"], {"a.ts": {"edits": ["f"]}}, project="api"),
+        _symbol_claimant("US-002", ["a.ts"], {"a.ts": {"edits": ["f"]}}, project="web"),
+    ]
+    proc, verdict = _run_validate_wave_contention(tmp_path, _symbol_stories(*claimants))
+    assert verdict == {"valid": True, "errors": []} and proc.returncode == 0
+    assert T.wave_symbol_contention(claimants) == []
+    mixed = claimants + [_symbol_claimant("US-003", ["a.ts"], {"a.ts": {"edits": ["f"]}}, project="api")]
+    found = T.wave_symbol_contention(mixed)
+    assert [(f["kind"], f["project"], f["ids"]) for f in found] == [("symbol", "api", ["US-001", "US-003"])]
+
+
+def test_wave_symbol_contention_a_story_without_project_is_the_dot_project():
+    claimants = [
+        _symbol_claimant("US-001", ["a.ts"]),
+        _symbol_claimant("US-002", ["a.ts"], project=""),
+        _symbol_claimant("US-003", ["a.ts"], project="api"),
+    ]
+    found = T.wave_symbol_contention(claimants)
+    assert found == [{"kind": "file", "wave": 1, "project": ".", "path": "a.ts", "ids": ["US-001", "US-002"]}]
+
+
+def test_wave_symbol_contention_findings_have_the_documented_shape_and_order():
+    claimants = [
+        _symbol_claimant("US-001", ["z.ts", "a.ts", "m.ts"],
+                         {"a.ts": {"edits": ["q", "b"]}, "m.ts": {"edits": ["k"]}}, wave=2),
+        _symbol_claimant("US-002", ["a.ts", "z.ts", "m.ts"],
+                         {"a.ts": {"edits": ["b", "q"]}, "m.ts": {"edits": ["j"]}}, wave=2),
+        _symbol_claimant("US-003", ["z.ts"], wave=1),
+        _symbol_claimant("US-004", ["z.ts"], wave=1),
+        _symbol_claimant("US-005", ["z.ts"], wave=None),
+    ]
+    assert T.wave_symbol_contention(claimants) == [
+        {"kind": "file", "wave": 1, "project": ".", "path": "z.ts", "ids": ["US-003", "US-004"]},
+        {"kind": "file", "wave": 2, "project": ".", "path": "z.ts", "ids": ["US-001", "US-002"]},
+        {"kind": "symbol", "wave": 2, "project": ".", "path": "a.ts", "symbol": "b", "ids": ["US-001", "US-002"]},
+        {"kind": "symbol", "wave": 2, "project": ".", "path": "a.ts", "symbol": "q", "ids": ["US-001", "US-002"]},
+        {"kind": "shared-file", "wave": 2, "project": ".", "path": "m.ts", "ids": ["US-001", "US-002"]},
+    ]
+
+
+def test_wave_symbol_contention_is_pure_and_takes_any_iterable():
+    claimants = [
+        _symbol_claimant("US-001", ["a.ts"], {"a.ts": {"edits": ["f"]}}),
+        _symbol_claimant("US-002", ["a.ts"], {"a.ts": {"edits": ["f"]}}),
+    ]
+    before = json.dumps([c[2] for c in claimants], sort_keys=True)
+    first = T.wave_symbol_contention(iter(claimants), None)
+    assert first == T.wave_symbol_contention(tuple(claimants), {}) == T.wave_symbol_contention(claimants)
+    assert json.dumps([c[2] for c in claimants], sort_keys=True) == before
+    assert T.wave_symbol_contention([]) == []
+
+
+def test_wave_symbol_contention_skips_a_story_that_claims_nothing():
+    odd = _symbol_claimant("US-002", ["a.ts"])
+    odd[2]["implementation"]["files"] = "a.ts"
+    other = _symbol_claimant("US-003", ["a.ts"])
+    other[2]["implementation"] = None
+    repeated = _symbol_claimant("US-004", ["a.ts", "a.ts", 7])
+    assert T.wave_symbol_contention([_symbol_claimant("US-001", ["a.ts"]), odd, other, repeated]) == [
+        {"kind": "file", "wave": 1, "project": ".", "path": "a.ts", "ids": ["US-001", "US-004"]}
+    ]
+
+
+def test_wave_symbol_contention_a_story_never_contends_with_itself():
+    story = _symbol_claimant("US-001", ["a.ts", "a.ts"], {"a.ts": {"edits": ["f"]}})
+    assert T.wave_symbol_contention([story]) == []
+
+
+def test_wave_symbol_contention_verdict_has_a_warnings_key_only_when_non_empty():
+    doc = json.loads(_waves_doc(_symbol_stories(
+        _symbol_claimant("US-001", ["a.ts"]), _symbol_claimant("US-002", ["b.ts"])
+    )))
+    assert list(T.wave_contention(doc)) == ["valid", "errors"]
+    warned = json.loads(_waves_doc(_symbol_stories(
+        _symbol_claimant("US-001", ["a.ts"], {"a.ts": {"edits": ["f"]}}),
+        _symbol_claimant("US-002", ["a.ts"], {"a.ts": {"edits": ["g"]}}),
+    )))
+    assert list(T.wave_contention(warned)) == ["valid", "errors", "warnings"]
+    assert T._verdict([]) == {"valid": True, "errors": []}
+
+
+def test_wave_symbol_contention_mixed_errors_and_warnings_keep_the_refusal(tmp_path):
+    claimants = [
+        _symbol_claimant("US-001", ["a.ts", "b.ts"], {"a.ts": {"edits": ["f"]}, "b.ts": {"edits": ["x"]}}),
+        _symbol_claimant("US-002", ["a.ts", "b.ts"], {"a.ts": {"edits": ["f"]}, "b.ts": {"edits": ["y"]}}),
+    ]
+    proc, verdict = _run_validate_wave_contention(tmp_path, _symbol_stories(*claimants))
+    assert proc.returncode == 1 and verdict["valid"] is False
+    assert verdict["errors"] == ["Wave contention: wave 1 path a.ts symbol f claimed by US-001, US-002"]
+    assert verdict["warnings"] == [
+        "Wave contention warning: wave 1 path b.ts shared by 2 stories with disjoint symbols: US-001, US-002"
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -3052,7 +3275,7 @@ def test_prototypedropped_acquired_no_consumer():
     """
     assert T.STORY_CONTEXT_METADATA_KEYS == (
         "designBundle", "designTokens", "prototypePaths", "prototypeDropped",
-        "prototypeSuperseded",
+        "prototypeSuperseded", "prototypeHandoffPaths",
     )
     cleanup = inspect.getsource(T.op_archive_task)
     assert 'for key in ("researchPaths", "prototypePaths"):' in cleanup
@@ -4135,7 +4358,7 @@ def test_the_projected_set_is_named_once_and_decisions_is_not_in_it():
     """
     assert T.STORY_CONTEXT_METADATA_KEYS == (
         "designBundle", "designTokens", "prototypePaths", "prototypeDropped",
-        "prototypeSuperseded",
+        "prototypeSuperseded", "prototypeHandoffPaths",
     )
     assert "decisions" not in T.STORY_CONTEXT_METADATA_KEYS
 
@@ -12331,3 +12554,492 @@ def test_validate_tasks_audit_open_error_names_the_index(tmp_path):
     )
     found = _audit_open_errors(actual)
     assert len(found) == 1 and "metadata.auditOpen[1]" in found[0]
+
+
+# ---------------------------------------------------------------------------
+# metadata.prototypeHandoffPaths -- R29, the projection, and archive-task
+# ---------------------------------------------------------------------------
+#
+# Bash never ran this rule, so there is no jq recording and nothing for the
+# golden corpus: these hand-written cases ARE the coverage. Every fixture is
+# built under a tmp_path root with a real .aimi/sources/ tree, because the rule
+# decides by realpath and a path-string test would miss the symlink case.
+
+_HANDOFF = ".aimi/sources/kit/handoff.md"
+
+
+def _handoff_project(tmp_path, metadata, links=None, files=None, outside=None):
+    """A project root with `.aimi/sources/kit/handoff.md` on disk and one
+    tasks file carrying `metadata`. `links` maps a root-relative path to the
+    absolute target of a symlink created there; `files` and `outside` map a
+    relative path to its text, under the root and beside it respectively.
+    Returns (root, tasks_file)."""
+    parent = os.path.realpath(str(tmp_path))
+    root = os.path.join(parent, "proj")
+    tasks_dir = os.path.join(root, ".aimi", "tasks")
+    os.makedirs(tasks_dir, exist_ok=True)
+    everything = dict(files or {})
+    everything.setdefault(_HANDOFF, "# handoff\n")
+    for base, found in ((root, everything), (parent, outside or {})):
+        for relative, text in found.items():
+            target = os.path.join(base, relative)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "w", encoding="utf-8") as handle:
+                handle.write(text)
+    for relative, target in (links or {}).items():
+        link = os.path.join(root, relative)
+        os.makedirs(os.path.dirname(link), exist_ok=True)
+        os.symlink(target, link)
+    story = {
+        "id": "US-001", "title": "Story US-001", "description": "As a user, I want US-001.",
+        "acceptanceCriteria": ["um criterio sem ancora nenhuma"], "status": "pending",
+        "priority": 1, "dependsOn": [], "wave": 0,
+    }
+    document = {
+        "schemaVersion": "3.3",
+        "metadata": dict({"branchName": "ref/corpus", "maxConcurrency": 1}, **metadata),
+        "userStories": [story],
+    }
+    tasks_file = os.path.join(tasks_dir, "2020-01-01-corpus-tasks.json")
+    with open(tasks_file, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(document, ensure_ascii=False) + "\n")
+    return root, tasks_file
+
+
+def _handoff_validate(tmp_path, value, **fixtures):
+    metadata = {} if value is _ABSENT else {"prototypeHandoffPaths": value}
+    root, _tasks = _handoff_project(tmp_path, metadata, **fixtures)
+    proc = subprocess.run(
+        ["bash", CLI, "validate-tasks"], cwd=root, capture_output=True, text=True, timeout=120
+    )
+    return proc
+
+
+def _handoff_errors(proc):
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    verdict = json.loads(proc.stdout)
+    assert verdict["valid"] is False
+    found = [entry for entry in verdict["errors"] if "metadata.prototypeHandoffPaths" in entry]
+    assert found, verdict["errors"]
+    return found
+
+
+def test_prototype_handoff_absent_validates_exactly_as_before(tmp_path):
+    proc = _handoff_validate(tmp_path, _ABSENT)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout == '{"valid": true, "errors": []}\n'
+    assert proc.stderr == ""
+
+
+def test_prototype_handoff_well_formed_list_validates_clean(tmp_path):
+    proc = _handoff_validate(
+        tmp_path,
+        [_HANDOFF, ".aimi/sources/kit/missing.md"],
+        files={".aimi/sources/kit/notes/second.md": "x"},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout == '{"valid": true, "errors": []}\n'
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, "x.md", {}, {"path": _HANDOFF}, 7],
+    ids=["null", "string", "object", "object-with-path", "number"],
+)
+def test_prototype_handoff_non_list_is_refused_and_null_is_not_absent(tmp_path, value):
+    found = _handoff_errors(_handoff_validate(tmp_path, value))
+    assert any("is not an array" in entry for entry in found), found
+
+
+def test_prototype_handoff_empty_list_is_refused_with_its_own_message(tmp_path):
+    found = _handoff_errors(_handoff_validate(tmp_path, []))
+    assert any("omit the key" in entry for entry in found), found
+    assert not any("is not an array" in entry for entry in found)
+
+
+@pytest.mark.parametrize("entry", ["", 7, None, ["x.md"], {"p": 1}])
+def test_prototype_handoff_non_string_or_empty_entry_is_refused(tmp_path, entry):
+    found = _handoff_errors(_handoff_validate(tmp_path, [_HANDOFF, entry]))
+    assert any("[1] is not a non-empty string" in e for e in found), found
+
+
+@pytest.mark.parametrize(
+    "entry", [".aimi/sources/kit/handoff.txt", ".aimi/sources/kit/handoff", ".aimi/sources/kit/a.md.bak"]
+)
+def test_prototype_handoff_non_md_path_is_refused(tmp_path, entry):
+    found = _handoff_errors(_handoff_validate(tmp_path, [entry]))
+    assert any("does not end in .md" in e for e in found), found
+
+
+def test_prototype_handoff_dotdot_escape_is_refused(tmp_path):
+    # Both targets EXIST: a missing one resolves through the documented
+    # unresolved-string arm of confined_spec_path (see require_in_project).
+    found = _handoff_errors(
+        _handoff_validate(
+            tmp_path,
+            [".aimi/sources/../outside-sources.md", ".aimi/sources/../../../fora/outside.md"],
+            files={".aimi/outside-sources.md": "x"},
+            outside={"fora/outside.md": "x"},
+        )
+    )
+    assert any("[0] escapes .aimi/sources/" in e for e in found), found
+    assert any("[1] escapes .aimi/sources/" in e for e in found), found
+
+
+def test_prototype_handoff_path_elsewhere_in_the_project_is_refused(tmp_path):
+    found = _handoff_errors(
+        _handoff_validate(
+            tmp_path,
+            ["docs/handoff.md", ".aimi/brainstorms/handoff.md"],
+            files={"docs/handoff.md": "x", ".aimi/brainstorms/handoff.md": "x"},
+        )
+    )
+    assert any("[0] escapes .aimi/sources/" in e for e in found), found
+    assert any("[1] escapes .aimi/sources/" in e for e in found), found
+
+
+def test_prototype_handoff_symlink_out_of_sources_is_refused(tmp_path):
+    parent = os.path.realpath(str(tmp_path))
+    found = _handoff_errors(
+        _handoff_validate(
+            tmp_path,
+            [".aimi/sources/kit/to-outside.md", ".aimi/sources/kit/to-project.md"],
+            links={
+                ".aimi/sources/kit/to-outside.md": os.path.join(parent, "fora", "target.md"),
+                ".aimi/sources/kit/to-project.md": os.path.join(parent, "proj", "docs", "target.md"),
+            },
+            files={"docs/target.md": "x"},
+            outside={"fora/target.md": "x"},
+        )
+    )
+    assert any("[0] escapes .aimi/sources/" in e for e in found), found
+    assert any("[1] escapes .aimi/sources/" in e for e in found), found
+
+
+def test_prototype_handoff_symlink_staying_inside_sources_is_accepted(tmp_path):
+    parent = os.path.realpath(str(tmp_path))
+    proc = _handoff_validate(
+        tmp_path,
+        [".aimi/sources/kit/alias.md"],
+        links={".aimi/sources/kit/alias.md": os.path.join(parent, "proj", _HANDOFF)},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_prototype_handoff_confined_spec_path_subtree_narrows_and_default_does_not(tmp_path):
+    parent = os.path.realpath(str(tmp_path))
+    root, _tasks = _handoff_project(
+        tmp_path, {}, files={"docs/elsewhere.md": "x", ".aimi/sources/kit/inner.md": "x"}
+    )
+    # Default: the project root, exactly as every existing caller saw it.
+    assert T.confined_spec_path(root, "docs/elsewhere.md")[1] is True
+    assert T.confined_spec_path(root, "docs/elsewhere.md", None)[1] is True
+    assert T.confined_spec_path(root, ".aimi/sources/kit/inner.md")[1] is True
+    assert T.confined_spec_path(root, "../fora/x.md")[1] is True, "bash's own fallback"
+    # With a subtree: only that directory's realpath counts.
+    assert T.confined_spec_path(root, ".aimi/sources/kit/inner.md", ".aimi/sources")[1] is True
+    assert T.confined_spec_path(root, ".aimi/sources", ".aimi/sources")[1] is True
+    assert T.confined_spec_path(root, "docs/elsewhere.md", ".aimi/sources")[1] is False
+    assert T.confined_spec_path(root, ".aimi/sources/../docs.md", ".aimi/sources")[1] is False
+    # The returned path is unchanged by the argument.
+    assert (
+        T.confined_spec_path(root, "docs/elsewhere.md", ".aimi/sources")[0]
+        == T.confined_spec_path(root, "docs/elsewhere.md")[0]
+    )
+    link = os.path.join(root, ".aimi", "sources", "kit", "out.md")
+    os.symlink(os.path.join(root, "docs", "elsewhere.md"), link)
+    assert T.confined_spec_path(root, ".aimi/sources/kit/out.md")[1] is True
+    assert T.confined_spec_path(root, ".aimi/sources/kit/out.md", ".aimi/sources")[1] is False
+    assert parent  # the fixture root is a realpath, so the comparison is not a symlink artefact
+
+
+def test_prototype_handoff_projects_into_get_story_context_only_when_present(tmp_path):
+    root, with_key = _handoff_project(tmp_path, {"prototypeHandoffPaths": [_HANDOFF]})
+    run = _run_get_story_context(with_key, "US-001", root)
+    assert run.returncode == 0, run.stderr
+    assert json.loads(run.stdout)["metadata"] == {"prototypeHandoffPaths": [_HANDOFF]}
+
+    other = tmp_path / "other"
+    other.mkdir()
+    root, without = _handoff_project(other, {})
+    run = _run_get_story_context(without, "US-001", root)
+    assert run.returncode == 0, run.stderr
+    assert "prototypeHandoffPaths" not in json.loads(run.stdout)["metadata"]
+
+
+def test_prototype_handoff_is_the_sixth_projected_key_after_prototype_superseded():
+    assert T.STORY_CONTEXT_METADATA_KEYS[-2:] == (
+        "prototypeSuperseded", "prototypeHandoffPaths"
+    )
+    assert len(T.STORY_CONTEXT_METADATA_KEYS) == 6
+
+
+def test_prototype_handoff_archive_task_leaves_the_handoff_on_disk(tmp_path):
+    root, tasks_file = _handoff_project(
+        tmp_path,
+        {"prototypeHandoffPaths": [_HANDOFF], "prototypePaths": [".aimi/brainstorms/p.html"]},
+        files={".aimi/brainstorms/p.html": "<html></html>"},
+    )
+    with open(tasks_file, encoding="utf-8") as handle:
+        document = json.load(handle)
+    document["userStories"][0]["status"] = "completed"
+    with open(tasks_file, "w", encoding="utf-8") as handle:
+        json.dump(document, handle)
+    handoff = os.path.join(root, _HANDOFF)
+    archive = os.path.join(root, ".aimi", "archive")
+    argv = ["archive-task", "--tasks-file", tasks_file, "--project-root", root, "--archive-dir", archive]
+    assert T.op_archive_task(argv) == 0
+    assert not os.path.exists(tasks_file), "the tasks file was archived"
+    assert not os.path.exists(os.path.join(root, ".aimi", "brainstorms", "p.html")), "prototypePaths still cleaned"
+    assert os.path.isfile(handoff), "the handoff document is left alone"
+    cleanup = inspect.getsource(T.op_archive_task)
+    assert 'for key in ("researchPaths", "prototypePaths"):' in cleanup
+    assert "prototypeHandoffPaths" not in cleanup
+
+
+def test_prototype_handoff_shape_helper_is_called_only_from_the_r29_block():
+    scripts = os.path.dirname(TASKS_PY)
+    named = {}
+    for name in sorted(os.listdir(scripts)):
+        if not name.endswith(".py"):
+            continue
+        with open(os.path.join(scripts, name), encoding="utf-8") as handle:
+            count = handle.read().count("prototype_handoff_paths_shape_errors")
+        if count:
+            named[name] = count
+    assert named == {os.path.basename(TASKS_PY): 2}, "the definition and the one R29 call, nothing else"
+    callers = {
+        name
+        for name, value in vars(T).items()
+        if inspect.isfunction(value)
+        and value.__module__ == T.__name__
+        and "prototype_handoff_paths_shape_errors(" in inspect.getsource(value)
+    }
+    assert callers == {"prototype_handoff_paths_shape_errors", "validate_tasks"}
+
+
+# ---------------------------------------------------------------------------
+# implementation.symbols -- R30 and declared_symbols
+# ---------------------------------------------------------------------------
+#
+# Bash never ran this rule, so there is no jq recording and nothing for the
+# golden corpus: these hand-written cases ARE the coverage. The shape rule is
+# tasks.py's implementation_symbol_findings and the reader a wave check will
+# use is declared_symbols; both answer from one private per-entry helper, and
+# the last cases here pin that they cannot disagree.
+
+_SYM_FILES = ["src/a.ts", "src/b.ts", "src/c/"]
+
+
+def _sym_story(symbols=_ABSENT, files=None, story_id="US-001"):
+    implementation = {
+        "files": list(_SYM_FILES) if files is None else files,
+        "approach": "Implement it",
+        "verify": "true",
+    }
+    if symbols is not _ABSENT:
+        implementation["symbols"] = symbols
+    return {
+        "id": story_id, "title": "Story " + story_id, "description": "As a user, I want it.",
+        "acceptanceCriteria": ["um criterio sem ancora nenhuma"], "status": "pending",
+        "priority": 1, "dependsOn": [], "wave": 1, "implementation": implementation,
+    }
+
+
+def _sym_validate(tmp_path, stories):
+    root = os.path.join(os.path.realpath(str(tmp_path)), "proj")
+    tasks_dir = os.path.join(root, ".aimi", "tasks")
+    os.makedirs(tasks_dir, exist_ok=True)
+    os.makedirs(os.path.join(root, "src", "c"), exist_ok=True)  # R17 warns about a missing directory
+    document = {
+        "schemaVersion": "3.3",
+        "metadata": {"branchName": "ref/corpus", "maxConcurrency": 1},
+        "userStories": stories,
+    }
+    with open(os.path.join(tasks_dir, "2020-01-01-corpus-tasks.json"), "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(document, ensure_ascii=False) + "\n")
+    return subprocess.run(
+        ["bash", CLI, "validate-tasks"], cwd=root, capture_output=True, text=True, timeout=120
+    )
+
+
+def _sym_errors(proc):
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    verdict = json.loads(proc.stdout)
+    assert verdict["valid"] is False
+    found = [entry for entry in verdict["errors"] if "implementation.symbols" in entry]
+    assert found, verdict["errors"]
+    return found
+
+
+def _sym_findings(symbols, files=None):
+    return T.implementation_symbol_findings(_sym_story(symbols, files))
+
+
+def test_implementation_symbols_absent_key_draws_no_finding_and_validates_as_before(tmp_path):
+    assert _sym_findings(_ABSENT) == []
+    proc = _sym_validate(tmp_path, [_sym_story()])
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout == '{"valid": true, "errors": []}\n'
+    assert proc.stderr == ""
+
+
+def test_implementation_symbols_well_formed_declaration_validates_clean(tmp_path):
+    declared = {
+        "src/a.ts": {"creates": ["parse", "Foo.bar"], "edits": ["render"]},
+        "src/b.ts": {"edits": ["helper"]},
+        "src/c/": {"creates": ["index"]},
+    }
+    assert _sym_findings(declared) == []
+    proc = _sym_validate(tmp_path, [_sym_story(declared)])
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout == '{"valid": true, "errors": []}\n'
+
+
+def test_implementation_symbols_empty_object_is_valid(tmp_path):
+    assert _sym_findings({}) == []
+    assert _sym_validate(tmp_path, [_sym_story({})]).returncode == 0
+
+
+@pytest.mark.parametrize("value", [None, [], "src/a.ts", 3, True])
+def test_implementation_symbols_a_present_non_object_is_one_whole_field_finding(value):
+    found = _sym_findings(value)
+    assert len(found) == 1
+    assert found[0].startswith("implementation.symbols is not an object (value: ")
+
+
+def test_implementation_symbols_explicit_null_is_refused_through_the_cli(tmp_path):
+    found = _sym_errors(_sym_validate(tmp_path, [_sym_story(None)]))
+    assert len(found) == 1
+    assert "US-001: implementation.symbols is not an object (value: None)" in found[0]
+
+
+@pytest.mark.parametrize(
+    "symbols, reason",
+    [
+        ({"src/zzz.ts": {"creates": ["f"]}}, "is not an entry of implementation.files"),
+        ({"src/a.ts ": {"creates": ["f"]}}, "is not an entry of implementation.files"),
+        ({"src/a.ts": ["f"]}, "is not an object"),
+        ({"src/a.ts": None}, "is not an object"),
+        ({"src/a.ts": {"creates": ["f"], "deletes": ["g"]}}, "has a key other than creates and edits"),
+        ({"src/a.ts": {"creates": "f"}}, "creates is not a list"),
+        ({"src/a.ts": {"edits": {"f": 1}}}, "edits is not a list"),
+        ({"src/a.ts": {"creates": [3]}}, "creates holds a name that is not a string"),
+        ({"src/a.ts": {}}, "names no symbol under creates or edits"),
+        ({"src/a.ts": {"creates": [], "edits": []}}, "names no symbol under creates or edits"),
+        ({"src/a.ts": {"edits": ["ok", ""]}}, "edits holds a name that is refused: empty"),
+        ({"src/a.ts": {"creates": ["a b"]}}, "creates holds a name that is refused: contains whitespace"),
+        ({"src/a.ts": {"creates": ["../x"]}}, 'refused: contains a ".." path segment'),
+        ({"src/a.ts": {"creates": ["/abs"]}}, 'refused: begins with "/"'),
+        ({"src/a.ts": {"creates": ["***"]}}, "refused: names nothing in particular"),
+    ],
+)
+def test_implementation_symbols_each_shape_rule_draws_one_finding_naming_the_key(symbols, reason):
+    found = _sym_findings(symbols)
+    assert len(found) == 1, found
+    key = next(iter(symbols))
+    assert found[0].startswith("implementation.symbols[" + key + "] "), found[0]
+    assert reason in found[0], found[0]
+    assert "(value: " in found[0]
+
+
+def test_implementation_symbols_a_malformed_entry_does_not_mask_a_good_one_and_each_gets_a_line(tmp_path):
+    declared = {
+        "src/a.ts": {"creates": ["f"]},
+        "src/b.ts": {"creates": []},
+        "src/gone.ts": {"edits": ["g"]},
+    }
+    found = _sym_errors(_sym_validate(tmp_path, [_sym_story(declared)]))
+    assert len(found) == 2
+    assert all("US-001: implementation.symbols[" in entry for entry in found)
+    assert "src/b.ts" in found[0] and "src/gone.ts" in found[1]
+
+
+def test_implementation_symbols_errors_name_the_story_that_carries_them(tmp_path):
+    stories = [
+        _sym_story({"src/a.ts": {"creates": ["f"]}}, story_id="US-001"),
+        _sym_story({"src/a.ts": {}}, story_id="US-002"),
+    ]
+    stories[1]["priority"] = 2
+    found = _sym_errors(_sym_validate(tmp_path, stories))
+    assert len(found) == 1 and "US-002: implementation.symbols[src/a.ts]" in found[0]
+
+
+def test_implementation_symbols_the_value_is_echoed_safely_and_never_repaired():
+    found = _sym_findings({"src/a.ts": {"creates": ["a`b$(c)"]}})
+    assert len(found) == 1
+    assert "`" not in found[0] and "$(" not in found[0]
+    long_name = "x" * 40 + " " + "y" * 200
+    found = _sym_findings({"src/a.ts": {"creates": [long_name]}})
+    assert len(found) == 1 and "..." in found[0] and len(found[0]) < 600
+
+
+def test_implementation_symbols_a_story_without_a_files_list_refuses_every_key():
+    story = _sym_story({"src/a.ts": {"creates": ["f"]}})
+    story["implementation"]["files"] = "src/a.ts"
+    found = T.implementation_symbol_findings(story)
+    assert len(found) == 1 and "is not an entry of implementation.files" in found[0]
+
+
+def test_implementation_symbols_a_story_with_no_implementation_draws_nothing():
+    story = _sym_story()
+    for implementation in (None, [], "x"):
+        story["implementation"] = implementation
+        assert T.implementation_symbol_findings(story) == []
+        assert T.declared_symbols(story) == {}
+    assert T.implementation_symbol_findings("not a story") == []
+    assert T.declared_symbols("not a story") == {}
+
+
+def test_declared_symbols_returns_creates_and_edits_together_per_valid_path():
+    story = _sym_story(
+        {"src/a.ts": {"creates": ["f", "g"], "edits": ["g", "h"]}, "src/b.ts": {"edits": ["k"]}}
+    )
+    assert T.declared_symbols(story) == {"src/a.ts": {"f", "g", "h"}, "src/b.ts": {"k"}}
+
+
+def test_declared_symbols_leaves_a_malformed_entry_out_and_keeps_the_good_ones():
+    story = _sym_story(
+        {"src/a.ts": {"creates": ["f"]}, "src/b.ts": {"creates": []}, "elsewhere.ts": {"edits": ["x"]}}
+    )
+    assert T.declared_symbols(story) == {"src/a.ts": {"f"}}
+
+
+@pytest.mark.parametrize("symbols", [_ABSENT, None, {}, [], "src/a.ts", 7])
+def test_declared_symbols_an_absent_null_empty_or_non_object_map_is_empty(symbols):
+    assert T.declared_symbols(_sym_story(symbols)) == {}
+
+
+def test_declared_symbols_a_file_with_no_key_is_absent_so_it_stays_a_whole_file_claim():
+    story = _sym_story({"src/a.ts": {"creates": ["f"]}})
+    declared = T.declared_symbols(story)
+    assert "src/b.ts" not in declared and "src/c/" not in declared
+    assert set(declared) < set(story["implementation"]["files"])
+
+
+def test_declared_symbols_returns_sets_and_never_the_documents_own_lists():
+    story = _sym_story({"src/a.ts": {"creates": ["f"]}})
+    declared = T.declared_symbols(story)
+    assert isinstance(declared["src/a.ts"], set)
+    declared["src/a.ts"].add("mutated")
+    assert story["implementation"]["symbols"] == {"src/a.ts": {"creates": ["f"]}}
+
+
+def test_declared_symbols_reads_no_file_and_the_validator_agrees_with_it_on_every_entry(tmp_path):
+    symbols = {
+        "src/a.ts": {"creates": ["f"]},
+        "src/b.ts": {"edits": []},
+        "src/c/": {"edits": ["a b"]},
+        "src/nope.ts": {"edits": ["x"]},
+    }
+    story = _sym_story(symbols)
+    flagged = {key for key in symbols if any("[" + key + "]" in line for line in T.implementation_symbol_findings(story))}
+    assert set(T.declared_symbols(story)) == set(symbols) - flagged == {"src/a.ts"}
+    assert not os.path.exists("src/a.ts"), "nothing here may depend on the file existing"
+
+
+def test_implementation_symbols_r30_is_appended_after_r29_and_calls_the_one_rule():
+    source = inspect.getsource(T.validate_tasks)
+    assert source.index("# R30 ") > source.index("# R29 ")
+    assert source.count("implementation_symbol_findings(") == 1
+    assert "_identity_reasons" not in source

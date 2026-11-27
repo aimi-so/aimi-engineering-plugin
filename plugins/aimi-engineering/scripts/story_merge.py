@@ -3027,9 +3027,10 @@ def verify_refusal_findings(story):
 def rail_and_path_findings(story, other_projects=None, multi_repo=False):
     """Sanitized guard-rail and path findings for one story; [] for a clean one.
 
-    Rails first, then paths, then the cross-repository entries, the order the
-    report keeps. The rules live in tasks.py (guard_rail_findings,
-    implementation_path_findings, cross_repository_file_findings) and are
+    Rails first, then paths, then the symbol declaration, then the
+    cross-repository entries, the order the report keeps. The rules live in
+    tasks.py (guard_rail_findings, implementation_path_findings,
+    implementation_symbol_findings, cross_repository_file_findings) and are
     imported INSIDE this body for the reason verify_refusal_findings gives; this
     function restates none of them. Both callers -- validate-staging and the
     story-merge refusal -- read it, so they cannot disagree about a story.
@@ -3042,14 +3043,46 @@ def rail_and_path_findings(story, other_projects=None, multi_repo=False):
         cross_repository_file_findings,
         guard_rail_findings,
         implementation_path_findings,
+        implementation_symbol_findings,
     )
 
     return [
         rm_sanitize(finding, _FINDING_MAXLEN)
         for finding in guard_rail_findings(story)
         + implementation_path_findings(story)
+        + implementation_symbol_findings(story)
         + cross_repository_file_findings(story, other_projects or (), multi_repo)
     ]
+
+
+SYMBOLS_MISSING_FINDING = (
+    "implementation.symbols is missing; declare, for each implementation.files entry"
+    " that has a nameable symbol, the names the story creates and edits under that"
+    " path, or write {} when no file has a nameable symbol."
+)
+
+
+def symbol_declaration_missing_findings(story):
+    """Sanitized findings for a story whose implementation declares no symbols.
+
+    A story whose `implementation` object has no `symbols` key, or holds an
+    explicit null, is one finding; a present map of any shape is
+    `implementation_symbol_findings`' business (in rail_and_path_findings), and
+    `{}` passes here because it is a declaration that no file has a nameable
+    symbol. A story with no `implementation` object at all has no files to
+    declare symbols for and draws nothing. Always on in validate-staging and
+    opt-in in story-merge (--require-symbols); both read this one function, so
+    they cannot disagree. Measures that a declaration exists, never that it is
+    true.
+    """
+    if not isinstance(story, dict):
+        return []
+    implementation = story.get("implementation")
+    if not isinstance(implementation, dict):
+        return []
+    if implementation.get("symbols") is not None:
+        return []
+    return [rm_sanitize(SYMBOLS_MISSING_FINDING, _FINDING_MAXLEN)]
 
 
 def verification_url_findings_sanitized(story):
@@ -3118,6 +3151,7 @@ def validate_staging(staging_dir, outline=None):
                     entry, layout_keys | tagged_project_keys([entry]), multi_repo
                 )
             )
+            findings.extend(symbol_declaration_missing_findings(entry))
             findings.extend(verification_url_findings_sanitized(entry))
             findings.extend(malformed_outline_token_findings(entry))
         if entries:
@@ -3179,25 +3213,223 @@ def rail_and_path_refusal_lines(stories):
     return lines
 
 
+def symbol_declaration_refusal_lines(stories):
+    """One refusal line per story with no implementation.symbols declaration."""
+    lines = []
+    for story in stories:
+        for finding in symbol_declaration_missing_findings(story):
+            lines.append(
+                "  Story "
+                + story["id"]
+                + " (staged "
+                + str(story.get("_stagedIdx", ""))
+                + "): "
+                + finding
+            )
+    return lines
+
+
+def _created_symbols(story):
+    """The names a story's `implementation.symbols` creates, first-seen order, no repeats."""
+    declared = story["implementation"]["symbols"]
+    names = []
+    for entry in declared.values():
+        for name in entry.get("creates", ()):
+            if name not in names:
+                names.append(name)
+    return names
+
+
+def _outline_produced_names(entry):
+    """([sym or cli names], [sym names]) from an outline entry's `produces` tokens.
+
+    The first list is every name after a `sym:` or `cli:` prefix, which is what a
+    created symbol may equal; the second is the `sym:` names alone, which are the
+    ones a story is expected to create. Both keep order and drop repeats. Anything
+    that is not a string token of one of those two kinds is ignored.
+    """
+    named, symbols = [], []
+    produces = entry.get("produces") if isinstance(entry, dict) else None
+    for token in produces if isinstance(produces, list) else ():
+        if not isinstance(token, str):
+            continue
+        kind, sep, name = token.partition(":")
+        if not sep or kind not in ("sym", "cli") or not name:
+            continue
+        if name not in named:
+            named.append(name)
+        if kind == "sym" and name not in symbols:
+            symbols.append(name)
+    return named, symbols
+
+
+def symbol_produces_findings(stories, outline, staged_idx_of):
+    """Advisory drift between a story's declared symbols and its outline entry.
+
+    `staged_idx_of` is {story id: staged idx}, taken from outline_map before the
+    working `_stagedIdx` key is popped. For each story whose `implementation.symbols`
+    is a map `implementation_symbol_findings` accepts (an absent or malformed map
+    is skipped) and whose staged idx names an outline entry, returns
+    {id, unproduced, uncreated}: `unproduced` is each created name equal to no
+    name after the `sym:` or `cli:` prefix of the entry's `produces` tokens, and
+    `uncreated` each `sym:` produces name no created symbol equals. Exact,
+    case-sensitive. A story with both lists empty draws nothing. Never a refusal.
+    """
+    from tasks import implementation_symbol_findings
+
+    entries = {}
+    for entry in outline if isinstance(outline, list) else ():
+        if isinstance(entry, dict) and isinstance(entry.get("idx"), str):
+            entries.setdefault(entry["idx"], entry)
+    findings = []
+    for story in stories:
+        implementation = story.get("implementation")
+        if not isinstance(implementation, dict) or not isinstance(
+            implementation.get("symbols"), dict
+        ):
+            continue
+        if implementation_symbol_findings(story):
+            continue
+        entry = entries.get(staged_idx_of.get(story["id"]))
+        if entry is None:
+            continue
+        created = _created_symbols(story)
+        named, symbols = _outline_produced_names(entry)
+        unproduced = [name for name in created if name not in named]
+        uncreated = [name for name in symbols if name not in created]
+        if unproduced or uncreated:
+            findings.append(
+                {"id": story["id"], "unproduced": unproduced, "uncreated": uncreated}
+            )
+    return findings
+
+
+def _symbol_produces_message(finding):
+    parts = []
+    if finding["unproduced"]:
+        parts.append(
+            "creates symbols its outline entry never produces: "
+            + _join(", ", finding["unproduced"])
+        )
+    if finding["uncreated"]:
+        parts.append(
+            "its outline entry produces symbols no declaration creates: "
+            + _join(", ", finding["uncreated"])
+        )
+    return "; ".join(parts)
+
+
+def _read_outline_flag(args, verb):
+    """The parsed JSON array `--outline` names, or None when the flag is absent or empty."""
+    outline_path = _flag(args, "--outline", "")
+    if not outline_path:
+        return None
+    try:
+        with open(outline_path, "r", encoding="utf-8") as handle:
+            outline = json.load(handle)
+    except (OSError, ValueError):
+        die("Error: " + verb + ": --outline is not readable JSON: " + outline_path)
+    if not isinstance(outline, list):
+        die("Error: " + verb + ": --outline must hold a JSON array: " + outline_path)
+    return outline
+
+
 def run_validate_staging(args):
     """The validate-only mode: print {idx: findings} and exit 1 when non-empty."""
     staging_dir = _flag(args, "--staging-dir", "")
-    outline_path = _flag(args, "--outline", "")
-    outline = None
-    if outline_path:
-        try:
-            with open(outline_path, "r", encoding="utf-8") as handle:
-                outline = json.load(handle)
-        except (OSError, ValueError):
-            die("Error: validate-staging: --outline is not readable JSON: " + outline_path)
-        if not isinstance(outline, list):
-            die("Error: validate-staging: --outline must hold a JSON array: " + outline_path)
+    outline = _read_outline_flag(args, "validate-staging")
     try:
         report = validate_staging(staging_dir, outline)
     except (AuditRefusal, OSError) as refusal:
         die("Error: validate-staging: " + rm_sanitize(str(refusal), _FINDING_MAXLEN))
     sys.stdout.write(json.dumps(report, ensure_ascii=False, indent=2 if report else None) + "\n")
     return 1 if report else 0
+
+
+_OUTLINE_TOKEN = re.compile(r"outline:([0-9]{2})")
+
+
+def staging_contention(staging_dir, project_root):
+    """The staged-story pairs `validate-wave-contention` would refuse, as a list.
+
+    Each staged `NN-*.json` object (the files `staged_idx_map` lists; one that is
+    not valid JSON or not an object is skipped) becomes a story `outline:<NN>`
+    whose `dependsOn` keeps only the `outline:NN` tokens whose idx has a staged
+    file. Waves come from `tasks.computed_waves`, so a story in a cycle has no
+    wave and is skipped, and `(ident, wave, story)` goes straight to
+    `tasks.wave_symbol_contention` with the bookkeeping declaration built the way
+    `op_validate_wave_contention` builds it. Pairs are read from each finding's
+    `kind`, `wave`, `path`, `symbol` and `ids` only: a `file` finding gives
+    `symbol: None`, a `symbol` one its symbol, a `shared-file` one (a warning)
+    gives none; a finding of three or more stories gives one pair per two of
+    them, the lower outline index first. May raise AuditRefusal or
+    bookkeeping.BookkeepingError.
+    """
+    import bookkeeping
+    from tasks import _story_project_key, computed_waves, wave_symbol_contention
+
+    staged = staged_idx_map(staging_dir)
+    stories = []
+    for idx, path in sorted(staged.items()):
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                value = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(value, dict):
+            continue
+        raw = value.get("dependsOn")
+        kept = []
+        for token in raw if isinstance(raw, list) else ():
+            match = _OUTLINE_TOKEN.fullmatch(token) if isinstance(token, str) else None
+            if match and match.group(1) in staged and token not in kept:
+                kept.append(token)
+        stories.append({**value, "id": "outline:" + idx, "dependsOn": kept})
+
+    waves = computed_waves(stories)
+    declared = None
+    if project_root:
+        config = os.path.join(project_root, ".aimi", "config.json")
+        declared = {
+            key: set(bookkeeping.load_declaration(config, key))
+            for key in sorted({_story_project_key(s) for s in stories})
+        }
+    claimants = [(s["id"], waves.get(s["id"]), s) for s in stories]
+    pairs = []
+    for finding in wave_symbol_contention(claimants, declared):
+        if finding["kind"] not in ("file", "symbol"):
+            continue
+        symbol = finding.get("symbol")
+        ids = finding["ids"]
+        for i, low in enumerate(ids):
+            for high in ids[i + 1 :]:
+                pairs.append(
+                    {
+                        "wave": finding["wave"],
+                        "path": finding["path"],
+                        "symbol": symbol,
+                        "stories": [low, high],
+                    }
+                )
+    return pairs
+
+
+def run_staging_contention(args):
+    """The contention mode: print {"pairs": [...]} on one line, exit 0."""
+    import bookkeeping
+
+    staging_dir = _flag(args, "--staging-dir", "")
+    project_root = os.environ.get("PROJECT_ROOT") or os.getcwd()
+    try:
+        pairs = staging_contention(staging_dir, project_root)
+    except (AuditRefusal, OSError) as refusal:
+        die("Error: staging-contention: " + rm_sanitize(str(refusal), _FINDING_MAXLEN))
+    except bookkeeping.BookkeepingError as refusal:
+        die("Error: staging-contention: " + rm_sanitize(str(refusal), _FINDING_MAXLEN))
+    sys.stdout.write(
+        json.dumps({"pairs": pairs}, ensure_ascii=False, separators=(",", ":")) + "\n"
+    )
+    return 0
 
 
 def _flag(argv, name, default=None):
@@ -3223,6 +3455,8 @@ def main(argv):
     args = argv[1:]
     if "--validate-staging" in args:
         return run_validate_staging(args)
+    if "--staging-contention" in args:
+        return run_staging_contention(args)
     staging_dir = _flag(args, "--staging-dir", "")
     output_path = _flag(args, "--output", "")
     split_mode = _flag(args, "--split", "legacy")
@@ -3238,6 +3472,12 @@ def main(argv):
     roadmap_path = _flag(args, "--roadmap", "")
     base_ref = _flag(args, "--base-ref", "")
     plugin_version = _flag(args, "--plugin-version", "")
+    # Opt-in: without the flag the merge is byte-identical to what it was, and
+    # without --outline no symbol-produces comparison runs. The outline is read
+    # before anything else so an unreadable one costs nothing; its path was
+    # confined by cmd_story_merge before python3 started.
+    require_symbols = "--require-symbols" in args
+    outline = _read_outline_flag(args, "story-merge")
 
     paths = staging_files(staging_dir)
     if not paths:
@@ -3277,6 +3517,18 @@ def main(argv):
             " hold .aimi/ paths; no files were written:",
             rails_and_paths,
         )
+    # The fourth gate, in the same spot for the same reason and with the same
+    # die_list shape, but opt-in: only --require-symbols turns a missing
+    # implementation.symbols declaration into a refusal, so a merge without it
+    # stays byte-identical. validate-staging reports the same finding always.
+    if require_symbols:
+        undeclared = symbol_declaration_refusal_lines(stories)
+        if undeclared:
+            die_list(
+                "Error: story-merge: every story must declare implementation.symbols"
+                " (write {} when no file has a nameable symbol); no files were written:",
+                undeclared,
+            )
     # Computed ONCE, while every story still carries its _stagedIdx, and reused by
     # --foundation below so the two can never resolve an idx differently.
     idx_map = outline_map(stories)
@@ -3372,6 +3624,33 @@ def main(argv):
                 for finding in orphans
             ],
         )
+
+    # The symbol-produces smell runs only with --outline and is a warning in both
+    # modes, never a refusal. Keyed by the staged idx through idx_map: the working
+    # _stagedIdx key was popped above, and the outline entry is found by that idx.
+    symbol_produces = []
+    if outline is not None:
+        staged_idx_of = {}
+        for staged_idx, story_id in idx_map.items():
+            staged_idx_of.setdefault(story_id, staged_idx)
+        symbol_produces = symbol_produces_findings(stories, outline, staged_idx_of)
+        if symbol_produces:
+            warn_list(
+                "Warning: story-merge: symbol-produces smell detected (--agent-mode:"
+                " proceeding):"
+                if agent_mode
+                else "Warning: story-merge: symbol-produces smell detected (heuristic;"
+                " verify before proceeding):",
+                [
+                    "  Story "
+                    + finding["id"]
+                    + ": "
+                    + rm_sanitize(
+                        _symbol_produces_message(finding), _FINDING_MAXLEN
+                    )
+                    for finding in symbol_produces
+                ],
+            )
 
     # Phase 4.3 is a warning in BOTH modes too, same character as 4.2. Its own
     # CANNOT-DETERMINE-THE-VOCABULARY state is reported separately from a
@@ -3469,6 +3748,15 @@ def main(argv):
             "message": "asserts a command implementation.verify does not run",
         }
         for finding in verify_coverage
+    ] + [
+        {
+            "type": "symbol-produces",
+            "storyId": finding["id"],
+            "unproduced": finding["unproduced"],
+            "uncreated": finding["uncreated"],
+            "message": "declared symbols differ from the outline entry's produces tokens",
+        }
+        for finding in symbol_produces
     ]
 
     # Nothing is recomputed here -- this only dispatches on the answer resolve_axis

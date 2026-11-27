@@ -21,6 +21,7 @@ set -uo pipefail
 #   - Archive Task Tests
 #   - Research Lookup Tests
 #   - Extract Sections Tests
+#   - Prototype Anchors and --all-headings Tests (seventeen assertions, after extract-prototype-sections)
 #   - Measure Command File Tests
 #   - Research Figures Tests
 #   - Research GC Tests
@@ -2073,6 +2074,118 @@ PROTOEOF
   assert_contains 'bad\slash' "$stderr_out" "extract-prototype-sections: rejected-anchor warning names the backslash anchor"
 
   rm -rf "$eps_dir"
+}
+
+# extract-sections defaults for h1 and setext input, and the prototype anchor verbs
+# (index-prototype-anchors, kind-tagged extract-prototype-sections anchors,
+# extract-sections --all-headings). Seventeen assertions.
+test_prototype_anchors_and_all_headings() {
+  echo ""
+  echo "=== Testing prototype anchors and extract-sections --all-headings ==="
+
+  local pa_dir
+  pa_dir=$(mktemp -d)
+  mkdir -p "$pa_dir/.aimi/sources/kit"
+
+  local stdout exit_code stderr_out
+
+  # --- extract-sections default path: h1 and setext headings are not matchable ---
+  local md_file="$pa_dir/.aimi/sources/kit/handoff.md"
+  printf '%s\n' '# Overview' 'intro' '' 'Setext Title' '============' 'setext body' '' '## Plain' 'plain body' > "$md_file"
+
+  pushd "$pa_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$md_file" --anchors "$(printf 'Overview\nSetext Title')" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  assert_eq "" "$stdout" "extract-sections: without --all-headings an h1 and a setext heading stay unmatchable"
+  assert_exit_code "0" "$exit_code" "extract-sections: unmatchable h1 and setext anchors still exit 0"
+
+  pushd "$pa_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$md_file" --anchors "Plain" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  assert_eq "$(printf '## Plain\nplain body')" "$stdout" "extract-sections: default output for an h2 below an h1 and a setext heading is unchanged"
+
+  # --- extract-sections --all-headings ---
+  pushd "$pa_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$md_file" --anchors "Overview" --all-headings 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  assert_eq "$(printf '# Overview\nintro\n')" "$stdout" "extract-sections --all-headings: a level 1 ATX heading is matched and closed by the next setext heading"
+
+  pushd "$pa_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$md_file" --anchors "Setext Title" --all-headings 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  assert_eq "$(printf 'Setext Title\n============\nsetext body\n\n## Plain\nplain body')" "$stdout" "extract-sections --all-headings: a setext level 1 heading is sliced to the end of the file, its h2 inside it"
+
+  local fm_file="$pa_dir/.aimi/sources/kit/front.md"
+  printf '%s\n' '---' 'title: Handoff' '---' 'Real' '----' 'real body' '```' 'Fake' '----' '```' > "$fm_file"
+  pushd "$pa_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$fm_file" --anchors "$(printf 'title: Handoff\nFake')" --all-headings 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  assert_eq "" "$stdout" "extract-sections --all-headings: front matter and fenced underline lines are never headings"
+  pushd "$pa_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$fm_file" --anchors "Real" --all-headings 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  assert_contains "real body" "$stdout" "extract-sections --all-headings: a setext level 2 heading after front matter is sliced"
+
+  # --- index-prototype-anchors and kind-tagged extract-prototype-sections ---
+  local html_file="$pa_dir/.aimi/sources/kit/screens.html"
+  cat > "$html_file" << 'ANCHOREOF'
+<div id="app">
+  <section id="login"><h2>Sign in</h2><p>login body</p></section>
+  <div role="tabpanel" id="p-usage" aria-labelledby="t-usage"><h2>Usage</h2><p>usage body</p></div>
+  <button role="tab" id="t-usage" aria-controls="p-usage">Usage tab</button>
+  <h2>Costs $5</h2>
+</div>
+ANCHOREOF
+
+  pushd "$pa_dir" >/dev/null
+  stdout=$("$CLI" index-prototype-anchors "$html_file" 2>"$pa_dir/index.err") && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  stderr_out=$(cat "$pa_dir/index.err")
+  assert_exit_code "0" "$exit_code" "index-prototype-anchors: a prototype with no data-view section exits 0"
+  assert_eq "$(printf 'id:login\nheading:Sign in\nid:p-usage\ntab:Usage tab\nheading:Usage')" "$stdout" "index-prototype-anchors: kind-tagged anchors in document order, the enclosing #app left out"
+  assert_contains "anchor skipped (unsafe character): heading:Costs \$5" "$stderr_out" "index-prototype-anchors: a name holding a dollar sign is left out with a stderr warning"
+
+  local anchor line_ok="yes" indexed_lines html_text
+  html_text=$(cat "$html_file")
+  pushd "$pa_dir" >/dev/null
+  indexed_lines=$("$CLI" index-prototype-anchors "$html_file" 2>/dev/null)
+  [ -n "$indexed_lines" ] || line_ok="no"
+  while IFS= read -r anchor; do
+    stdout=$("$CLI" extract-prototype-sections "$html_file" --anchors "$anchor" 2>/dev/null) || line_ok="no"
+    [ -n "$stdout" ] || line_ok="no"
+    case "$html_text" in *"$stdout"*) ;; *) line_ok="no" ;; esac
+  done <<< "$indexed_lines"
+  popd >/dev/null
+  assert_eq "yes" "$line_ok" "extract-prototype-sections: every indexed line is accepted verbatim and prints a slice of the file"
+
+  pushd "$pa_dir" >/dev/null
+  stdout=$("$CLI" extract-prototype-sections "$html_file" --anchors "id:login" 2>/dev/null)
+  popd >/dev/null
+  assert_eq '<section id="login"><h2>Sign in</h2><p>login body</p></section>' "$stdout" "extract-prototype-sections: id: prints the element byte for byte"
+
+  pushd "$pa_dir" >/dev/null
+  stdout=$("$CLI" extract-prototype-sections "$html_file" --anchors "tab:Usage tab" 2>/dev/null)
+  popd >/dev/null
+  assert_eq '<div role="tabpanel" id="p-usage" aria-labelledby="t-usage"><h2>Usage</h2><p>usage body</p></div>' "$stdout" "extract-prototype-sections: tab: prints the tab panel named by a tab that follows it"
+
+  pushd "$pa_dir" >/dev/null
+  stdout=$("$CLI" extract-prototype-sections "$html_file" --anchors "heading:Sign in" 2>/dev/null)
+  popd >/dev/null
+  assert_eq '<h2>Sign in</h2><p>login body</p></section>
+  <div role="tabpanel" id="p-usage" aria-labelledby="t-usage">' "$stdout" "extract-prototype-sections: heading: runs from its tag to the next heading of the same level"
+
+  pushd "$pa_dir" >/dev/null
+  stderr_out=$("$CLI" extract-prototype-sections "$html_file" --anchors "id:ghost" 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  assert_exit_code "0" "$exit_code" "extract-prototype-sections: an unmatched kind-tagged anchor exits 0"
+  assert_contains "no section matched anchor: id:ghost" "$stderr_out" "extract-prototype-sections: an unmatched kind-tagged anchor keeps the no-match warning"
+
+  pushd "$pa_dir" >/dev/null
+  stderr_out=$("$CLI" index-prototype-anchors "../escape.html" 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  assert_exit_code "1" "$exit_code" "index-prototype-anchors: a missing file exits 1"
+
+  rm -rf "$pa_dir"
 }
 
 # measure-command-file: the structural size of one markdown file.
@@ -5599,7 +5712,7 @@ test_validate_staging() {
 
   local bad=".aimi/.vs-bad-$$" good=".aimi/.vs-good-$$"
   mkdir -p "$bad" "$good"
-  local head='{"title":"T","description":"d","acceptanceCriteria":["Typecheck passes"],"status":"pending","dependsOn":[],"notes":"","implementation":{"files":["a.py"],"approach":"x","verify":"'
+  local head='{"title":"T","description":"d","acceptanceCriteria":["Typecheck passes"],"status":"pending","dependsOn":[],"notes":"","implementation":{"files":["a.py"],"symbols":{},"approach":"x","verify":"'
   printf '%s' "${head}"'true\nfalse\ntrue\n"}}' > "$bad/01-a.json"
   printf '%s' "${head}"'set -e\ntrue\nfalse\n"}}' > "$bad/02-b.json"
   printf '%s' "${head}"'tsc --noEmit"}}' > "$good/01-a.json"
@@ -9744,6 +9857,7 @@ main() {
   echo "--- Extract Sections Tests ---"
   test_extract_sections
   test_extract_prototype_sections
+  test_prototype_anchors_and_all_headings
 
   # measure-command-file tests — own isolated temp dir, own .aimi/ root
   echo ""

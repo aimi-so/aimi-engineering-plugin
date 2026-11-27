@@ -4,6 +4,8 @@
 
 ### Offer a Pull Request
 
+**Unverified screen stop, first.** Before the forge-account question and the publish question, run the Unverified Screen Stop entry of `commands/execute.md` (`commands/references/execute/run-end-unverified-screens.md`), once for the phase. When it leaves `UNVERIFIED_STOP=stop`, set `PHASE_PUBLISH=none`, raise neither question, and let the publish loop's `none` branch print its decline line; the report then lists the stories and names `/aimi:open-pr --branch [PHASE_BRANCH]`. On `continue` everything below is unchanged.
+
 Best-effort only — never reverts or changes the already-`completed` status on failure or refusal. Runs once per participating repository — the same project groups **Mark Phase Completed**'s report above already derived. Re-derived fresh in this block, since each Bash call is an isolated shell and nothing from that earlier block persists here:
 
 ```bash

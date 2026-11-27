@@ -5456,6 +5456,69 @@ EOF
   rm -rf "$iso_dir"
 }
 
+# Two sessions under ONE .aimi/ root share .aimi/current-tasks. Session B points
+# it at its own plan; session A then writes a flat review of ITS run. Without
+# --tasks-file the review is named after B's plan -- the usage-validation loop
+# wrote whole rounds that way. Every naming assertion below fails against a
+# write-review that does not know --tasks-file (it refuses the flag).
+test_write_review_tasks_file_names_the_callers_run() {
+  echo ""
+  echo "=== write-review --tasks-file: a flat review is named after the caller's run, not the shared pointer ==="
+
+  local iso_dir
+  iso_dir=$(mktemp -d)
+  mkdir -p "$iso_dir/.aimi/tasks"
+
+  local plan
+  for plan in 2026-11-26-mine 2026-11-26-theirs; do
+    cat > "$iso_dir/.aimi/tasks/${plan}-tasks.json" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "feat: Flat", "type": "feat", "branchName": "feat/flat", "maxConcurrency": 2},
+  "userStories": []
+}
+EOF
+  done
+
+  pushd "$iso_dir" >/dev/null
+  # The other session is the one that pointed current-tasks last.
+  "$CLI" init-session --file "$iso_dir/.aimi/tasks/2026-11-26-theirs-tasks.json" >/dev/null 2>&1
+
+  local output exit_code reported
+  output=$(printf '# Round 9\n' | "$CLI" write-review --kind usage-validation-r9 --tasks-file "$iso_dir/.aimi/tasks/2026-11-26-mine-tasks.json" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "write-review --tasks-file: accepts the flag in flat mode"
+  reported=$(printf '%s' "$output" | jq -r '.review' 2>/dev/null)
+  assert_eq "$iso_dir/.aimi/reviews/2026-11-26-mine-tasks-usage-validation-r9.md" "$reported" "write-review --tasks-file: names the review after the given tasks file, not current-tasks"
+  assert_eq "false" "$([ -f "$iso_dir/.aimi/reviews/2026-11-26-theirs-tasks-usage-validation-r9.md" ] && echo true || echo false)" "write-review --tasks-file: nothing is written under the other session's plan name"
+
+  # A path relative to the .aimi root resolves the same way.
+  output=$(printf '# Round 10\n' | "$CLI" write-review --kind usage-validation-r10 --tasks-file ".aimi/tasks/2026-11-26-mine-tasks.json" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "write-review --tasks-file: accepts a root-relative path"
+  assert_eq "true" "$([ -f "$iso_dir/.aimi/reviews/2026-11-26-mine-tasks-usage-validation-r10.md" ] && echo true || echo false)" "write-review --tasks-file: the root-relative path names the same run"
+
+  # Refusals: the flag beside the phase pair, an empty value, a missing file and
+  # a path outside the project. None of them writes anything.
+  local before after
+  before=$(find "$iso_dir/.aimi/reviews" -type f | wc -l | tr -d ' ')
+  output=$(printf 'x\n' | "$CLI" write-review --feature f --phase 1 --tasks-file ".aimi/tasks/2026-11-26-mine-tasks.json" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "write-review --tasks-file: refused beside --feature/--phase"
+  assert_contains "cannot be combined with --feature/--phase" "$output" "write-review --tasks-file: says why the combination was refused"
+  output=$(printf 'x\n' | "$CLI" write-review --tasks-file 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "write-review --tasks-file: refuses the flag with no path"
+  output=$(printf 'x\n' | "$CLI" write-review --tasks-file ".aimi/tasks/nope-tasks.json" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "write-review --tasks-file: refuses a tasks file that does not exist"
+  assert_contains "tasks file not found" "$output" "write-review --tasks-file: says the tasks file was not found"
+  output=$(printf 'x\n' | "$CLI" write-review --tasks-file "/etc/passwd" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "write-review --tasks-file: refuses a path outside the project"
+  after=$(find "$iso_dir/.aimi/reviews" -type f | wc -l | tr -d ' ')
+  assert_eq "$before" "$after" "write-review --tasks-file: no refusal wrote a review"
+  popd >/dev/null
+
+  assert_contains "[--tasks-file <path>]" "$("$CLI" help 2>&1)" "help: documents write-review's --tasks-file flag"
+
+  rm -rf "$iso_dir"
+}
+
 # Two reviews of ONE phase: Step 5's per-story design review and the phase
 # visual gate's review both name the same feature and phase. Without --kind the
 # second write replaced the first -- and the gate's review is the file
@@ -10272,6 +10335,7 @@ main() {
   test_write_review_survives_the_session
   test_write_review_refuses_before_it_writes
   test_write_review_flat_mode_derives_from_tasks_basename
+  test_write_review_tasks_file_names_the_callers_run
   test_write_review_kind_keeps_two_reviews_apart
   test_write_review_registered_in_help_and_dispatcher
 

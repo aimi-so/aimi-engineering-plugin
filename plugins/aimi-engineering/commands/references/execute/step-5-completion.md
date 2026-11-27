@@ -50,6 +50,8 @@ echo "usage-validation-gate: $USAGE_GATE"
 
 **When it prints `usage-validation-gate: hold`:** the three container steps and the push question below do not run. The dev server keeps running, nothing is pushed, no container is removed, and the story-level report below still prints, with the Usage Validation section and the held Next Steps. The verdict is read from the stored record, so a failing record kept after a re-validation that could not run still holds. **When it prints `go`:** continue unchanged.
 
+**Unverified screen stop, once, on `go`.** With `PHASE_MODE=false`, run the Unverified Screen Stop entry of `commands/execute.md` (`commands/references/execute/run-end-unverified-screens.md`) before any container step; phase mode ran it at Offer a Pull Request and does not ask again. On `UNVERIFIED_STOP=stop` skip the three container steps and the push confirmation below, as for `hold`.
+
 **When `usage-validation-gate: go` and `CONTAINER_MODE=true`:** read `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Container Mode: Stop the Dev Server, § Container Mode: Push the Branch, and § Container Mode: Remove the Container, and run all three, in that order, before continuing below — raising the push confirmation immediately below in between, after every dev-server stop has completed and before anything is pushed. When `CONTAINER_MODE=false` (inline mode) or the gate printed `hold`, skip all three, skip the confirmation with them, and continue directly below.
 
 **Confirm before this container's branch reaches `origin`.** The contract this question satisfies is defined once in `${CLAUDE_PLUGIN_ROOT}/commands/references/publish-confirmation.md` and is not restated here. The question itself lives in this file rather than in that reference — or in `container-execution.md`, which owns the push it gates — because install.sh translates only a command body and the REFERENCE_ALLOWLIST_FULL subtrees (plan/ and execute/) with the full command-body rewrite, while container-execution.md gets only the REFERENCE_ALLOWLIST_LITERALS host-literal rewrite and Check 14 refuses picker markup in it and every other reference. Resolve interactivity fresh — each Bash call is an isolated shell:
@@ -437,6 +439,8 @@ Resolve gates with: $AIMI_CLI gate-pass <story-id> [--option 'value']
 - Open a PR: `/aimi:open-pr --branch [branchName]`
 - Run `/aimi:review [branchName]` for code review
 ```
+
+**When `UNVERIFIED_STOP=stop`:** use the Next Steps of `commands/references/execute/run-end-unverified-screens.md` in place of the ones above and append its `## Unverified Screen Stories` section; in agent mode append the section alone.
 
 **When `usage-validation-gate: hold`:** usage validation is failing, so use this block in place of the ones above, whichever mode ran. Nothing was pushed, no container was removed and the dev server is still running. Re-running `/aimi:execute` validates again; `/aimi:open-pr` appears only inside the warning.
 ```

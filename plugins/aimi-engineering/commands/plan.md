@@ -295,6 +295,11 @@ Before running this phase, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/plan/p
 Applies when: `resolvedPrototypePaths` holds at least one `.html` path; otherwise skip, with no prototype slicing.
 Before running this phase (prototypes present), Read ${CLAUDE_PLUGIN_ROOT}/commands/references/plan/phase-3d-prototype-blocks.md in full.
 
+### Per-Entry Prototype Handoff Section Block Preparation
+
+Applies when: `prototypeHandoffPaths` is non-empty; otherwise skip, with no handoff slicing.
+Before running this phase (handoff present), Read ${CLAUDE_PLUGIN_ROOT}/commands/references/plan/phase-3d-handoff-blocks.md in full.
+
 ### Shared Context Files
 
 Applies when: every run; sets `expanderContextMode` to `files` or `inline` once, before the first expander spawn.

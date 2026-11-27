@@ -36,7 +36,15 @@ while IFS= read -r VALIDATE_FILE; do
   $AIMI_CLI validate-deps || exit 1
   $AIMI_CLI validate-stories || exit 1
   $AIMI_CLI validate-tasks || exit 1
-  $AIMI_CLI validate-wave-contention || exit 1
+  # phase45-wave-contention:begin
+  WC_CLEAN='def clean: tostring | gsub("[\\n\\r]"; " ") | gsub("`"; "") | gsub("\\$\\("; "") | .[0:200];'
+  if ! WC_JSON=$($AIMI_CLI validate-wave-contention); then
+    printf '%s\n' "$WC_JSON" | jq -r -s "$WC_CLEAN"' .[].errors[]? | clean' >&2
+    echo "validate-wave-contention rejected $VALIDATE_FILE" >&2
+    exit 1
+  fi
+  printf '%s\n' "$WC_JSON" | jq -r -s "$WC_CLEAN"' .[].warnings[]? | "  wave-contention warning: " + clean'
+  # phase45-wave-contention:end
   WAVES_JSON=$($AIMI_CLI validate-waves)
   if ! printf '%s\n' "$WAVES_JSON" | jq -e -s 'length > 0 and all(.valid)' >/dev/null; then
     printf '%s\n' "$WAVES_JSON" | jq -r -s '.[].errors[]?' >&2
@@ -70,7 +78,12 @@ done <<< "$VALIDATE_FILES"
 
 **`validate-waves` is the one validator read from its payload rather than from `$?`, and that is deliberate — do not normalize it into the shape of its four neighbours.** Its body ends at the crossing with no `return 1`: an invalid verdict still exits 0, a contract stated in comments on both sides (`cmd_validate_waves` in `aimi-cli.sh`, `op_validate_waves` in `tasks.py`) and pinned by assertions in `test-aimi-cli-part1-core.sh` against a wave-mismatch fixture, so that nothing "fixes" it into a regression for a caller branching on the status. A `|| exit 1` here would therefore be vacuous — it would read a status that is always 0 and wave every mismatch through. The verdict lives in `.valid`; `-s` slurps because one verdict is emitted per document and a tasks file may hold more than one, and `length > 0` makes an empty payload — what a hard CLI failure leaves behind — a failure rather than a silent pass. What it catches is a planning error a human reads in the file, not something dispatch consumes: `wave` is read in exactly one line of `tasks.py`, inside `validate_waves` itself, and `list-ready` ignores the field entirely. A mismatch this reports is fixed with `$AIMI_CLI normalize-waves <file>`, which recomputes every `wave` by the identical rule (`story_merge.py`'s own `compute_waves`), never by hand-editing the stored number.
 
-**`validate-wave-contention` is read from `$?` like the four validators above it, not from its payload like `validate-waves` beside it — a NEW verb, not a widening of that one.** It refuses a wave whose stories declare the same path in `implementation.files`, so two executors dispatched into the same wave never race each other for one literal and discover the collision only at merge time. Unlike `validate-waves`, an invalid verdict here really does exit non-zero, which is why the call above needs no `WAVES_JSON`-style capture-and-inspect — the bare `|| exit 1` already stops the loop. Its remedy is never `normalize-waves`: that verb recomputes a *stored* wave from `dependsOn`, and cannot move a path out of `implementation.files`. The fix for a real contention is a `dependsOn` edge chaining the two stories (which moves the later one to a later computed wave), or narrowing `implementation.files` to the concrete paths each story actually touches — never a file split invented just to satisfy the check.
+**`validate-wave-contention` is read from `$?` like the four validators above it, not from its payload like `validate-waves` beside it — a NEW verb, not a widening of that one.** It refuses a wave whose stories collide on a path of `implementation.files` or on a symbol of `implementation.symbols`, so two executors dispatched into the same wave never race each other for one literal and discover it only at merge time. Unlike `validate-waves`, an invalid verdict here really does exit non-zero, so the marked block keeps `$?` as the refusal signal: it captures stdout, and on a non-zero exit prints every `errors[]` entry to stderr, then `validate-wave-contention rejected <file>`, and exits 1. On exit 0 it prints each `warnings[]` string on its own stdout line as `  wave-contention warning: <text>` and goes on to `validate-waves`; a verdict with no `warnings` key prints nothing. `-s` slurps one verdict per document, and every printed string is sanitized by the same four-step rule as Step 3, because paths and symbol names are agent-written. A stored `wave` is never the cause and is never edited. The remedy depends on the outcome:
+- **Symbol refusal** (`Wave contention: wave N path P symbol S claimed by ...`): add a `dependsOn` edge chaining the claimants. A shared symbol is a real collision, so declarations and narrower files do not clear it.
+- **File-level refusal** (`... path P claimed by ...`): a `dependsOn` edge, narrowing `implementation.files` to the paths each story touches, or an `implementation.symbols` entry for P on EVERY claimant when their symbols are disjoint (a missing, empty or malformed entry counts as none and keeps the refusal). Never a file split invented just to satisfy the check.
+- **Warning** (`... shared by N stories with disjoint symbols`): exits 0 and needs no fix; it shows a demoted collision before execution.
+
+A file with no nameable symbol (a shared literal such as `EXPECTED_ASSERTIONS`) is left undeclared, as a whole-file claim. Only stories of the same project are compared. Phase 1's integrated wave check (`wave-verify-commands`, `commands/references/execute/wave-reconcile.md`) remains the net for undeclared edits and shared literals.
 
 **If any validation fails (non-zero exit):**
 1. Read the error output to identify the issues

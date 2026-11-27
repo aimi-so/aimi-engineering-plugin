@@ -10882,6 +10882,13 @@ test_setup_branch() {
   default_commit=$(git rev-parse origin/main 2>/dev/null)
   assert_eq "created-from-default" "$action" "setup-branch: new from default (on default branch) — action"
   assert_eq "$default_commit" "$base_commit" "setup-branch: new from default (on default branch) — base is origin/main"
+  # Cut from origin/main, the new branch must not take it as its upstream: with
+  # @{u}=origin/main a bare `git push` is refused or, under
+  # push.default=upstream, lands on main. autoSetupMerge is pinned so a global
+  # setting cannot mask the default this guards against.
+  git config branch.autoSetupMerge true
+  "$CLI" setup-branch feat/brand-new-pinned --default-branch main >/dev/null 2>&1
+  assert_eq "" "$(git config --get branch.feat/brand-new-pinned.remote 2>/dev/null)" "setup-branch: new from default (on default branch) — no upstream recorded against origin/main"
   rm -f "$stderr_file"
 
   popd >/dev/null
@@ -11008,6 +11015,7 @@ test_setup_branch() {
   assert_eq "created-from-base" "$action" "setup-branch --base main (unmerged current): action"
   assert_eq "main" "$base_field" "setup-branch --base main: base field in JSON"
   assert_eq "$main_commit" "$based_commit" "setup-branch --base main: new branch tip equals origin/main"
+  assert_eq "" "$(git config --get branch.feat/based-on-main.remote 2>/dev/null)" "setup-branch --base main: no upstream recorded against the base"
   rm -f "$stderr_file"
 
   popd >/dev/null

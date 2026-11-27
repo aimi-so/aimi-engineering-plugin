@@ -160,6 +160,7 @@ from roadmap import (
     TERMINAL_STORY_STATUSES,
     _completed_gate_has_marker,
     _completed_story_ids,
+    _identity_reasons,
     _json_type,
     _num,
     ground_truth,
@@ -1842,10 +1843,110 @@ def _story_project_key(story):
     return project if isinstance(project, str) and project else "."
 
 
+def wave_symbol_contention(claimants, declared=None):
+    """The wave-contention rule, before it is worded: findings, never strings.
+
+    `claimants` is an iterable of `(ident, wave, story)` in document order; a
+    `None` wave (a story `computed_waves` never placed) is skipped. `declared`
+    has `wave_contention`'s shape -- a map of project key to the set of paths
+    that project declared as bookkeeping. Pure: no file is read, and no story is
+    changed.
+
+    Stories are compared only inside one wave AND one project key
+    (`_story_project_key`), so two stories of different projects that list one
+    literal path are two different files and never contend. A path only one
+    story claims is no finding, and a story never contends with itself: its own
+    repeated paths count once. The same skip guards as ever apply -- a story
+    whose `implementation` is not an object, or whose `implementation.files` is
+    not a list, claims nothing, and a non-string entry is no path.
+
+    A path with several claimants, whose project does not declare it as
+    bookkeeping, is classified by what each claimant declared for it through
+    `declared_symbols` -- the one reader of `implementation.symbols`, so an
+    entry the validator refuses is "not declared" here as well:
+
+      * `file`        some claimant has no entry for the path: the whole file is
+                      its claim, and the refusal is today's, one per path.
+      * `symbol`      every claimant has an entry and some name is in two or
+                      more of them: one finding per shared name, sorted, its
+                      `ids` the claimants of THAT name. No other finding is made
+                      for the path.
+      * `shared-file` every claimant has an entry and no name is shared: not a
+                      refusal, and `ids` is every claimant.
+
+    A finding is `{kind, wave, project, path, ids}` (a `symbol` one adds
+    `symbol`), ordered by wave ascending, path in first-appearance order within
+    the wave, symbol sorted, ids in document order.
+    """
+    by_wave = {}
+    symbols_of = {}
+    for ident, wave, story in claimants:
+        if wave is None:
+            continue
+        implementation = jq_index(story, "implementation", STORY)
+        if jq_type(implementation) != "object":
+            continue
+        files = jq_index(implementation, "files", STORY + ".implementation")
+        if not isinstance(files, list):
+            continue
+        project = _story_project_key(story)
+        groups = by_wave.setdefault(wave, {})
+        seen = set()
+        for entry in files:
+            if not isinstance(entry, str) or entry in seen:
+                continue
+            seen.add(entry)
+            groups.setdefault((project, entry), []).append((ident, story))
+
+    findings = []
+    for wave in sorted(by_wave):
+        for (project, path), claims in by_wave[wave].items():
+            if len(claims) < 2:
+                continue
+            if declared and path in declared.get(project, ()):
+                continue
+            ids = [ident for ident, _ in claims]
+            names = []
+            for ident, story in claims:
+                if id(story) not in symbols_of:
+                    symbols_of[id(story)] = declared_symbols(story)
+                names.append(symbols_of[id(story)].get(path))
+            if any(entry is None for entry in names):
+                findings.append(
+                    {"kind": "file", "wave": wave, "project": project, "path": path, "ids": ids}
+                )
+                continue
+            shared = sorted(
+                name for name in set().union(*names)
+                if sum(1 for entry in names if name in entry) > 1
+            )
+            if not shared:
+                findings.append(
+                    {"kind": "shared-file", "wave": wave, "project": project, "path": path, "ids": ids}
+                )
+                continue
+            for name in shared:
+                findings.append(
+                    {
+                        "kind": "symbol", "wave": wave, "project": project, "path": path,
+                        "symbol": name,
+                        "ids": [ident for (ident, _), entry in zip(claims, names) if name in entry],
+                    }
+                )
+    return findings
+
+
 def wave_contention(doc, declared=None):
     """One error per `implementation.files` path two or more stories in the
     SAME wave both claim -- the check that catches two executors racing each
     other for one literal, which `validate_waves` never asked about at all.
+
+    The rule is `wave_symbol_contention`; this function only builds its
+    claimants and words what it finds. A `file` finding is the original error,
+    a `symbol` finding is one error per shared symbol, and a `shared-file`
+    finding is a WARNING: the verdict gains a `warnings` key only when one
+    exists, so a document with no `implementation.symbols` and no cross-project
+    overlap answers exactly as before.
 
     KEYED ON THE COMPUTED WAVE, NEVER THE STORED ONE. `list-ready` never reads
     `wave` -- `ready_stories` decides readiness from status plus completed
@@ -1862,60 +1963,46 @@ def wave_contention(doc, declared=None):
 
     A story `computed_waves` never assigned (a cycle, a dangling `dependsOn`)
     is skipped, exactly as `validate_waves` skips it -- reporting those is
-    `validate_deps`' job. A story whose own `implementation` is not an object,
-    or whose `implementation.files` is not a list, is skipped too: the guard is
-    R17's, reused verbatim rather than respelled (see its comment, and the
-    account beside `.project` in `validate_stories`). Each story's own repeated
-    paths are deduplicated before comparison, so a story cannot contend with
-    itself.
+    `validate_deps`' job. The guards on `implementation` and `implementation.files`
+    are R17's, reused verbatim rather than respelled (see its comment, and the
+    account beside `.project` in `validate_stories`).
 
-    Errors are built in a deterministic order because the verdict is compared
-    byte for byte by tests: waves ascending, paths in first-appearance document
-    order within a wave, ids in document order -- which plain dict insertion
-    order already gives, since stories are walked in document order throughout.
+    Errors are built in the rule's deterministic order because the verdict is
+    compared byte for byte by tests: waves ascending, paths in first-appearance
+    document order within a wave, ids in document order.
 
     `declared` is optional: a map of project key to the set of paths that
-    project declared as bookkeeping. A path with several claimants is exempt
-    only when EVERY claimant's own project key declares it, so one undeclared
-    claimant keeps the refusal. None or empty takes the original code path.
+    project declared as bookkeeping. Every claimant of a compared path shares
+    one project, so the path is exempt when that project declares it. None or
+    empty takes the original code path.
     """
     stories = _stories(doc)
     assigned = computed_waves(stories)
-    by_wave = {}
-    project_of = {}
+    claimants = []
     for story in stories:
         story_id = jq_index(story, "id", STORY)
-        wave = assigned.get(story_id)
-        if wave is None:
-            continue
-        implementation = jq_index(story, "implementation", STORY)
-        if jq_type(implementation) != "object":
-            continue
-        files = jq_index(implementation, "files", STORY + ".implementation")
-        if not isinstance(files, list):
-            continue
-        if declared:
-            project_of[story_id] = _story_project_key(story)
-        claims = by_wave.setdefault(wave, {})
-        seen = set()
-        for entry in files:
-            if not isinstance(entry, str) or entry in seen:
-                continue
-            seen.add(entry)
-            claims.setdefault(entry, []).append(story_id)
+        claimants.append((story_id, assigned.get(story_id), story))
 
     errors = []
-    for wave in sorted(by_wave):
-        for path, ids in by_wave[wave].items():
-            if len(ids) > 1:
-                if declared and all(path in declared.get(project_of.get(i), ()) for i in ids):
-                    continue
-                errors.append(
-                    "Wave contention: wave " + str(wave)
-                    + " path " + path
-                    + " claimed by " + ", ".join(ids)
-                )
-    return _verdict(errors)
+    warnings = []
+    for finding in wave_symbol_contention(claimants, declared):
+        head = "wave " + str(finding["wave"]) + " path " + finding["path"]
+        if finding["kind"] == "file":
+            errors.append("Wave contention: " + head + " claimed by " + ", ".join(finding["ids"]))
+        elif finding["kind"] == "symbol":
+            errors.append(
+                "Wave contention: " + head + " symbol " + finding["symbol"]
+                + " claimed by " + ", ".join(finding["ids"])
+            )
+        else:
+            warnings.append(
+                "Wave contention warning: " + head + " shared by " + str(len(finding["ids"]))
+                + " stories with disjoint symbols: " + ", ".join(finding["ids"])
+            )
+    verdict = _verdict(errors)
+    if warnings:
+        verdict["warnings"] = warnings
+    return verdict
 
 
 # ---------------------------------------------------------------------------
@@ -2232,8 +2319,17 @@ def spec_contains(spec_path, needle, section, normalize):
     return needle_bytes in body
 
 
-def confined_spec_path(project_root, relative):
+def confined_spec_path(project_root, relative, subtree=None):
     """Resolve a spec path against PROJECT_ROOT and REFUSE one that escapes it.
+
+    `subtree`, when given, narrows the boundary from the project root to one
+    directory beneath it (a path relative to PROJECT_ROOT, such as
+    ".aimi/sources"): the resolved path must then be that directory or lie
+    under its realpath, so a symlink inside the subtree that points elsewhere
+    in the project is refused as an escape too. The default None is the project
+    root and leaves every existing caller's answer exactly as it was. The
+    comparison stays in this one function so that no caller grows a prefix test
+    of its own.
 
     THE ONE PLACE THIS IS DECIDED, and it is decided rather than left. A tasks
     file is a document /aimi:plan wrote, but it is also a file a human edits and
@@ -2268,7 +2364,7 @@ def confined_spec_path(project_root, relative):
             resolved = os.path.join(os.path.realpath(parent), os.path.basename(path))
         else:
             resolved = path
-    root = os.path.realpath(project_root)
+    root = os.path.realpath(project_root if subtree is None else project_root + "/" + subtree)
     return path, resolved == root or resolved.startswith(root + os.sep)
 
 
@@ -2552,6 +2648,41 @@ def prototype_superseded_shape_errors(superseded):
                     where + " has unknown key \"" + str(key)
                     + "\" (allowed: path, decision, note)"
                 )
+
+    return problems
+
+
+def prototype_handoff_paths_shape_errors(handoff_paths):
+    """`metadata.prototypeHandoffPaths`'s shape, for R29. Returns a list of
+    suffixes.
+
+    The key lists the handoff documents of an imported prototype kit, each an
+    AIMI_ROOT-relative path under `.aimi/sources/`. It is omitted-when-empty
+    like its siblings: ABSENT is valid and skipped by the caller, and `[]` gets
+    a message of its own telling the writer to omit the key. Unlike the
+    siblings an explicit `null` is NOT the same as absent -- the caller reads
+    presence with `in` -- so it arrives here and is refused as not an array.
+
+    Well-formed means a non-empty array of non-empty strings, each ending in
+    `.md`. Where a path points is the CALLER's job, since it needs
+    project_root and decides through confined_spec_path with the
+    `.aimi/sources` subtree; this helper judges shape only.
+    """
+    if jq_type(handoff_paths) != "array":
+        return [" is not an array (expected [\".aimi/sources/<kit>/<file>.md\", …])"]
+
+    if not handoff_paths:
+        return [
+            " is an empty array — omit the key entirely when the kit has no handoff"
+        ]
+
+    problems = []
+    for index, entry in enumerate(handoff_paths):
+        where = "[" + str(index) + "]"
+        if not isinstance(entry, str) or not entry:
+            problems.append(where + " is not a non-empty string")
+        elif not entry.endswith(".md"):
+            problems.append(where + " does not end in .md: " + entry)
 
     return problems
 
@@ -2875,6 +3006,151 @@ def implementation_path_findings(story):
                 )
             )
     return findings + implementation_outputs_findings(story)
+
+
+# The symbol declaration of `implementation.symbols`. A story that shares a
+# file with a sibling says, per file it lists in `implementation.files`, which
+# names it creates and which it edits, so a later wave check can tell two
+# stories that merely touch one file from two that touch the same symbol. It is
+# LEXICAL like the path rule above -- strings and containers only, no
+# filesystem access -- and one private per-entry helper, _symbol_entry_problem,
+# decides BOTH implementation_symbol_findings (the validator's reading) and
+# declared_symbols (the wave check's reading), so the two cannot disagree about
+# which entries count as declared. A name is judged by roadmap.py's
+# _identity_reasons, the rule an identity already answers to, called with an
+# empty description because a symbol has none.
+IMPLEMENTATION_SYMBOLS_FIELD = "implementation.symbols"
+SYMBOL_KINDS = ("creates", "edits")
+
+SYMBOLS_SHAPE_REMEDY = (
+    "write an object keyed by an implementation.files entry, or leave the key out"
+)
+SYMBOLS_ENTRY_REMEDY = (
+    "write the key exactly as an implementation.files entry and, under it, an "
+    "object with a creates and/or edits list of symbol names"
+)
+
+
+def _symbol_name_reason(name):
+    """The first reason `_identity_reasons` gives a symbol name, or `None`.
+
+    Only the clause before the reason's own ` -- ` remedy is kept: the remedy
+    talks about identities and contracts, not symbols, and the finding carries
+    its own. The clause is made safe to quote the way `_path_echo` makes a
+    value safe -- a backtick and a `$(` can appear in it, because the shell
+    metacharacter reason names the character it found.
+    """
+    reasons = _identity_reasons(name, "")
+    if not reasons:
+        return None
+    text = reasons[0].split(" -- ")[0].replace("`", "'")
+    while "$(" in text:
+        text = text.replace("$(", "(")
+    return text
+
+
+def _symbol_entry_problem(path, value, files):
+    """The first reason one `implementation.symbols` entry is unusable, or None.
+
+    `files` is the story's `implementation.files` as given. The checks run in a
+    fixed order so the same bad entry always draws the same reason: a key that
+    is no entry of `files`, a value that is not an object, a key other than
+    `creates` and `edits`, a kind that is not a list of strings, no name at all,
+    then the first name `_identity_reasons` refuses. Returns `(reason, shown)`,
+    `shown` being the value the finding echoes, or `None` for a good entry.
+    """
+    listed = isinstance(files, list) and any(
+        isinstance(entry, str) and entry == path for entry in files
+    )
+    if not listed:
+        return ("is not an entry of implementation.files", path)
+    if not isinstance(value, dict):
+        return ("is not an object", value)
+    for key in value:
+        if key not in SYMBOL_KINDS:
+            return ("has a key other than creates and edits", key)
+    total = 0
+    for kind in SYMBOL_KINDS:
+        if kind not in value:
+            continue
+        names = value[kind]
+        if not isinstance(names, list):
+            return (kind + " is not a list", names)
+        for name in names:
+            if not isinstance(name, str):
+                return (kind + " holds a name that is not a string", name)
+            reason = _symbol_name_reason(name)
+            if reason is not None:
+                return (kind + " holds a name that is refused: " + reason, name)
+            total += 1
+    if total == 0:
+        return ("names no symbol under creates or edits", value)
+    return None
+
+
+def _symbols_map(story):
+    """`implementation.symbols` when it is an object, otherwise `None`."""
+    implementation = _story_implementation(story)
+    if implementation is None:
+        return None
+    declared = implementation.get("symbols")
+    return declared if isinstance(declared, dict) else None
+
+
+def implementation_symbol_findings(story):
+    """One sentence per bad `implementation.symbols` entry of a story.
+
+    An absent key draws nothing: requiring the key is a separate rule. A key
+    that is present, an explicit null included, and is not an object is exactly
+    one finding about the field as a whole, with no per-entry findings layered
+    on top of it. `{}` is valid and means every file is a whole-file claim.
+    Every other finding is one per path key, and the offending value is echoed
+    through `_path_echo` and never repaired.
+    """
+    implementation = _story_implementation(story)
+    if implementation is None or "symbols" not in implementation:
+        return []
+    declared = implementation["symbols"]
+    if not isinstance(declared, dict):
+        return [
+            IMPLEMENTATION_SYMBOLS_FIELD + " is not an object (value: "
+            + _path_echo(declared) + "); " + SYMBOLS_SHAPE_REMEDY + "."
+        ]
+    files = implementation.get("files")
+    findings = []
+    for path, value in declared.items():
+        problem = _symbol_entry_problem(path, value, files)
+        if problem is None:
+            continue
+        reason, shown = problem
+        findings.append(
+            IMPLEMENTATION_SYMBOLS_FIELD + "[" + _path_echo(path) + "] " + reason
+            + " (value: " + _path_echo(shown) + "); " + SYMBOLS_ENTRY_REMEDY + "."
+        )
+    return findings
+
+
+def declared_symbols(story):
+    """`{path: set of names}` for the `implementation.symbols` entries that hold.
+
+    Creates and edits are read together: a wave check asks whether two stories
+    name the same symbol, not what each does to it. Only a path entry that draws
+    no finding appears, so a malformed entry counts as not declared, and a file
+    of `implementation.files` with no key is absent too -- a whole-file claim.
+    An absent, null or non-object map is `{}`. Pure and lexical.
+    """
+    declared = _symbols_map(story)
+    if declared is None:
+        return {}
+    files = _story_implementation(story).get("files")
+    result = {}
+    for path, value in declared.items():
+        if _symbol_entry_problem(path, value, files) is not None:
+            continue
+        result[path] = {
+            name for kind in SYMBOL_KINDS for name in value.get(kind, ())
+        }
+    return result
 
 
 # The cross-repository rule for `implementation.files`. A story of a multi-repo
@@ -3568,6 +3844,57 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
                         at + ".stories must be a non-empty array of staged idx"
                         " strings (NN or _audit)"
                     )
+
+    # R29 -- metadata.prototypeHandoffPaths's shape and path confinement.
+    # Appended AFTER R28 for R17's reason: a rule below the last one can only
+    # add lines after everything already recorded, so a tasks file without the
+    # key validates byte for byte as before. An ERROR, R21's reasoning held: the
+    # key has one writer (/aimi:plan Phase 4), so a malformed value is the
+    # plugin having written a record its reader cannot parse.
+    #
+    # PRESENCE decides, read with `in` the way R28 reads its key, so an explicit
+    # null is refused where R21 and R22 accept it: this key is a path list the
+    # executor is told to open, and a null that quietly passed would hand it
+    # nothing to open without saying so.
+    #
+    # Every entry is confined to .aimi/sources/ -- the one directory the kit
+    # import writes into -- through confined_spec_path's subtree argument and
+    # never a prefix test of this rule's own, so the realpath rule stays decided
+    # in one place and a symlink out of .aimi/sources/ is caught as well as a
+    # ../ path. archive-task's cleanup tuple is deliberately NOT extended with
+    # this key: a handoff is a kit document, and archiving a plan must leave it.
+    if isinstance(doc0_metadata, dict) and "prototypeHandoffPaths" in doc0_metadata:
+        handoff_paths = doc0_metadata["prototypeHandoffPaths"]
+        for problem in prototype_handoff_paths_shape_errors(handoff_paths):
+            errors.append(tasks_file + ": metadata.prototypeHandoffPaths" + problem)
+        if isinstance(handoff_paths, list):
+            for index, given in enumerate(handoff_paths):
+                if not isinstance(given, str) or not given:
+                    continue
+                _resolved, inside = confined_spec_path(project_root, given, ".aimi/sources")
+                if not inside:
+                    errors.append(
+                        tasks_file + ": metadata.prototypeHandoffPaths[" + str(index)
+                        + "] escapes .aimi/sources/: " + given
+                    )
+
+    # R30 -- implementation.symbols's shape. Appended AFTER R29 for R17's
+    # reason: a rule below the last one can only add lines after everything
+    # already recorded, so a tasks file without the key validates byte for byte
+    # as before. An ERROR, R24's reasoning held: the declaration is a record the
+    # wave check reads as the names a story claims inside a shared file, so a
+    # malformed one is a record its reader cannot use. Absent does nothing; a
+    # present key, an explicit null included, must be an object. One finding per
+    # bad entry, prefixed with the story id the way R24 builds it, and the
+    # finding text is implementation_symbol_findings', stated nowhere else.
+    for doc in docs:
+        for story in _stories(doc):
+            for finding in implementation_symbol_findings(story):
+                errors.append(
+                    tasks_file + ": "
+                    + jq_tostring(jq_index(story, "id", ".userStories[]"))
+                    + ": " + finding
+                )
 
     return errors
 
@@ -5710,12 +6037,20 @@ def op_validate_tasks(argv):
 # the key is deliberately absent from archive-task's cleanup tuple -- its
 # `path` always names an entry of metadata.prototypePaths, which archive-task
 # already confines and removes.
+#
+# metadata.prototypeHandoffPaths joined the tuple because the executor is
+# meant to read a kit's handoff document next to the prototype it describes,
+# and a key outside this projection reaches it as null. Each entry is already
+# confined to .aimi/sources/ by validate-tasks (R29) before a story runs. It is
+# deliberately absent from archive-task's cleanup tuple: a handoff belongs to
+# the imported kit, not to the plan, so archiving a plan leaves it on disk.
 STORY_CONTEXT_METADATA_KEYS = (
     "designBundle",
     "designTokens",
     "prototypePaths",
     "prototypeDropped",
     "prototypeSuperseded",
+    "prototypeHandoffPaths",
 )
 
 

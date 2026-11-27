@@ -135,6 +135,27 @@ def _stories(tasks):
     return [s for s in stories if isinstance(s, dict)]
 
 
+def is_screen_story(story):
+    """True for a story that changes a screen: verification.strategy "visual"
+    (with or without a url), or "test" with a verification.url that is a
+    /-prefixed path (not //) or a loopback URL. The one rule the usage-surface
+    fallback and the plan's Phase 4 web surface share."""
+    verification = story.get("verification") if isinstance(story, dict) else None
+    if not isinstance(verification, dict):
+        return False
+    strategy = verification.get("strategy")
+    if strategy == "visual":
+        return True
+    if strategy != "test":
+        return False
+    url = verification.get("url")
+    if not isinstance(url, str) or url == "":
+        return False
+    if url.startswith("/"):
+        return not url.startswith("//")
+    return U.is_loopback_origin(url)
+
+
 def _declared(metadata):
     """The declared usageSurfaces of one member: None when the key is absent,
     otherwise the list of well-formed entries (possibly empty)."""
@@ -242,14 +263,15 @@ def _answer(paths, anchor, label):
         if entries is not None:
             member_surfaces = entries
         elif not any_declared:
-            urls = [v for v in report.get("visual") or []
-                    if v.get("id") in done and isinstance(v.get("url"), str) and v.get("url") != ""]
+            urls = [(s["id"], s["verification"]["url"]) for s in _stories(tasks)
+                    if isinstance(s.get("id"), str) and s["id"] in done and is_screen_story(s)
+                    and isinstance(s["verification"].get("url"), str) and s["verification"]["url"] != ""]
             if urls:
                 fallback_used = True
                 member_surfaces = [{
                     "kind": "web",
-                    "stories": [v["id"] for v in urls],
-                    "url": urls[0]["url"],
+                    "stories": [sid for sid, _url in urls],
+                    "url": urls[0][1],
                     "source": "visual-stories",
                 }]
 
@@ -342,7 +364,7 @@ def _answer(paths, anchor, label):
             skip = "not-applicable"
             reason = "no completed story delivers a declared usage surface"
             if source == "none":
-                reason = "no usage surface declared and no completed visual story carries a url"
+                reason = "no usage surface declared and no completed screen story carries a web url"
     elif not recipe_recorded:
         skip, reason = "unable-to-evaluate", "no usage recipe recorded"
     else:

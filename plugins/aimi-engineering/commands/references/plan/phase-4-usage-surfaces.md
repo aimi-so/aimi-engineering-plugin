@@ -12,7 +12,7 @@ Read each merged tasks file with the Read tool and write `metadata.usageSurfaces
 
 A surface is derived only from what a story states, never from the feature description or a guess.
 
-- **`web`**: a story whose `verification.strategy` is `visual` and whose `verification.url` is a `/`-prefixed path (not `//`) or a loopback URL (host `localhost`, `127.0.0.1` or `[::1]`, any port). Reduce the url to its path and query: no origin, no fragment.
+- **`web`**: a story that changes a screen: `verification.strategy` is `visual`, or it is `test` and `verification.url` is a `/`-prefixed path (not `//`) or a loopback URL (host `localhost`, `127.0.0.1` or `[::1]`, any port). `is_screen_story` in `scripts/usage_validation.py` is the same rule, and a story with a url is the one the usage-validation fallback also recovers. It declares a `web` entry only when it carries such a url: a visual story with no url declares nothing. Reduce the url to its path and query: no origin, no fragment. An `api` story never declares one.
 - **`cli`**: one complete command a criterion quotes in a code span: an executable followed by its arguments, which the criterion says a person runs. A file name, a flag, an identifier or a template with placeholders is not a command. When in doubt, declare nothing.
 - A visual story whose url names a non-loopback origin is **not declared**. Name it in the phase's report line: `usage-surfaces: <US-id> visual url names a non-loopback origin, not declared`.
 

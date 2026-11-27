@@ -39,6 +39,18 @@ $AIMI_CLI bookkeeping-declared --project "$KEY"
 
 Keep each answer line verbatim for the spawn prompt. When the verb refuses (non-zero exit, a tracked or malformed config), surface its stderr line, render that key as `none` and continue the audit: a refused declaration never exempts a path.
 
+### Contending Staged Pairs
+
+The auditor has no CLI either, so the orchestrator hands it the staged pairs the wave check would refuse, computed by the rule `validate-wave-contention` later enforces. Before the spawn, run this exactly once over `RUN_DIR`:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI staging-contention --staging-dir "$RUN_DIR"
+```
+
+Keep the answer line, `{"pairs":[...]}`, verbatim for the spawn prompt. An answer with `"pairs":[]` renders as `none`. When the verb refuses (non-zero exit), surface its stderr, render the section as `unavailable` and continue the audit: a refused check is never read as no contention.
+
 ### Auditor Task Spawn
 
 First record what `audit-result.json` holds before the spawn. A retry runs with the Failure Fallback stub in place, and an Edit outline re-run with the previous stamped result, so a file present after the Task proves nothing on its own; a changed checksum does:
@@ -87,6 +99,10 @@ Task subagent_type="aimi-engineering:review:aimi-cross-story-auditor"
   Declared bookkeeping paths (one verbatim bookkeeping-declared answer line per project key;
   a key whose verb refused renders as 'none'; the whole section is 'none' when no key answered):
   [one line per key, or 'none']
+
+  Contending staged pairs (the verbatim staging-contention answer line; 'none' when it
+  answered with no pair; 'unavailable' when the verb refused):
+  [the answer line, 'none' or 'unavailable']
 
   Failed expansion idx values (do NOT emit patches targeting these):
   [comma-separated list of zero-padded idx strings that permanently failed expansion,

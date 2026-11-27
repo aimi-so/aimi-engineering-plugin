@@ -1742,6 +1742,7 @@ def _staging_story(title, deps=None):
             "files": ["src/x.ts"],
             "approach": "Implement it",
             "verify": "tsc --noEmit",
+            "symbols": {},
         },
     }
 
@@ -3958,3 +3959,99 @@ def test_outline_ref_in_description_on_an_unstaged_idx_is_refused_by_field(tmp_p
     proc, doc = _merge(tmp_path, files)
     assert proc.returncode == 1 and doc is None
     assert "US-002 description: outline:03" in proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# implementation.symbols: validate-staging reports it, story-merge refuses it
+# ---------------------------------------------------------------------------
+#
+# The rule is tasks.py's implementation_symbol_findings; these cases pin that
+# rail_and_path_findings carries it, so both verbs read one rule. A story that
+# simply lacks the key is a finding of the separate missing-declaration rule, which
+# validate-staging always reports and story-merge refuses only with --require-symbols.
+
+
+def _symbols_story(title, symbols="__absent__"):
+    story = _staging_story(title)
+    story["implementation"].pop("symbols", None)
+    if symbols != "__absent__":
+        story["implementation"]["symbols"] = symbols
+    return story
+
+
+def _symbols_validate_staging(tmp_path, files):
+    root = str(tmp_path)
+    staging = os.path.join(root, ".aimi", "stg")
+    os.makedirs(staging, exist_ok=True)
+    for name, value in files.items():
+        with open(os.path.join(staging, name), "w", encoding="utf-8") as handle:
+            handle.write(value if isinstance(value, str) else json.dumps(value))
+    return subprocess.run(
+        ["bash", CLI, "validate-staging", "--staging-dir", ".aimi/stg"],
+        cwd=root, capture_output=True, text=True, timeout=120,
+    )
+
+
+def test_implementation_symbols_validate_staging_reports_a_malformed_map_by_idx(tmp_path):
+    proc = _symbols_validate_staging(
+        tmp_path,
+        {
+            "01-a.json": _symbols_story("A", {}),
+            "02-b.json": _symbols_story("B", {"src/other.ts": {"creates": ["f"]}}),
+        },
+    )
+    assert proc.returncode == 1, proc.stderr
+    report = json.loads(proc.stdout)
+    assert list(report) == ["02"]
+    assert len(report["02"]) == 1
+    assert "implementation.symbols[src/other.ts]" in report["02"][0]
+    assert "is not an entry of implementation.files" in report["02"][0]
+
+
+def test_implementation_symbols_validate_staging_reports_a_missing_key_and_passes_a_valid_one(tmp_path):
+    # A keyless staged story now draws the missing-declaration finding; a valid
+    # map and `{}` do not. story-merge without --require-symbols still accepts it.
+    proc = _symbols_validate_staging(
+        tmp_path,
+        {
+            "01-a.json": _symbols_story("A"),
+            "02-b.json": _symbols_story("B", {"src/x.ts": {"creates": ["parse"], "edits": ["Foo.bar"]}}),
+            "03-c.json": _symbols_story("C", {}),
+        },
+    )
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    report = json.loads(proc.stdout)
+    assert list(report) == ["01"]
+    assert "implementation.symbols" in report["01"][0]
+
+
+def test_implementation_symbols_story_merge_refuses_and_writes_nothing(tmp_path):
+    files = {
+        "01-a.json": _symbols_story("A"),
+        "02-b.json": _symbols_story("B", {"src/x.ts": {"creates": []}}),
+    }
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 1 and doc is None
+    assert "Story US-002 (staged 02): implementation.symbols[src/x.ts]" in proc.stderr
+    assert "US-001" not in proc.stderr
+    assert not os.path.exists(os.path.join(str(tmp_path), ".aimi", "tasks", "out-tasks.json"))
+
+
+def test_implementation_symbols_story_merge_refuses_a_null_map(tmp_path):
+    files = {"01-a.json": _symbols_story("A", None)}
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 1 and doc is None
+    assert "implementation.symbols is not an object" in proc.stderr
+
+
+def test_implementation_symbols_a_valid_map_reaches_the_merged_tasks_unchanged(tmp_path):
+    declared = {"src/x.ts": {"creates": ["parse"], "edits": ["Foo.bar", "baz"]}}
+    files = {
+        "01-a.json": _symbols_story("A", declared),
+        "02-b.json": _symbols_story("B"),
+    }
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 0, proc.stderr
+    stories = _by_title(doc)
+    assert stories["A"]["implementation"]["symbols"] == declared
+    assert "symbols" not in stories["B"]["implementation"]

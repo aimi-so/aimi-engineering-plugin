@@ -31,7 +31,9 @@ def _story(**fields):
         "status": "pending",
         "dependsOn": [],
         "notes": "",
-        "implementation": {"files": ["src/x.ts"], "approach": "Implement it", "verify": "tsc --noEmit"},
+        "implementation": {
+            "files": ["src/x.ts"], "approach": "Implement it", "verify": "tsc --noEmit", "symbols": {},
+        },
     }
     story.update(fields)
     return story

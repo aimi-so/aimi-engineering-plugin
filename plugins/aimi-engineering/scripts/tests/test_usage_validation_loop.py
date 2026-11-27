@@ -65,6 +65,7 @@ def run_verdict(tmp_path, shell, phase_mode, accepted="", reproduced="", review=
         'AIMI_CLI="%s"\n' % cli
         + 'USAGE_ROUND="1"\nUSAGE_REQUIRED_FILE="/p/required.json"\nUSAGE_EVIDENCE_DIR="/p/ev"\n'
         + 'USAGE_PHASE_MODE="%s"\nUSAGE_FEATURE="feat"\nUSAGE_PHASE_ID="2"\nUSAGE_REVIEW="%s"\n' % (phase_mode, review)
+        + 'USAGE_TASKS_FILE="/p/.aimi/tasks/run-tasks.json"\n'
         + "USAGE_ACCEPTED=$(cat <<'E1'\n%s\nE1\n)\n" % accepted
         + "USAGE_REPRODUCED=$(cat <<'E2'\n%s\nE2\n)\n" % reproduced
         + "USAGE_MESSAGE=$(cat <<'E3'\nraw validator message\nE3\n)\n"
@@ -90,7 +91,9 @@ def test_verdict_block_phase_mode_prints_the_round_line_and_uses_repeatable_flag
 @pytest.mark.parametrize("shell", SHELLS)
 def test_verdict_block_flat_mode_has_no_feature_or_phase(tmp_path, shell):
     _, calls = run_verdict(tmp_path, shell, "false")
-    assert calls[0] == "write-review --kind usage-validation-r1"
+    # The run's own tasks file names the review, never the shared current-tasks
+    # pointer another session under the same .aimi/ may have moved.
+    assert calls[0] == "write-review --kind usage-validation-r1 --tasks-file /p/.aimi/tasks/run-tasks.json"
     assert "--accepted" not in calls[1] and "--reproduced" not in calls[1]
 
 
